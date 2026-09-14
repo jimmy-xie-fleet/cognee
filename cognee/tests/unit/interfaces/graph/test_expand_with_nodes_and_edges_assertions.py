@@ -693,6 +693,89 @@ def test_unresolved_reference_locator_is_kept_as_written():
     assert _by_statement_type(data_points_by_id)["denial"].responds_to == "Complaint ¶17"
 
 
+def _denial_answering_graph(allegation_id: str) -> _QualifiedGraph:
+    """A denial whose ``asserted_by`` names the allegation instead of a party."""
+    return _QualifiedGraph(
+        nodes=[
+            _QualifiedNode(
+                id=allegation_id,
+                name="Payment was late",
+                type="Allegation",
+                description="Jones alleges the payment was late",
+                statement_type="allegation",
+                polarity="positive",
+            ),
+            _QualifiedNode(
+                id="the-denial",
+                name="Payment was late",
+                type="Denial",
+                description="Smith denies the payment was late",
+                statement_type="denial",
+                polarity="negative",
+                asserted_by=allegation_id,
+                responds_to=allegation_id,
+            ),
+        ],
+        edges=[],
+    )
+
+
+def test_speaker_naming_another_assertion_is_stored_as_no_speaker():
+    # A speaker is a party. Storing "a1" would put an LLM token in an identity field and
+    # have the derived text read "Payment was late denies that Payment was late".
+    chunk = _make_chunk()
+    data_points_by_id, edges_by_identity = _construct([chunk], [_denial_answering_graph("a1")])
+
+    denial = _by_statement_type(data_points_by_id)["denial"]
+    assert denial.asserted_by is None
+    assert "asserted_by" not in _relationship_names(edges_by_identity)
+    # The cross-reference is still recorded, as the target assertion's stored id.
+    assert denial.responds_to == str(_by_statement_type(data_points_by_id)["allegation"].id)
+
+
+def test_assertion_id_does_not_depend_on_the_llms_local_numbering():
+    # Two extractions of one passage may number their nodes differently. The stored
+    # denial is the same statement either way, so it must be the same node.
+    first_chunk = _make_chunk()
+    second_chunk = _make_chunk()
+    second_chunk.id = first_chunk.id
+
+    first_points, _ = _construct([first_chunk], [_denial_answering_graph("a1")])
+    second_points, _ = _construct([second_chunk], [_denial_answering_graph("n9")])
+
+    assert (
+        _by_statement_type(first_points)["denial"].id
+        == _by_statement_type(second_points)["denial"].id
+    )
+
+
+def test_cross_reference_to_a_plain_entity_stores_that_entitys_name():
+    # responds_to kept the raw token while asserted_by and attributed_to stored the
+    # entity's name, so one assertion could name one party three different ways.
+    chunk = _make_chunk()
+    graph = _QualifiedGraph(
+        nodes=[
+            _person("n1", "Smith", "the defendant"),
+            _QualifiedNode(
+                id="n2",
+                name="Payment was late",
+                type="Denial",
+                description="Smith denies the payment was late",
+                statement_type="denial",
+                polarity="negative",
+                asserted_by="n1",
+                attributed_to="n1",
+                responds_to="n1",
+            ),
+        ],
+        edges=[],
+    )
+    data_points_by_id, _ = _construct([chunk], [graph])
+
+    denial = _assertions(data_points_by_id)[0]
+    assert denial.asserted_by == denial.attributed_to == denial.responds_to == "smith"
+
+
 def test_attribution_to_another_assertion_persists_that_assertions_id():
     chunk = _make_chunk()
     graph = _QualifiedGraph(

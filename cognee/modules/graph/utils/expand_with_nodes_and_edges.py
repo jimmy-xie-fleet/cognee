@@ -285,8 +285,7 @@ def _create_assertion(
     extracted_node: Node,
     entity_type: EntityType,
     data_chunk: DocumentChunk,
-    speaker_name: Optional[str],
-    attributed_name: Optional[str],
+    reference_names: dict[str, Optional[str]],
     occurrence: int,
 ) -> Assertion:
     """Build the Assertion data point. No explicit id: identity_fields derive it."""
@@ -299,8 +298,8 @@ def _create_assertion(
         importance_weight=data_chunk.importance_weight,
         statement_type=_statement_type_value(extracted_node),
         polarity=_polarity_value(extracted_node),
-        asserted_by=speaker_name,
-        attributed_to=attributed_name,
+        asserted_by=reference_names["asserted_by"],
+        attributed_to=reference_names["attributed_to"],
         applicable_time=getattr(extracted_node, "applicable_time", None),
         applies_from=getattr(extracted_node, "applies_from", None),
         applies_to=getattr(extracted_node, "applies_to", None),
@@ -310,7 +309,7 @@ def _create_assertion(
         scope=getattr(extracted_node, "scope", None),
         source_quote=source_quote,
         source_quote_verified=verify_source_quote(source_quote, getattr(data_chunk, "text", None)),
-        responds_to=getattr(extracted_node, "responds_to", None),
+        responds_to=reference_names["responds_to"],
         source_chunk_id=str(data_chunk.id),
         occurrence=occurrence,
     )
@@ -321,13 +320,14 @@ def _resolve_display_name(
     node_id_by_reference: dict[str, str],
     entities_by_extracted_node_id: dict[str, Entity],
 ) -> Optional[str]:
-    """The name an assertion should store for a speaker/attribution reference.
+    """The name an assertion should store for an attribution/response reference.
 
     A reference to an entity of this extraction becomes that entity's normalized name, so
-    the stored value matches the node the derived edge points at. Anything else — an
-    unknown party, or a reference to another assertion — is kept as written here; a
-    reference to another assertion is rewritten to that assertion's id afterwards, once
-    every assertion exists (``_repoint_assertion_references_at_resolved_ids``).
+    the stored value matches the node the derived edge points at. Anything else — a
+    locator naming no node ("Complaint ¶17"), or a reference to another assertion — is
+    kept as written here; a reference to another assertion is rewritten to that
+    assertion's id afterwards, once every assertion exists
+    (``_repoint_assertion_references_at_resolved_ids``).
     """
     resolved_node_id = _resolve_reference(value, node_id_by_reference)
     if resolved_node_id is not None:
@@ -338,6 +338,58 @@ def _resolve_display_name(
             return referenced_entity.name
 
     return value
+
+
+def _resolve_speaker_name(
+    value: Optional[str],
+    node_id_by_reference: dict[str, str],
+    entities_by_extracted_node_id: dict[str, Entity],
+) -> Optional[str]:
+    """The speaker an assertion should store, or None when no party was named.
+
+    ``asserted_by`` is an identity field, so whatever lands here decides the node's id.
+    An LLM's graph-local token ("n9") must therefore never reach it: it means nothing
+    outside the single response that invented it, it would move the node whenever the
+    extraction renumbers, and the derived edge would read "The payment was late denies
+    that the payment was late".
+
+    A speaker is a party. A reference that names another assertion is not one, so it
+    stores no speaker at all — unlike ``attributed_to``/``responds_to``, which point at
+    statements by design. A reference that names no node of the graph is free text the
+    passage supplied ("the applicant's counsel") and is kept: every token that does name
+    a node resolves here, and canonicalization nulls the references it drops nodes for,
+    so nothing id-shaped survives this branch.
+    """
+    resolved_node_id = _resolve_reference(value, node_id_by_reference)
+    if resolved_node_id is None:
+        return _strip_nonblank_text(value)
+
+    # Only non-assertion entities are indexed at this point, so a reference that resolves
+    # to nothing here named an assertion.
+    referenced_entity = entities_by_extracted_node_id.get(resolved_node_id)
+    return referenced_entity.name if referenced_entity is not None else None
+
+
+def _assertion_reference_names(
+    extracted_node: Node,
+    node_id_by_reference: dict[str, str],
+    entities_by_extracted_node_id: dict[str, Entity],
+) -> dict[str, Optional[str]]:
+    """What the assertion stores for each of its three reference fields."""
+    reference_names = {
+        "asserted_by": _resolve_speaker_name(
+            getattr(extracted_node, "asserted_by", None),
+            node_id_by_reference,
+            entities_by_extracted_node_id,
+        )
+    }
+    for field_name in ("attributed_to", "responds_to"):
+        reference_names[field_name] = _resolve_display_name(
+            getattr(extracted_node, field_name, None),
+            node_id_by_reference,
+            entities_by_extracted_node_id,
+        )
+    return reference_names
 
 
 def _repoint_assertion_references_at_resolved_ids(
@@ -409,18 +461,11 @@ def _convert_extracted_nodes_to_data_points(
         entities_by_extracted_node_id[extracted_node.id] = entity
         _link_chunk_to_entity(data_chunk, extracted_node, entity)
 
-    # Resolved before any assertion is indexed, so a reference can only name an entity.
-    speaker_names = {
-        node.id: _resolve_display_name(
-            getattr(node, "asserted_by", None),
-            node_id_by_reference,
-            entities_by_extracted_node_id,
-        )
-        for node in assertion_nodes
-    }
-    attributed_names = {
-        node.id: _resolve_display_name(
-            getattr(node, "attributed_to", None),
+    # Resolved before any assertion is indexed, so a reference resolving to nothing here
+    # named an assertion rather than an entity.
+    reference_names_by_extracted_node_id = {
+        node.id: _assertion_reference_names(
+            node,
             node_id_by_reference,
             entities_by_extracted_node_id,
         )
@@ -428,7 +473,10 @@ def _convert_extracted_nodes_to_data_points(
     }
     occurrence_by_extracted_node_id = _assertion_occurrences(
         assertion_nodes,
-        speaker_names,
+        {
+            node_id: reference_names["asserted_by"]
+            for node_id, reference_names in reference_names_by_extracted_node_id.items()
+        },
         str(data_chunk.id),
     )
 
@@ -442,8 +490,7 @@ def _convert_extracted_nodes_to_data_points(
             extracted_node,
             entity_type,
             data_chunk,
-            speaker_names[extracted_node.id],
-            attributed_names[extracted_node.id],
+            reference_names_by_extracted_node_id[extracted_node.id],
             occurrence_by_extracted_node_id[extracted_node.id],
         )
         # An identity this construction already produced (the same chunk extracted twice,
@@ -546,6 +593,14 @@ def _derive_assertion_edges(
             if target_node_id is None or target_node_id == extracted_node.id:
                 continue
 
+            target_node = nodes_by_extracted_id.get(target_node_id)
+            if relationship_name == "asserted_by" and (
+                target_node is None or is_assertion_node(target_node)
+            ):
+                # A speaker is a party, and no speaker was stored for a reference naming
+                # another assertion (see _resolve_speaker_name), so no edge may claim one.
+                continue
+
             derived_edges.append(
                 KGEdge(
                     source_node_id=extracted_node.id,
@@ -554,7 +609,7 @@ def _derive_assertion_edges(
                     description=_derived_edge_description(
                         extracted_node,
                         relationship_name,
-                        nodes_by_extracted_id.get(target_node_id),
+                        target_node,
                     ),
                 )
             )
