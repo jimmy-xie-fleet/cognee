@@ -22,8 +22,9 @@ class LegalNode(Node):
     name: str = Field(
         default="",
         description=(
-            "The underlying proposition phrased affirmatively as one declarative sentence; "
-            "no negation words, no speech-act verbs."
+            "For assertion nodes: the underlying proposition phrased affirmatively as one "
+            "declarative sentence; no negation words, no speech-act verbs. For entity "
+            "nodes: the most complete name in the passage."
         ),
     )
     statement_type: Optional[StatementType] = Field(

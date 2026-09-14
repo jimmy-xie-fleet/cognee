@@ -102,8 +102,9 @@ class TestSchema:
         legal_node_def = defs["LegalNode"]
         properties = legal_node_def["properties"]
         assert properties["name"]["description"] == (
-            "The underlying proposition phrased affirmatively as one declarative "
-            "sentence; no negation words, no speech-act verbs."
+            "For assertion nodes: the underlying proposition phrased affirmatively as one "
+            "declarative sentence; no negation words, no speech-act verbs. For entity "
+            "nodes: the most complete name in the passage."
         )
         assert properties["statement_type"]["description"] == (
             "Set ONLY for assertion nodes: the speech act (allegation, denial, ...), not "
@@ -175,6 +176,18 @@ class TestSamplePayload:
                     "polarity": "negative",
                     "asserted_by": "okafor",
                 },
+                {
+                    # Denial of a negated allegation: the denial's stance is positive
+                    # because it affirms the (affirmatively phrased) proposition.
+                    "id": "answer-p19-denial",
+                    "name": "Meridian repaired the roof after the March 2022 storm.",
+                    "type": "Denial",
+                    "description": "Meridian denies that it never repaired the storm damage.",
+                    "statement_type": "denial",
+                    "polarity": "positive",
+                    "asserted_by": "meridian",
+                    "responds_to": "Complaint ¶19",
+                },
             ],
             "edges": [
                 {
@@ -207,6 +220,12 @@ class TestSamplePayload:
         assert denial.responds_to == "Complaint ¶18"
         # And polarity is independent of the speech act: an allegation can be negative.
         assert by_id["complaint-p19"].polarity == Polarity.NEGATIVE
+        # A denial's polarity follows the speaker's stance, not the speech act: denying
+        # a negated allegation ("never repaired") is a denial with positive polarity.
+        denial_of_negated_allegation = by_id["answer-p19-denial"]
+        assert denial_of_negated_allegation.name == by_id["complaint-p19"].name
+        assert denial_of_negated_allegation.statement_type == "denial"
+        assert denial_of_negated_allegation.polarity == Polarity.POSITIVE
 
 
 class TestPrompt:
@@ -229,6 +248,18 @@ class TestPrompt:
         prompt = load_legal_extraction_prompt()
         for statement_type in CAPITALIZED_STATEMENT_TYPES:
             assert statement_type in prompt
+
+    def test_prompt_does_not_claim_denial_always_negative(self):
+        prompt = load_legal_extraction_prompt()
+        assert "always carries polarity=negative" not in prompt
+        assert "and polarity=negative" not in prompt
+
+    def test_prompt_contains_negated_statement_example(self):
+        prompt = load_legal_extraction_prompt()
+        assert (
+            'name "The audit identified falsified entries", statement_type statement, '
+            "polarity negative" in prompt
+        )
 
 
 class TestForbiddenFieldNames:
