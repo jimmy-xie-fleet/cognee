@@ -92,10 +92,17 @@ def verify_source_quote(quote: Optional[str], text: Any) -> bool:
     """True when `quote` appears in `text` after normalization. Never raises.
 
     Normalization: NFKC, curly quotes/apostrophes → straight, all whitespace runs → one space,
-    case-insensitive. Non-string `text` or empty/None quote → False.
+    case-insensitive. Non-string `text` or a quote that is None, empty, or blank → False.
+
+    Blankness is decided on the normalized value, not the raw one: a whitespace-only quote is
+    truthy but normalizes to "", which is a substring of every text, so accepting it would
+    verify a claim against no source passage at all.
     """
-    if not quote or not isinstance(quote, str):
+    if not isinstance(quote, str) or not isinstance(text, str):
         return False
-    if not isinstance(text, str):
+
+    normalized_quote = _normalize(quote)
+    if not normalized_quote:
         return False
-    return _normalize(quote) in _normalize(text)
+
+    return normalized_quote in _normalize(text)

@@ -136,6 +136,18 @@ class TestVerifySourceQuote:
     def test_empty_quote_returns_false(self):
         assert verify_source_quote("", "some text") is False
 
+    def test_whitespace_only_quote_returns_false(self):
+        # A blank quote normalizes to "", which is a substring of every text: treating
+        # that as a match would persist source_quote_verified=True with no passage.
+        assert verify_source_quote("\n\t", "some text") is False
+
+    def test_spaces_only_quote_returns_false(self):
+        assert verify_source_quote("   ", "some text") is False
+
+    def test_non_breaking_space_only_quote_returns_false(self):
+        # NFKC folds the non-breaking space to a plain space, so this is blank too.
+        assert verify_source_quote("\u00a0\u00a0", "some text") is False
+
     def test_magicmock_text_returns_false(self):
         assert verify_source_quote("hello", MagicMock()) is False
 
