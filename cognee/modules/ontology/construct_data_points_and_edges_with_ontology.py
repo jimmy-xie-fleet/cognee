@@ -7,7 +7,10 @@ from cognee.infrastructure.engine.models.Edge import Edge
 from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.engine.models import Entity, EntityType
 from cognee.modules.engine.utils import generate_edge_name, generate_node_name
-from cognee.modules.graph.utils.expand_with_nodes_and_edges import construct_data_points_and_edges
+from cognee.modules.graph.utils.expand_with_nodes_and_edges import (
+    construct_data_points_and_edges,
+    is_assertion_node,
+)
 from cognee.modules.ontology.base_ontology_resolver import BaseOntologyResolver
 from cognee.modules.ontology.exceptions import EmptyOntologyInStrictModeError
 from cognee.modules.ontology.models import AttachedOntologyNode
@@ -102,10 +105,15 @@ def _find_ontology_matches_for_extracted_graphs(
             continue
 
         for node in extracted_graph.nodes:
-            for node_category, extracted_name in (
-                (_ONTOLOGY_CLASS_CATEGORY, node.type),
-                (_ONTOLOGY_INDIVIDUAL_CATEGORY, node.name),
-            ):
+            lookup_categories = (
+                ((_ONTOLOGY_CLASS_CATEGORY, node.type),)
+                if is_assertion_node(node)
+                else (
+                    (_ONTOLOGY_CLASS_CATEGORY, node.type),
+                    (_ONTOLOGY_INDIVIDUAL_CATEGORY, node.name),
+                )
+            )
+            for node_category, extracted_name in lookup_categories:
                 normalized_extracted_name = generate_node_name(extracted_name)
                 lookup_key = (node_category, normalized_extracted_name)
                 if lookup_key in ontology_match_lookup:
@@ -142,6 +150,10 @@ def _canonicalize_extracted_graph(
     entity with a recognized type survives. Nodes with neither match are dropped along
     with their edges. There is no domain/range/cardinality/disjointness reasoning, and
     relationship names are not checked against the ontology.
+
+    Assertion nodes are grounded by type only; their names are claim text. An assertion's
+    name is never matched, renamed, or collapsed against an ontology individual — in
+    strict mode it survives iff its type matched a class.
     """
     extracted_node_ids: set[str] = set()
     for node in extracted_graph.nodes:
@@ -163,10 +175,14 @@ def _canonicalize_extracted_graph(
         if entity_type_match is not None:
             node.type = entity_type_match.canonical_name
 
-        entity_match = _get_ontology_match(
-            ontology_match_lookup,
-            _ONTOLOGY_INDIVIDUAL_CATEGORY,
-            node.name,
+        entity_match = (
+            None
+            if is_assertion_node(node)
+            else _get_ontology_match(
+                ontology_match_lookup,
+                _ONTOLOGY_INDIVIDUAL_CATEGORY,
+                node.name,
+            )
         )
         if entity_match is None:
             if strict and entity_type_match is None:
