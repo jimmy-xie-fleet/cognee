@@ -66,12 +66,27 @@ omitted polarity is stored as unknown, never read as agreement. For example:
 - the Answer's denial of that allegation → the same name, statement_type denial, polarity positive;
 - a bare "17. Denied." with no proposition in the passage → name "The allegations of Paragraph 17 of the Complaint are true", statement_type denial, polarity negative;
 - a statement "the audit identified no falsified entries" → name "The audit identified falsified entries", statement_type statement, polarity negative;
+- testimony "the supplied record did not support a land-value conclusion" → name "The supplied record supported a land-value conclusion", statement_type testimony, polarity negative;
+- an opinion "the designation cannot support condemnation" → name "The designation supports condemnation", statement_type opinion, polarity negative.
+
+Before you emit an assertion node, re-read its `name`. If the main verb is still negated
+("did not", "does not", "cannot", "never", "failed to", "no <noun>"), strip that negation from
+`name` and set `polarity` to negative. A negated `name` carrying positive polarity is always
+wrong: it says the speaker affirms the negation of what they actually said. The negation lives
+in `polarity`, never in both. A negation inside a reported clause you are not asserting ("X
+instructed Y not to Z") stays where it is; only the proposition's own main verb moves.
 
 `asserted_by` is the id of the speaker node (pleader, deponent, author, board).
 `attributed_to` is used when reporting another's opinion.
 Date roles: `report_date` (when stated/signed/filed) vs `applicable_time` (when the claimed fact
-holds) vs `applies_from`/`applies_to` (periods). Also set `precision`, `scope`, `conditions`,
-`source_quote` verbatim, and `responds_to`.
+holds) vs `applies_from`/`applies_to` (periods). Also set `precision`, `scope`, `conditions`
+and `responds_to`.
+`source_quote` is ONE contiguous span copied character for character from the passage: keep its
+wording, punctuation, capitalisation, speaker prefixes and line breaks exactly as they appear.
+Never join separated text with "..." or "…", never abridge the middle, never tidy a transcript's
+Q/A lines, and never end with a trailing ellipsis. If no single span carries the whole claim,
+quote the one sentence that supports it best and leave the rest to `description`. A quote that
+cannot be found verbatim in the passage is recorded as unverified evidence.
 
 # 3. Edges
 
