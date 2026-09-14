@@ -799,19 +799,25 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   `Entity_name`.
 - **Explicit kwargs, no env var** — there is no global switch; every call that wants legal
   extraction must splat `legal_profile()` in.
-- Recommend `self_improvement=False` until the `improve()`/`memify()` enrichment paths are made
-  assertion-aware: they are safe to run — nothing is corrupted — but they simply skip
-  assertions, because their tasks filter on `type == "Entity"` and an `Assertion` node's type
-  is `"Assertion"`.
+- **`improve()` covers assertions**: its default enrichment streams every triplet straight from
+  the graph, so assertion triplets are embedded and indexed like any other node. Only the
+  opt-in memify consolidation pipelines (`consolidate_entities`, `cross_connect_entities`)
+  filter on `type == "Entity"`, and those skip assertions.
 - **Limitations**: fuzzy grounding runs at a 0.9 cutoff, which is sensitive to pluralization —
   a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
   enum-constrained `statement_type` still drives the assertion property, so only the OWL `is_a`
   link is lost; speaker context is resolved per chunk, not across the whole document;
   `HYBRID_COMPLETION` searches `Entity_name` only, so it misses assertions unless paired with a
   search type that also queries `Assertion_name`; relationship names (e.g. `asserted_by`,
-  `supersedes`) are not ontology-grounded, only node types are; do not combine with
-  `temporal_cognify=True`, which ignores `custom_prompt`/`graph_model` and would silently drop
-  the profile.
+  `supersedes`) are not ontology-grounded, only node types are; `polarity` and
+  `statement_type` are not projected into retrieval contexts today — the stance reaches a
+  completion through derived-edge text and descriptions, not as fields; `update()` takes
+  `graph_model`/`custom_prompt` but has no `config` or `chunk_size` parameter, so editing a
+  document ingested with the profile re-extracts it without the ontology and at the default
+  chunk size; `remember(session_id=…)` rejects the profile outright (session memory is bridged
+  into the graph by `improve()`, which cognifies with the default extraction); do not combine
+  with `temporal_cognify=True`, which ignores `custom_prompt`/`graph_model` and would silently
+  drop the profile.
 
 ### Skills (Procedural Memory)
 Dataset-scoped `SKILL.md` playbooks agents can discover, load on demand, execute, and improve from run history.
