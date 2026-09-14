@@ -8,6 +8,9 @@ from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.engine.models import Entity, EntityType
 from cognee.modules.engine.utils import generate_edge_name, generate_node_name
 from cognee.modules.graph.utils.expand_with_nodes_and_edges import (
+    _ASSERTION_REFERENCE_FIELDS,
+    _node_id_by_reference,
+    _resolve_reference,
     construct_data_points_and_edges,
     is_assertion_node,
 )
@@ -138,6 +141,59 @@ def _get_ontology_match(
     return ontology_match_lookup.get((node_category, generate_node_name(extracted_name)))
 
 
+_ASSERTION_REFERENCE_FIELD_NAMES = tuple(
+    field_name for field_name, _relationship_name in _ASSERTION_REFERENCE_FIELDS
+)
+
+
+def _pin_assertion_references_to_node_ids(extracted_graph: KnowledgeGraph) -> None:
+    """Rewrite every assertion reference that names a node to that node's id.
+
+    Canonicalization renames nodes onto their ontology individual and collapses
+    duplicates onto one survivor, so a reference held as a name ("Smith Co") stops
+    resolving the moment its target is renamed. Resolving against the graph as extracted
+    pins each reference to a graph-local id, which the collapse map then keeps pointing
+    at whichever node survives. References that name no node — locators like
+    "Complaint ¶17" — are left exactly as they are.
+    """
+    node_id_by_reference = _node_id_by_reference(extracted_graph)
+    for node in extracted_graph.nodes:
+        if not is_assertion_node(node):
+            continue
+
+        for field_name in _ASSERTION_REFERENCE_FIELD_NAMES:
+            if not hasattr(node, field_name):
+                continue
+
+            target_node_id = _resolve_reference(getattr(node, field_name), node_id_by_reference)
+            if target_node_id is not None:
+                setattr(node, field_name, target_node_id)
+
+
+def _repoint_assertion_references_at_surviving_nodes(
+    retained_nodes: list[Node],
+    surviving_node_id_by_collapsed_node_id: dict[str, str],
+    dropped_node_ids: set[str],
+) -> None:
+    """Follow collapsed references to the survivor and drop references to dropped nodes.
+
+    A reference to a node this graph no longer holds names nothing. Left in place it
+    would reach storage as an LLM token — in ``asserted_by``, an identity field, so the
+    node's id would depend on it — and derive an edge pointing at no node at all.
+    """
+    for node in retained_nodes:
+        if not is_assertion_node(node):
+            continue
+
+        for field_name in _ASSERTION_REFERENCE_FIELD_NAMES:
+            reference = getattr(node, field_name, None)
+            if reference is None:
+                continue
+
+            reference = surviving_node_id_by_collapsed_node_id.get(reference, reference)
+            setattr(node, field_name, None if reference in dropped_node_ids else reference)
+
+
 def _canonicalize_extracted_graph(
     extracted_graph: KnowledgeGraph,
     ontology_match_lookup: OntologyMatchLookup,
@@ -160,6 +216,9 @@ def _canonicalize_extracted_graph(
         if node.id in extracted_node_ids:
             raise ValueError(f"Duplicate node id in extracted graph: {node.id}")
         extracted_node_ids.add(node.id)
+
+    # Resolved against the graph as extracted, before any node is renamed or collapsed.
+    _pin_assertion_references_to_node_ids(extracted_graph)
 
     retained_nodes: list[Node] = []
     dropped_node_ids: set[str] = set()
@@ -210,6 +269,12 @@ def _canonicalize_extracted_graph(
     extracted_graph.nodes = retained_nodes
     if not surviving_node_id_by_collapsed_node_id and not dropped_node_ids:
         return drop_counts
+
+    _repoint_assertion_references_at_surviving_nodes(
+        retained_nodes,
+        surviving_node_id_by_collapsed_node_id,
+        dropped_node_ids,
+    )
 
     retained_edges = []
     for edge in extracted_graph.edges:

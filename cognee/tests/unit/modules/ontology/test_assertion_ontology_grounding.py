@@ -3,10 +3,15 @@ renamed, or collapsed against ontology individuals."""
 
 from typing import Optional
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 from cognee.domains.legal import LegalKnowledgeGraph, LegalNode
+from cognee.infrastructure.databases.provenance import EdgeIdentity
 from cognee.modules.engine.models import Entity, EntityType
 from cognee.modules.engine.models.Assertion import Assertion
+from cognee.modules.graph.utils.expand_with_nodes_and_edges import (
+    construct_data_points_and_edges,
+)
 from cognee.modules.ontology.base_ontology_resolver import BaseOntologyResolver
 from cognee.modules.ontology.construct_data_points_and_edges_with_ontology import (
     canonicalize_extracted_graphs,
@@ -18,9 +23,12 @@ from cognee.shared.data_models import KnowledgeGraph, Node
 
 
 class _QualifiedNode(Node):
-    """A node carrying the legal-profile assertion qualifier used by ``is_assertion_node``."""
+    """A node carrying the legal-profile assertion qualifiers ``is_assertion_node`` reads."""
 
     statement_type: Optional[str] = None
+    asserted_by: Optional[str] = None
+    attributed_to: Optional[str] = None
+    responds_to: Optional[str] = None
 
 
 class _QualifiedGraph(KnowledgeGraph):
@@ -53,11 +61,15 @@ class _StubResolver(BaseOntologyResolver):
         return [], [], None
 
 
-def _make_chunk():
+def _make_chunk(chunk_id=None):
     chunk = MagicMock()
+    chunk.id = chunk_id or uuid4()
+    chunk.text = "Smith denies the payment was late."
     chunk.importance_weight = 0.5
     chunk.belongs_to_set = []
     chunk.contains = None
+    chunk._produced_edge_identities = []
+    chunk._provenance_edges = []
     return chunk
 
 
@@ -170,6 +182,132 @@ def test_canonicalizing_a_type_onto_a_statement_word_keeps_a_plain_entity():
     assert len(entities) == 1
     assert type(entities[0]) is Entity
     assert entities[0].id == Entity.id_for("Meridian general ledger")
+
+
+class _SpeakerResolver(BaseOntologyResolver):
+    """Grounds the parties too: "Smith" keeps its name, "Smith Co" is renamed."""
+
+    CLASSES = {"denial": "denial", "person": "person"}
+    INDIVIDUALS = {"smith": "smith", "smith co": "smith_holdings_llc"}
+
+    def build_lookup(self) -> None:
+        return None
+
+    def refresh_lookup(self) -> None:
+        return None
+
+    def find_closest_match(self, name: str, category: str):
+        return None
+
+    def get_subgraph(self, node_name: str, node_type: str = "individuals", directed: bool = True):
+        canonical_names = self.CLASSES if node_type == "classes" else self.INDIVIDUALS
+        canonical_name = canonical_names.get(node_name)
+        if canonical_name is None:
+            return [], [], None
+
+        root = AttachedOntologyNode(f"https://example.test/ontology#{canonical_name}", node_type)
+        return [root], [], root
+
+
+def _speaker(node_id: str, name: str) -> _QualifiedNode:
+    return _QualifiedNode(id=node_id, name=name, type="Person", description="the defendant")
+
+
+def _denial(asserted_by: str) -> _QualifiedNode:
+    return _QualifiedNode(
+        id="the-denial",
+        name="Payment was late",
+        type="Denial",
+        description="Smith denies the payment was late",
+        statement_type="denial",
+        asserted_by=asserted_by,
+    )
+
+
+def _asserted_by_edge(edges_by_identity, assertion, speaker_name):
+    return edges_by_identity.get(
+        EdgeIdentity(
+            source_id=str(assertion.id),
+            target_id=str(Entity.id_for(speaker_name)),
+            relationship_name="asserted_by",
+        )
+    )
+
+
+def _only_assertion(data_points_by_id) -> Assertion:
+    assertions = [point for point in data_points_by_id.values() if isinstance(point, Assertion)]
+    assert len(assertions) == 1
+    return assertions[0]
+
+
+def test_speaker_collapsed_onto_a_duplicate_follows_the_survivor():
+    # Two mentions of one party collapse onto one node. The assertion named the mention
+    # that disappeared, so its speaker has to follow the survivor instead of becoming a
+    # dangling token — and the stored assertion must be the same node as without an
+    # ontology, since it is the same statement by the same party.
+    chunk = _make_chunk()
+    graph = _QualifiedGraph(
+        nodes=[_speaker("n1", "Smith"), _speaker("n9", "Smith"), _denial("n9")],
+        edges=[],
+    )
+
+    data_points_by_id, edges_by_identity = construct_data_points_and_edges_with_ontology(
+        [chunk],
+        [graph],
+        _SpeakerResolver(),
+    )
+
+    assertion = _only_assertion(data_points_by_id)
+    assert assertion.asserted_by == "smith"
+    assert _asserted_by_edge(edges_by_identity, assertion, "smith") is not None
+
+    plain_points, _ = construct_data_points_and_edges(
+        [_make_chunk(chunk.id)],
+        [_QualifiedGraph(nodes=[_speaker("n1", "Smith"), _speaker("n9", "Smith"), _denial("n9")])],
+    )
+    assert assertion.id == _only_assertion(plain_points).id
+
+
+def test_speaker_referenced_by_its_pre_ontology_name_still_resolves():
+    # The reference is a name, and canonicalization renames the node it points at.
+    chunk = _make_chunk()
+    graph = _QualifiedGraph(nodes=[_speaker("n1", "Smith Co"), _denial("Smith Co")], edges=[])
+
+    data_points_by_id, edges_by_identity = construct_data_points_and_edges_with_ontology(
+        [chunk],
+        [graph],
+        _SpeakerResolver(),
+    )
+
+    assertion = _only_assertion(data_points_by_id)
+    assert assertion.asserted_by == "smith_holdings_llc"
+    assert _asserted_by_edge(edges_by_identity, assertion, "smith_holdings_llc") is not None
+
+
+def test_speaker_dropped_in_strict_mode_leaves_no_speaker_and_no_edge():
+    # The party has no ontology grounding at all, so strict mode drops it. Keeping its
+    # id would store "n1" in an identity field and point an edge at nothing.
+    chunk = _make_chunk()
+    graph = _QualifiedGraph(
+        nodes=[
+            _QualifiedNode(id="n1", name="Nobody", type="MysteryType", description="unknown"),
+            _denial("n1"),
+        ],
+        edges=[],
+    )
+
+    data_points_by_id, edges_by_identity = construct_data_points_and_edges_with_ontology(
+        [chunk],
+        [graph],
+        _SpeakerResolver(),
+        ontology_mode="strict",
+    )
+
+    assertion = _only_assertion(data_points_by_id)
+    assert assertion.asserted_by is None
+    assert "asserted_by" not in [
+        edge_identity.relationship_name for edge_identity in edges_by_identity
+    ]
 
 
 def test_get_subgraph_called_once_per_distinct_key_and_never_for_assertion_individuals():
