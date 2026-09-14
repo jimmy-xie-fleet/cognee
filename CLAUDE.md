@@ -280,6 +280,7 @@ Key files:
 - **DataPoint** - Base class for all graph nodes (versioned, with metadata)
 - **Edge** - Graph relationships (source, target, relationship type)
 - **Triplet** - (Subject, Predicate, Object) representation
+- **Assertion** - An Entity subclass for one source-attributed statement occurrence (speaker, statement type, polarity, dates, quote); never merged across speakers, types or chunks
 
 #### Graph Models (`cognee/shared/data_models.py`)
 - **KnowledgeGraph** - Container for nodes and edges
@@ -767,6 +768,43 @@ Opt-in LLM check that runs as the last `cognify()` task (default **off**). After
 - **Tuning** (env): `CONTRADICTION_CONFIDENCE_THRESHOLD` (default 0.5, minimum confidence to flag), `CONTRADICTION_MAX_FACTS` (default 500, cap on facts per LLM call).
 - **Applies to `remember()` too** — and to session memory bridged back by `improve()` — since those build their graphs through `cognify()`. The exception is `remember(content_type="code")`, which runs the separate code-graph pipeline.
 - **Scope / limitations**: only the 1-hop neighbourhood of the touched entities is compared; structural edges (`contains`, `is_part_of`, `made_from`, `exists_in`, `contradicts`) and edges with an unnamed endpoint are skipped; the temporal cognify path is not covered.
+
+### Legal Extraction Profile
+An opt-in `graph_model` + `custom_prompt` + ontology bundle for extracting attributed legal
+statements (allegations, denials, admissions, testimony, opinions, findings, lease terms, …)
+instead of plain entity/relationship pairs. It is a domain package, not a core feature: nothing
+in `cognee/domains/` is imported by core code, and nothing in this profile runs unless a caller
+opts in.
+
+```python
+from cognee.domains.legal import legal_profile
+
+await cognee.remember(text, dataset_name="case_123", self_improvement=False, **legal_profile())
+```
+
+`legal_profile()` returns `graph_model` (`LegalKnowledgeGraph`), `custom_prompt` (the legal
+extraction prompt), `chunk_size`, and `config` (the OWL ontology resolver, fuzzy-matched,
+`ontology_mode="annotate"` by default) — splat it into `remember()` or `cognify()`. Everything
+lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGraph`),
+`profile.py` (`legal_profile()`, `legal_ontology_resolver()`), `prompt.py`
+(`load_legal_extraction_prompt()`), `ontology/legal.owl`, and `prompts/legal_extraction_system.txt`.
+
+- **Identity rule**: each statement occurrence becomes its own `Assertion` node (an `Entity`
+  subclass), keyed on name + chunk + statement type + speaker + occurrence — an allegation and
+  the denial answering it are always two nodes, even with identical wording, and are never
+  merged across speakers, statement types, or chunks.
+- **Search**: assertions are embedded in the `Assertion_name` vector collection, separate from
+  `Entity_name`.
+- **Explicit kwargs, no env var** — there is no global switch; every call that wants legal
+  extraction must splat `legal_profile()` in.
+- Recommend `self_improvement=False` until the `improve()`/`memify()` enrichment paths are made
+  assertion-aware.
+- **Limitations**: speaker context is resolved per chunk, not across the whole document;
+  `HYBRID_COMPLETION` searches `Entity_name` only, so it misses assertions unless paired with a
+  search type that also queries `Assertion_name`; relationship names (e.g. `asserted_by`,
+  `supersedes`) are not ontology-grounded, only node types are; do not combine with
+  `temporal_cognify=True`, which ignores `custom_prompt`/`graph_model` and would silently drop
+  the profile.
 
 ### Skills (Procedural Memory)
 Dataset-scoped `SKILL.md` playbooks agents can discover, load on demand, execute, and improve from run history.
