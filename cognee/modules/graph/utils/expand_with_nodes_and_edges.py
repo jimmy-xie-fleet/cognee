@@ -202,19 +202,28 @@ def _link_chunk_to_entity(
 def _assertion_occurrences(
     assertion_nodes: list[Node],
     speaker_name_by_node_id: dict[str, Optional[str]],
+    source_chunk_id: str,
 ) -> dict[str, int]:
     """Rank assertions that would otherwise be the same statement, so none is lost.
 
     The same speaker making the same statement twice in one chunk is two occurrences, not
     one node overwriting the other. Ranking is deterministic (description, then graph-local
     id), so re-running the same extraction yields the same ids.
+
+    Nodes are grouped by the id they would share if they were one occurrence, exactly the
+    way the same-name entity grouper keys on ``Entity.id_for``. Grouping on the raw field
+    values instead would miss every pair the identity normalizer folds together — two
+    speakers written "The Company" and "the company" would be ranked apart yet still land
+    on one id, silently dropping one of them.
     """
-    nodes_by_occurrence_key: dict[tuple[str, str, str], list[Node]] = {}
+    nodes_by_occurrence_key: dict[UUID, list[Node]] = {}
     for node in assertion_nodes:
-        occurrence_key = (
+        occurrence_key = Assertion.id_for(
             generate_node_name(node.name),
+            source_chunk_id,
             _statement_type_value(node),
-            speaker_name_by_node_id.get(node.id) or "",
+            speaker_name_by_node_id.get(node.id),
+            0,  # Stands in for the occurrence this grouping is about to assign.
         )
         nodes_by_occurrence_key.setdefault(occurrence_key, []).append(node)
 
@@ -339,7 +348,11 @@ def _convert_extracted_nodes_to_data_points(
         )
         for node in assertion_nodes
     }
-    occurrence_by_extracted_node_id = _assertion_occurrences(assertion_nodes, speaker_names)
+    occurrence_by_extracted_node_id = _assertion_occurrences(
+        assertion_nodes,
+        speaker_names,
+        str(data_chunk.id),
+    )
 
     for extracted_node in assertion_nodes:
         entity_type = _get_or_create_entity_type(
@@ -355,7 +368,15 @@ def _convert_extracted_nodes_to_data_points(
             attributed_names[extracted_node.id],
             occurrence_by_extracted_node_id[extracted_node.id],
         )
-        data_points_by_id[str(assertion.id)] = assertion
+        # An identity this construction already produced (the same chunk extracted twice,
+        # say) is reused rather than overwritten, like _get_or_create_entity: the chunk
+        # must link to the object that is actually stored, never to an orphan.
+        assertion_key = str(assertion.id)
+        existing_data_point = data_points_by_id.get(assertion_key)
+        if isinstance(existing_data_point, Assertion):
+            assertion = existing_data_point
+        else:
+            data_points_by_id[assertion_key] = assertion
         entities_by_extracted_node_id[extracted_node.id] = assertion
         _link_chunk_to_entity(data_chunk, extracted_node, assertion)
 

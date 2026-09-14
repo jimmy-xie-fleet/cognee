@@ -194,6 +194,54 @@ def test_repeated_statement_in_one_chunk_gets_distinct_occurrences():
     assert by_description["Repeated at the hearing"].occurrence == 2
 
 
+def _twin_allegations(first_name: str, second_name: str, first_speaker, second_speaker):
+    return _QualifiedGraph(
+        nodes=[
+            _QualifiedNode(
+                id="n1",
+                name=first_name,
+                type="Allegation",
+                description="Alleged in the complaint",
+                statement_type="allegation",
+                asserted_by=first_speaker,
+            ),
+            _QualifiedNode(
+                id="n2",
+                name=second_name,
+                type="Allegation",
+                description="Repeated at the hearing",
+                statement_type="allegation",
+                asserted_by=second_speaker,
+            ),
+        ],
+        edges=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "graph",
+    [
+        # Unresolved speakers the identity normalizer folds together.
+        _twin_allegations("Payment was late", "Payment was late", "The Company", "the company"),
+        # Names that differ only by a separator the identity normalizer rewrites.
+        _twin_allegations("Payment was late", "Payment_was_late", None, None),
+    ],
+    ids=["speaker_case", "name_separator"],
+)
+def test_occurrences_are_grouped_the_way_identity_is_derived(graph):
+    # Grouping on anything looser than the identity normalization would put these two in
+    # separate groups, hand both occurrence 1, and collapse them onto a single id.
+    chunk = _make_chunk()
+    data_points_by_id, _ = _construct([chunk], [graph])
+
+    assertions = _assertions(data_points_by_id)
+    assert len(assertions) == 2
+    assert len({assertion.id for assertion in assertions}) == 2
+    assert {assertion.occurrence for assertion in assertions} == {1, 2}
+    # Nothing the chunk links to was dropped from the stored data points.
+    assert {str(entity.id) for _, entity in chunk.contains} <= set(data_points_by_id)
+
+
 def _smith_denial_graph() -> _QualifiedGraph:
     return _QualifiedGraph(
         nodes=[
@@ -233,6 +281,22 @@ def test_same_statement_in_two_chunks_stays_two_assertions_over_one_entity():
     assert smith.name == "smith"
     # One Smith entity plus the two assertions, so the entity was shared, not duplicated.
     assert len([dp for dp in data_points_by_id.values() if isinstance(dp, Entity)]) == 3
+
+
+def test_an_assertion_that_is_extracted_twice_is_reused_not_overwritten():
+    # Two extractions over one chunk derive the same identity, so the second must reuse the
+    # stored node: overwriting it would leave the first chunk link pointing at an orphan.
+    chunk = _make_chunk("Smith denies the payment was late.")
+    data_points_by_id, _ = _construct(
+        [chunk, chunk],
+        [_smith_denial_graph(), _smith_denial_graph()],
+    )
+
+    assertions = _assertions(data_points_by_id)
+    assert len(assertions) == 1
+    linked_assertions = [entity for _, entity in chunk.contains if isinstance(entity, Assertion)]
+    assert len(linked_assertions) == 2
+    assert all(entity is assertions[0] for entity in linked_assertions)
 
 
 def test_qualified_node_without_statement_type_stays_a_plain_entity():
