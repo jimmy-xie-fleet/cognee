@@ -81,8 +81,11 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _normalize(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value)
-    normalized = normalized.translate(_CURLY_QUOTES_TRANSLATION)
+    # Translate before NFKC, never after: NFKC decomposes U+2033 DOUBLE PRIME into two
+    # U+2032 PRIMEs, so normalizing first would turn a dimension quote ("6″") into "''"
+    # and leave the table's double-prime entry unreachable.
+    normalized = value.translate(_CURLY_QUOTES_TRANSLATION)
+    normalized = unicodedata.normalize("NFKC", normalized)
     normalized = _WHITESPACE_RE.sub(" ", normalized)
     return normalized.strip().casefold()
 

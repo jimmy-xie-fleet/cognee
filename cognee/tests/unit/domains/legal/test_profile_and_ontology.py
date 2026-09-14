@@ -106,6 +106,15 @@ class TestLegalProfile:
 
         assert profile["chunk_size"] == 256
 
+    def test_path_ontology_file_is_accepted(self):
+        # LEGAL_ONTOLOGY_PATH is a Path, so handing the module's own constant back to
+        # the profile must work; RDFLibOntologyResolver only understands str paths.
+        profile = legal_profile(ontology_file=LEGAL_ONTOLOGY_PATH)
+
+        resolver = profile["config"]["ontology_config"]["ontology_resolver"]
+        assert isinstance(resolver, RDFLibOntologyResolver)
+        assert EXPECTED_CLASS_KEYS <= set(resolver.lookup["classes"])
+
 
 class TestCogneeContract:
     def test_profile_keys_are_valid_cognify_kwargs(self):
@@ -148,6 +157,14 @@ class TestRealResolver:
     def test_ontology_path_points_at_real_file(self):
         assert LEGAL_ONTOLOGY_PATH.exists()
         assert LEGAL_ONTOLOGY_PATH.name == "legal.owl"
+
+    def test_resolver_accepts_a_path_and_a_list_of_paths(self):
+        assert EXPECTED_CLASS_KEYS <= set(
+            legal_ontology_resolver(LEGAL_ONTOLOGY_PATH).lookup["classes"]
+        )
+        assert EXPECTED_CLASS_KEYS <= set(
+            legal_ontology_resolver([LEGAL_ONTOLOGY_PATH]).lookup["classes"]
+        )
 
 
 class TestCollisionGuards:

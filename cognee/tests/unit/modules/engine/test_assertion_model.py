@@ -129,6 +129,15 @@ class TestVerifySourceQuote:
         text = 'Earlier, the party\'s "final" offer was rejected outright.'
         assert verify_source_quote(quote, text) is True
 
+    def test_prime_dimensions_match_straight_quotes(self):
+        # NFKC decomposes U+2033 DOUBLE PRIME into two U+2032 PRIMEs, so normalizing
+        # before translating the quote characters turns a double prime into "''" and
+        # the passage's straight double quote never matches.
+        assert verify_source_quote("25′ 6″ setback", "a 25' 6\" setback applies") is True
+
+    def test_single_prime_matches_straight_apostrophe(self):
+        assert verify_source_quote("a 25′ strip", "left a 25' strip of land") is True
+
     def test_different_casing_matches(self):
         assert verify_source_quote("HELLO world", "hello WORLD") is True
 
