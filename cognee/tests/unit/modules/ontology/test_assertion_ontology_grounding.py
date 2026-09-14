@@ -4,7 +4,9 @@ renamed, or collapsed against ontology individuals."""
 from typing import Optional
 from unittest.mock import MagicMock
 
-from cognee.modules.engine.models import EntityType
+from cognee.domains.legal import LegalKnowledgeGraph, LegalNode
+from cognee.modules.engine.models import Entity, EntityType
+from cognee.modules.engine.models.Assertion import Assertion
 from cognee.modules.ontology.base_ontology_resolver import BaseOntologyResolver
 from cognee.modules.ontology.construct_data_points_and_edges_with_ontology import (
     canonicalize_extracted_graphs,
@@ -38,6 +40,10 @@ class _StubResolver(BaseOntologyResolver):
     def get_subgraph(self, node_name: str, node_type: str = "individuals", directed: bool = True):
         if node_type == "classes" and node_name == "denial":
             root = AttachedOntologyNode("https://example.test/ontology#denial_class", "classes")
+            return [root], [], root
+        if node_type == "classes" and node_name == "records":
+            # The singular class an ontology canonicalizes a plural type onto.
+            root = AttachedOntologyNode("https://example.test/ontology#record", "classes")
             return [root], [], root
         if node_type == "individuals" and node_name == "payment was late":
             root = AttachedOntologyNode(
@@ -131,6 +137,39 @@ def test_strict_mode_keeps_class_grounded_assertion_and_drops_unknown_typed_asse
 
     assert [node.id for node in graph.nodes] == ["assertion-1"]
     assert graph.edges == []
+
+
+def test_canonicalizing_a_type_onto_a_statement_word_keeps_a_plain_entity():
+    """Assertion-ness follows ``statement_type``, never the (canonicalized) type name.
+
+    The ontology rewrites the type "Records" to the class "record". If the name of a
+    speech act could make a node an Assertion, this entity would turn into one — chunk
+    scoped, never deduplicated by name — the moment an ontology is configured.
+    """
+    ledger_nodes = [
+        LegalNode(
+            id="n1",
+            name="Meridian general ledger",
+            type="Records",
+            description="the ledger produced in discovery",
+        )
+        for _ in range(2)
+    ]
+    chunks = [_make_chunk(), _make_chunk()]
+
+    data_points_by_id, _ = construct_data_points_and_edges_with_ontology(
+        chunks,
+        [LegalKnowledgeGraph(nodes=[node], edges=[]) for node in ledger_nodes],
+        _StubResolver(),
+    )
+
+    assert [node.type for node in ledger_nodes] == ["record", "record"]
+    assert not [point for point in data_points_by_id.values() if isinstance(point, Assertion)]
+    # One entity for both chunks: deduplicated by name, the way entities are.
+    entities = [point for point in data_points_by_id.values() if isinstance(point, Entity)]
+    assert len(entities) == 1
+    assert type(entities[0]) is Entity
+    assert entities[0].id == Entity.id_for("Meridian general ledger")
 
 
 def test_get_subgraph_called_once_per_distinct_key_and_never_for_assertion_individuals():

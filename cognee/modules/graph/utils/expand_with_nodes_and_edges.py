@@ -6,11 +6,7 @@ from cognee.infrastructure.databases.provenance import EdgeIdentity
 from cognee.infrastructure.engine.models.Edge import Edge
 from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.engine.models import Entity, EntityType
-from cognee.modules.engine.models.Assertion import (
-    STATEMENT_TYPE_NAMES,
-    Assertion,
-    verify_source_quote,
-)
+from cognee.modules.engine.models.Assertion import Assertion, verify_source_quote
 from cognee.modules.engine.utils import generate_edge_name, generate_node_name
 from cognee.shared.data_models import Edge as KGEdge
 from cognee.shared.data_models import KnowledgeGraph, Node
@@ -46,16 +42,22 @@ def _strip_nonblank_text(value: str | None) -> str | None:
 
 
 def is_assertion_node(extracted_node: Node) -> bool:
-    """True when an extracted node carries assertion qualifiers.
+    """True when an extracted node carries a statement type.
 
     A plain ``cognee.shared.data_models.Node`` has no ``statement_type`` attribute at all, so
     a plain extraction is never treated as an assertion — not even when its type reads
     "Statement". Only an extraction model that declares the qualifier fields opts in.
+
+    For a model that does declare it, that one field decides and the node's ``type`` is
+    never consulted: types are rewritten by ontology canonicalization ("Records" ->
+    "record"), so reading the type would turn an entity into an Assertion — chunk-scoped
+    and never deduplicated by name — the moment an ontology is configured, and demote it
+    again under a different one. A blank statement type is no statement type.
     """
-    return hasattr(extracted_node, "statement_type") and (
-        extracted_node.statement_type is not None
-        or generate_node_name(extracted_node.type) in STATEMENT_TYPE_NAMES
-    )
+    if not hasattr(extracted_node, "statement_type"):
+        return False
+
+    return _statement_type_text(extracted_node) is not None
 
 
 def _enum_value(value):
@@ -63,15 +65,24 @@ def _enum_value(value):
     return value.value if isinstance(value, Enum) else value
 
 
+def _statement_type_text(extracted_node: Node) -> Optional[str]:
+    """The declared statement type as free text, or None when it declares none."""
+    statement_type = _enum_value(getattr(extracted_node, "statement_type", None))
+    if not isinstance(statement_type, str):
+        return None
+
+    return _strip_nonblank_text(statement_type)
+
+
 def _statement_type_value(extracted_node: Node) -> str:
     """The speech act to store, normalized the way identity normalizes it.
 
-    A model declaring ``statement_type: str`` may hand back "Denial" where the enum-typed
+    A model declaring ``statement_type: str`` may hand back " Denial " where the enum-typed
     model hands back "denial"; identity folds those together, so the stored property has
-    to fold them together too.
+    to fold them together too. The node type is a last resort for a node that reached
+    construction as an assertion without one, which ``is_assertion_node`` does not allow.
     """
-    statement_type = _enum_value(getattr(extracted_node, "statement_type", None))
-    return generate_node_name(statement_type or extracted_node.type)
+    return generate_node_name(_statement_type_text(extracted_node) or extracted_node.type)
 
 
 def _polarity_value(extracted_node: Node) -> str:

@@ -433,6 +433,10 @@ def test_an_assertion_that_is_extracted_twice_is_reused_not_overwritten():
 
 
 def test_qualified_node_without_statement_type_stays_a_plain_entity():
+    # ``statement_type`` alone decides. A node type that merely reads like a speech act
+    # must never promote an unqualified node: ontology canonicalization rewrites types
+    # ("Records" -> "record"), so a type-name fallback would flip an entity into an
+    # Assertion — and back again under a different ontology.
     person = _QualifiedNode(
         id="n1", name="Jones", type="Person", description="the plaintiff", statement_type=None
     )
@@ -443,20 +447,26 @@ def test_qualified_node_without_statement_type_stays_a_plain_entity():
         description="Jones alleges the payment was late",
         statement_type=None,
     )
+    blank_record = _QualifiedNode(
+        id="n3",
+        name="Ledger entry",
+        type="Record",
+        description="a ledger entry",
+        statement_type="   ",
+    )
     assert is_assertion_node(person) is False
-    assert is_assertion_node(untyped_allegation) is True
-
-    data_points_by_id, _ = _construct([_make_chunk()], [_QualifiedGraph(nodes=[person], edges=[])])
-    assert type(data_points_by_id[str(Entity.id_for("Jones"))]) is Entity
-    assert _assertions(data_points_by_id) == []
+    assert is_assertion_node(untyped_allegation) is False
+    assert is_assertion_node(blank_record) is False
 
     data_points_by_id, _ = _construct(
-        [_make_chunk()], [_QualifiedGraph(nodes=[untyped_allegation], edges=[])]
+        [_make_chunk()],
+        [_QualifiedGraph(nodes=[person, untyped_allegation, blank_record], edges=[])],
     )
-    assertions = _assertions(data_points_by_id)
-    assert len(assertions) == 1
-    # The statement type falls back to the node type when the field is absent.
-    assert assertions[0].statement_type == "allegation"
+    assert _assertions(data_points_by_id) == []
+    assert type(data_points_by_id[str(Entity.id_for("Jones"))]) is Entity
+    # Name-keyed like any other entity, not chunk-scoped like an assertion.
+    assert type(data_points_by_id[str(Entity.id_for("Payment was late"))]) is Entity
+    assert type(data_points_by_id[str(Entity.id_for("Ledger entry"))]) is Entity
 
 
 def test_plain_knowledge_graph_is_built_exactly_as_before():
