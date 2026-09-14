@@ -1,18 +1,20 @@
-from enum import Enum
 from typing import Optional
 
 from pydantic import Field
 
-from cognee.modules.engine.models.Assertion import StatementType
+from cognee.modules.engine.models.Assertion import CaseInsensitiveEnum, StatementType
 from cognee.shared.data_models import KnowledgeGraph, Node  # whichever provider branch is active
 
 
-class Polarity(str, Enum):
+class Polarity(CaseInsensitiveEnum):
     POSITIVE = "positive"
     NEGATIVE = "negative"
+    # A passage that records no stance at all. Never a default for one that does:
+    # construction stores an omitted polarity as "unknown" already.
+    UNKNOWN = "unknown"
 
 
-class Precision(str, Enum):
+class Precision(CaseInsensitiveEnum):
     EXACT = "exact"
     APPROXIMATE = "approximate"
     UNKNOWN = "unknown"
@@ -38,7 +40,8 @@ class LegalNode(Node):
         None,
         description=(
             "The speaker's stance on the name proposition: positive affirms it, negative "
-            "denies or negates it. Independent of statement_type."
+            "denies or negates it, unknown only when the passage records no stance. "
+            "Independent of statement_type."
         ),
     )
     asserted_by: Optional[str] = Field(

@@ -1,5 +1,8 @@
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from cognee.domains.legal import (
     LegalKnowledgeGraph,
     LegalNode,
@@ -7,7 +10,7 @@ from cognee.domains.legal import (
     Precision,
     load_legal_extraction_prompt,
 )
-from cognee.modules.engine.models.Assertion import STATEMENT_TYPE_NAMES
+from cognee.modules.engine.models.Assertion import STATEMENT_TYPE_NAMES, StatementType
 from cognee.shared.data_models import KnowledgeGraph, Node
 
 ENTITY_NODE_TYPES = [
@@ -112,7 +115,8 @@ class TestSchema:
         )
         assert properties["polarity"]["description"] == (
             "The speaker's stance on the name proposition: positive affirms it, negative "
-            "denies or negates it. Independent of statement_type."
+            "denies or negates it, unknown only when the passage records no stance. "
+            "Independent of statement_type."
         )
         assert properties["asserted_by"]["description"] == (
             "id of the node for the person or organization making this statement."
@@ -124,6 +128,63 @@ class TestSchema:
             "Locator of the statement this responds to, e.g. 'Complaint ¶17', or that "
             "node's id when present."
         )
+
+
+class TestEnumCoercion:
+    """The prompt primes capitalized words ("Denial"), and a prompted-JSON provider
+    echoes them into the enum-typed fields. Case-sensitive enums would fail validation
+    of the whole graph over a capital letter."""
+
+    def test_capitalized_and_padded_values_validate(self):
+        node = LegalNode(
+            id="answer-p17-denial",
+            name="The payment was made on time",
+            type="Denial",
+            description="Meridian denies the allegation.",
+            statement_type="Denial",
+            polarity=" NEGATIVE ",
+            precision="Exact",
+        )
+
+        assert node.statement_type is StatementType.DENIAL
+        assert node.polarity is Polarity.NEGATIVE
+        assert node.precision is Precision.EXACT
+
+    def test_unknown_is_a_polarity_member(self):
+        # The prompt documents an unrecorded stance as unknown, so the schema has to
+        # offer it instead of rejecting the word the prompt asks for.
+        assert Polarity("UNKNOWN") is Polarity.UNKNOWN
+        assert Polarity.UNKNOWN.value == "unknown"
+        node = LegalNode(id="n1", type="Statement", description="d", polarity="Unknown")
+        assert node.polarity is Polarity.UNKNOWN
+
+    def test_unknown_polarity_is_offered_by_the_schema(self):
+        defs = LegalKnowledgeGraph.model_json_schema().get("$defs", {})
+        assert set(defs["Polarity"]["enum"]) == {"positive", "negative", "unknown"}
+
+    def test_unmatched_value_still_fails(self):
+        with pytest.raises(ValidationError):
+            LegalNode(id="n1", type="Denial", statement_type="Refutation")
+
+    def test_whole_graph_of_capitalized_values_validates(self):
+        graph = LegalKnowledgeGraph.model_validate(
+            {
+                "nodes": [
+                    {
+                        "id": "answer-p17-denial",
+                        "name": "The payment was made on time",
+                        "type": "Denial",
+                        "description": "Meridian denies the allegation.",
+                        "statement_type": "Denial",
+                        "polarity": "Negative",
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+        assert graph.nodes[0].statement_type is StatementType.DENIAL
+        assert graph.nodes[0].polarity is Polarity.NEGATIVE
 
 
 class TestSamplePayload:
@@ -253,6 +314,13 @@ class TestPrompt:
         prompt = load_legal_extraction_prompt()
         assert "always carries polarity=negative" not in prompt
         assert "and polarity=negative" not in prompt
+
+    def test_prompt_limits_unknown_polarity_to_stanceless_passages(self):
+        # "unknown" is now a schema value, so the prompt has to say it is a last resort
+        # rather than a convenient default.
+        prompt = load_legal_extraction_prompt()
+        assert "polarity` is REQUIRED for every" in prompt
+        assert "unknown only when the passage records no stance" in prompt
 
     def test_prompt_contains_negated_statement_example(self):
         prompt = load_legal_extraction_prompt()

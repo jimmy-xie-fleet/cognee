@@ -59,7 +59,8 @@ characters carrying subject, predicate, object and any quantity, unit or date: n
 word ("not", "no", "never", "did not") and never a speech-act verb ("X denies that", "X alleges
 that"). `description` is who says what, with conditions and exceptions. `polarity` is REQUIRED for every
 assertion node: it is the speaker's stance on that proposition — positive when the speaker affirms
-it, negative when the speaker denies or negates it — and is INDEPENDENT of `statement_type`. An
+it, negative when the speaker denies or negates it — and is INDEPENDENT of `statement_type`. Use
+unknown only when the passage records no stance at all, never as a convenient default. An
 omitted polarity is stored as unknown, never read as agreement. For example:
 - allegation "Okafor was not promoted" → name "Okafor was promoted", statement_type allegation, polarity negative;
 - the Answer's denial of that allegation → the same name, statement_type denial, polarity positive;

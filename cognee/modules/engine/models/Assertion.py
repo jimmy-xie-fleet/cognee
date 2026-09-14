@@ -6,7 +6,27 @@ from typing import Any, Optional
 from cognee.modules.engine.models.Entity import Entity
 
 
-class StatementType(str, Enum):
+class CaseInsensitiveEnum(str, Enum):
+    """A string enum that also accepts the value with different case or padding.
+
+    Extraction prompts name these values in prose ("a Denial of paragraph 17"), and a
+    prompted-JSON provider echoes the capitalization back. Rejecting "Denial" fails
+    validation of the whole extracted graph over one capital letter.
+    """
+
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, str):
+            return None
+
+        folded_value = value.strip().casefold()
+        for member in cls:
+            if member.value == folded_value:
+                return member
+        return None
+
+
+class StatementType(CaseInsensitiveEnum):
     ALLEGATION = "allegation"
     ADMISSION = "admission"
     DENIAL = "denial"
