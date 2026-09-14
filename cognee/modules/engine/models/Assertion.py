@@ -99,6 +99,14 @@ _CURLY_QUOTES_TRANSLATION = str.maketrans(
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# C0/C1 control characters, minus the whitespace ones NFKC and _WHITESPACE_RE already
+# handle. PDF and DOCX extraction emits these as visual separators -- a deposition caption
+# arrives as "September 22, 2026 \x14 10:00 A.M." -- and no model copying the visible line
+# reproduces the control byte, so comparing on them marks verbatim quotes unverified. They
+# carry no text, so both sides drop them; they become a space rather than nothing, so a
+# separator can never silently weld two words into a match.
+_CONTROL_CHARACTERS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
 
 def _normalize(value: str) -> str:
     # Translate before NFKC, never after: NFKC decomposes U+2033 DOUBLE PRIME into two
@@ -106,6 +114,7 @@ def _normalize(value: str) -> str:
     # and leave the table's double-prime entry unreachable.
     normalized = value.translate(_CURLY_QUOTES_TRANSLATION)
     normalized = unicodedata.normalize("NFKC", normalized)
+    normalized = _CONTROL_CHARACTERS_RE.sub(" ", normalized)
     normalized = _WHITESPACE_RE.sub(" ", normalized)
     return normalized.strip().casefold()
 

@@ -167,3 +167,32 @@ class TestVerifySourceQuote:
 
     def test_none_text_returns_false(self):
         assert verify_source_quote("hello", None) is False
+
+
+class TestVerifySourceQuoteExtractionArtifacts:
+    """Quotes must survive the control characters document extractors emit.
+
+    PDF and DOCX extraction litters text with C0 control characters used as visual
+    separators (a deposition caption came through as "September 22, 2026 \x14 10:00 A.M.").
+    A model copying that line reproduces what it can see, never the control byte, so a
+    genuinely verbatim quote was being recorded as unverified evidence.
+    """
+
+    def test_control_characters_in_the_passage_do_not_break_verification(self):
+        passage = "DEPOSITION OF: DIANE R. HARTWELL, MAI\n\nSeptember 22, 2026 \x14 10:00 A.M."
+
+        assert verify_source_quote("September 22, 2026 10:00 A.M.", passage) is True
+
+    def test_control_characters_in_the_quote_do_not_break_verification(self):
+        passage = "The hearing was held on September 22, 2026 at 10:00 A.M. in Passaic County."
+
+        assert verify_source_quote("September 22,\x142026 at 10:00 A.M.", passage) is True
+
+    def test_a_quote_of_only_control_characters_is_not_verified(self):
+        assert verify_source_quote("\x14\x0c", "any passage at all") is False
+
+    def test_control_character_stripping_does_not_join_separate_words(self):
+        # "the\x14city" must not collapse into "thecity" and match a passage that never
+        # said it: the control character stands in for a separator, so it becomes one.
+        assert verify_source_quote("the\x14city", "thecity of clifton") is False
+        assert verify_source_quote("the\x14city", "the city of clifton") is True
