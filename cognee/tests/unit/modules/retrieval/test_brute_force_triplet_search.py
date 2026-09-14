@@ -128,6 +128,7 @@ async def test_brute_force_triplet_search_default_collections():
 
         expected_collections = [
             "Entity_name",
+            "Assertion_name",
             "TextSummary_text",
             "EntityType_name",
             "DocumentChunk_text",

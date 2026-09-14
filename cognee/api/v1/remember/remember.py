@@ -75,6 +75,8 @@ class RememberKwargs(TypedDict, total=False):
     max_rows_per_table: int
     llm_config: Any
     embedding_config: Any
+    config: Any  # per-call ontology config, see cognee.modules.ontology.ontology_config.Config
+    temporal_cognify: bool  # routed to cognify(); ignores graph_model/custom_prompt
 
 
 # Kwarg routing: which RememberKwargs go to add(), cognify(), or both.
@@ -696,7 +698,11 @@ async def remember(
             ``MemorySource`` imports or typed ``MemoryEntry`` payloads,
             which are dataset-name based.
         session_id: Optional session ID. When set, stores data in the
-            session cache instead of the permanent graph.
+            session cache instead of the permanent graph. The extraction
+            options (``graph_model``, ``custom_prompt``, ``config``,
+            ``chunk_size``) are rejected with it: the session is bridged
+            into the graph by ``improve()``, which cognifies with the
+            default extraction.
         chunk_size: Max tokens per chunk. Auto-calculated when *None*.
         chunker: Text chunking strategy. Defaults to *TextChunker*.
         custom_prompt: Custom prompt for entity extraction.
@@ -855,6 +861,30 @@ async def remember(
             graph_model=kwargs.get("graph_model") or KnowledgeGraph,
             custom_prompt=custom_prompt,
         )
+
+    if session_id is not None:
+        # Extraction options only the add+cognify path can honour. The session branch
+        # returns before cognify() ever runs, and the background improve() bridge
+        # re-cognifies the session with the defaults, so a domain profile splatted in
+        # here would be dropped without a word: the caller would believe its own
+        # extraction built the graph while the default one had.
+        conflicting_options = [
+            option_name
+            for option_name, is_supplied in (
+                ("graph_model", kwargs.get("graph_model") is not None),
+                ("custom_prompt", custom_prompt is not None),
+                ("config", kwargs.get("config") is not None),
+                ("chunk_size", chunk_size is not None),
+            )
+            if is_supplied
+        ]
+        if conflicting_options:
+            raise ValueError(
+                f"{', '.join(conflicting_options)} "
+                f"{'is' if len(conflicting_options) == 1 else 'are'} not supported "
+                "together with session_id; session memory is bridged into the graph "
+                "with the default extraction."
+            )
 
     data_size = _estimate_data_size(data)
     item_count = len(data) if isinstance(data, list) else 1

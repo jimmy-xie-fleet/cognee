@@ -1,0 +1,359 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF
+   xmlns:legal="http://cognee.ai/ontology/legal#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+   xmlns:owl="http://www.w3.org/2002/07/owl#"
+   xml:base="http://cognee.ai/ontology/legal"
+>
+
+  <!-- Ontology declaration -->
+  <owl:Ontology rdf:about="http://cognee.ai/ontology/legal">
+    <rdfs:label>Cognee Legal Extraction Vocabulary</rdfs:label>
+    <rdfs:comment>Vocabulary of legal entities, documents and assertions used to ground the legal extraction profile's ontology matching.</rdfs:comment>
+  </owl:Ontology>
+
+  <!-- Classes -->
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Agent">
+    <rdfs:label>Agent</rdfs:label>
+    <rdfs:comment>A person or organization capable of acting in a legal matter.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Person">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Agent"/>
+    <rdfs:label>Person</rdfs:label>
+    <rdfs:comment>An individual human being.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Organization">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Agent"/>
+    <rdfs:label>Organization</rdfs:label>
+    <rdfs:comment>A structured body of people, such as a company, agency or court.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Company">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Organization"/>
+    <rdfs:label>Company</rdfs:label>
+    <rdfs:comment>A for-profit business entity.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Insurer">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Company"/>
+    <rdfs:label>Insurer</rdfs:label>
+    <rdfs:comment>A company that underwrites and issues insurance policies.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Nonprofit">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Organization"/>
+    <rdfs:label>Nonprofit</rdfs:label>
+    <rdfs:comment>A non-profit organization.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#GovernmentAgency">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Organization"/>
+    <rdfs:label>GovernmentAgency</rdfs:label>
+    <rdfs:comment>A government body responsible for enforcing law or regulation.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Court">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Organization"/>
+    <rdfs:label>Court</rdfs:label>
+    <rdfs:comment>A judicial body that hears and decides legal disputes.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#MunicipalBody">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Organization"/>
+    <rdfs:label>MunicipalBody</rdfs:label>
+    <rdfs:comment>A local government body, such as a city, board or council.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#City">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#MunicipalBody"/>
+    <rdfs:label>City</rdfs:label>
+    <rdfs:comment>The government of a city or town.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#PlanningBoard">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#MunicipalBody"/>
+    <rdfs:label>PlanningBoard</rdfs:label>
+    <rdfs:comment>A municipal board responsible for land use and development planning.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#MunicipalCouncil">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#MunicipalBody"/>
+    <rdfs:label>MunicipalCouncil</rdfs:label>
+    <rdfs:comment>An elected body that governs a municipality.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Asset">
+    <rdfs:label>Asset</rdfs:label>
+    <rdfs:comment>Property or value owned by an agent.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Property">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Asset"/>
+    <rdfs:label>Property</rdfs:label>
+    <rdfs:comment>Real property, such as land or buildings.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Parcel">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Property"/>
+    <rdfs:label>Parcel</rdfs:label>
+    <rdfs:comment>A discrete, legally described tract of land.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Suite">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Property"/>
+    <rdfs:label>Suite</rdfs:label>
+    <rdfs:comment>A leasable unit within a larger property, such as an office suite.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#MonetaryAmount">
+    <rdfs:label>MonetaryAmount</rdfs:label>
+    <rdfs:comment>A sum of money referenced in a legal document.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Date">
+    <rdfs:label>Date</rdfs:label>
+    <rdfs:comment>A calendar date relevant to a legal matter.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Event">
+    <rdfs:label>Event</rdfs:label>
+    <rdfs:comment>An occurrence relevant to a legal matter, such as an incident or hearing.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Claim">
+    <rdfs:label>Claim</rdfs:label>
+    <rdfs:comment>A legal assertion of a right or entitlement made by a party.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Defense">
+    <rdfs:label>Defense</rdfs:label>
+    <rdfs:comment>A legal argument raised to defeat a claim.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Statute">
+    <rdfs:label>Statute</rdfs:label>
+    <rdfs:comment>A law enacted by a legislative body.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Award">
+    <rdfs:label>Award</rdfs:label>
+    <rdfs:comment>A monetary or other remedy granted by a court or arbitrator.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Document">
+    <rdfs:label>Document</rdfs:label>
+    <rdfs:comment>A written or recorded instrument relevant to a legal matter.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Pleading">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Pleading</rdfs:label>
+    <rdfs:comment>A formal document filed with a court stating a party&apos;s claims or defenses.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Complaint">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Pleading"/>
+    <rdfs:label>Complaint</rdfs:label>
+    <rdfs:comment>The pleading that initiates a civil lawsuit.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Answer">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Pleading"/>
+    <rdfs:label>Answer</rdfs:label>
+    <rdfs:comment>A defendant&apos;s formal response to a complaint.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Deposition">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Deposition</rdfs:label>
+    <rdfs:comment>A witness&apos;s sworn out-of-court testimony recorded for later use.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Transcript">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Transcript</rdfs:label>
+    <rdfs:comment>A verbatim written record of spoken proceedings.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Minutes">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Minutes</rdfs:label>
+    <rdfs:comment>The official written record of a meeting.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Email">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Email</rdfs:label>
+    <rdfs:comment>An electronic mail message.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Ledger">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Ledger</rdfs:label>
+    <rdfs:comment>A record of financial transactions.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Notice">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Notice</rdfs:label>
+    <rdfs:comment>A formal communication informing a party of a legal fact or requirement.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Order">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Order</rdfs:label>
+    <rdfs:comment>A directive issued by a court or agency.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Report">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Report</rdfs:label>
+    <rdfs:comment>A document presenting findings, such as an appraisal or investigation.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Appraisal">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Report"/>
+    <rdfs:label>Appraisal</rdfs:label>
+    <rdfs:comment>A report estimating the value of a property or asset.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#PoliceReport">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Report"/>
+    <rdfs:label>PoliceReport</rdfs:label>
+    <rdfs:comment>A report prepared by law enforcement documenting an incident.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Contract">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Document"/>
+    <rdfs:label>Contract</rdfs:label>
+    <rdfs:comment>A legally binding agreement between parties.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Lease">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Contract"/>
+    <rdfs:label>Lease</rdfs:label>
+    <rdfs:comment>A contract granting use of property in exchange for payment.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Amendment">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Contract"/>
+    <rdfs:label>Amendment</rdfs:label>
+    <rdfs:comment>A document that modifies the terms of an existing contract.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#InsurancePolicy">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Contract"/>
+    <rdfs:label>InsurancePolicy</rdfs:label>
+    <rdfs:comment>A contract of insurance between an insurer and an insured.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Assertion">
+    <rdfs:label>Assertion</rdfs:label>
+    <rdfs:comment>A statement made by an agent that may be true, false or disputed.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#PleadingStatement">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>PleadingStatement</rdfs:label>
+    <rdfs:comment>An assertion made within a pleading filed with a court.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Allegation">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#PleadingStatement"/>
+    <rdfs:label>Allegation</rdfs:label>
+    <rdfs:comment>An unproven claim of fact made by a party.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Admission">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#PleadingStatement"/>
+    <rdfs:label>Admission</rdfs:label>
+    <rdfs:comment>A party&apos;s acknowledgment that a fact is true.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Denial">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#PleadingStatement"/>
+    <rdfs:label>Denial</rdfs:label>
+    <rdfs:comment>A party&apos;s rejection of an alleged fact.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Testimony">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>Testimony</rdfs:label>
+    <rdfs:comment>A statement given as evidence, typically under oath.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Opinion">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>Opinion</rdfs:label>
+    <rdfs:comment>A judgment or belief expressed by an agent, not asserted as fact.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Finding">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>Finding</rdfs:label>
+    <rdfs:comment>A conclusion reached by a court, agency or investigator.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Record">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>Record</rdfs:label>
+    <rdfs:comment>A recorded statement of fact kept for reference.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Term">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>Term</rdfs:label>
+    <rdfs:comment>A specific provision or condition within an agreement.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Proposal">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>Proposal</rdfs:label>
+    <rdfs:comment>An offer or suggestion put forward for consideration.</rdfs:comment>
+  </owl:Class>
+
+  <owl:Class rdf:about="http://cognee.ai/ontology/legal#Statement">
+    <rdfs:subClassOf rdf:resource="http://cognee.ai/ontology/legal#Assertion"/>
+    <rdfs:label>Statement</rdfs:label>
+    <rdfs:comment>A general assertion of fact made by an agent.</rdfs:comment>
+  </owl:Class>
+
+  <!-- Object properties -->
+  <owl:ObjectProperty rdf:about="http://cognee.ai/ontology/legal#enforces">
+    <rdfs:label>enforces</rdfs:label>
+    <rdfs:comment>Relates a government agency to a statute it is charged with enforcing.</rdfs:comment>
+    <rdfs:domain rdf:resource="http://cognee.ai/ontology/legal#GovernmentAgency"/>
+    <rdfs:range rdf:resource="http://cognee.ai/ontology/legal#Statute"/>
+  </owl:ObjectProperty>
+
+  <!-- Individuals -->
+  <owl:NamedIndividual rdf:about="http://cognee.ai/ontology/legal#Title_VII">
+    <rdf:type rdf:resource="http://cognee.ai/ontology/legal#Statute"/>
+    <rdfs:label>Title VII</rdfs:label>
+    <rdfs:comment>Title VII of the Civil Rights Act of 1964, a federal employment discrimination statute.</rdfs:comment>
+  </owl:NamedIndividual>
+
+  <owl:NamedIndividual rdf:about="http://cognee.ai/ontology/legal#Minnesota_Human_Rights_Act">
+    <rdf:type rdf:resource="http://cognee.ai/ontology/legal#Statute"/>
+    <rdfs:label>Minnesota Human Rights Act</rdfs:label>
+    <rdfs:comment>A Minnesota state statute prohibiting discrimination.</rdfs:comment>
+  </owl:NamedIndividual>
+
+  <owl:NamedIndividual rdf:about="http://cognee.ai/ontology/legal#EEOC">
+    <rdf:type rdf:resource="http://cognee.ai/ontology/legal#GovernmentAgency"/>
+    <rdfs:label>EEOC</rdfs:label>
+    <rdfs:comment>The U.S. Equal Employment Opportunity Commission, the federal agency enforcing employment discrimination law.</rdfs:comment>
+    <legal:enforces rdf:resource="http://cognee.ai/ontology/legal#Title_VII"/>
+  </owl:NamedIndividual>
+
+  <owl:NamedIndividual rdf:about="http://cognee.ai/ontology/legal#Minnesota_Department_of_Human_Rights">
+    <rdf:type rdf:resource="http://cognee.ai/ontology/legal#GovernmentAgency"/>
+    <rdfs:label>Minnesota Department of Human Rights</rdfs:label>
+    <rdfs:comment>The Minnesota state agency enforcing the Minnesota Human Rights Act.</rdfs:comment>
+    <legal:enforces rdf:resource="http://cognee.ai/ontology/legal#Minnesota_Human_Rights_Act"/>
+  </owl:NamedIndividual>
+
+</rdf:RDF>

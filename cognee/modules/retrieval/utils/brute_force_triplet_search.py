@@ -293,6 +293,7 @@ async def brute_force_triplet_search(
         if collections is None:
             collections = [
                 "Entity_name",
+                "Assertion_name",
                 "TextSummary_text",
                 "EntityType_name",
                 "DocumentChunk_text",
