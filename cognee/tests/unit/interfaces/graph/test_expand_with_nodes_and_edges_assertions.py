@@ -503,6 +503,83 @@ def test_plain_knowledge_graph_is_built_exactly_as_before():
     ]
 
 
+def _contains_edge_text(chunk, data_point) -> Optional[str]:
+    texts = [edge.edge_text for edge, target in chunk.contains if target is data_point]
+    assert len(texts) == 1, f"expected one chunk link for {data_point.name!r}, found {len(texts)}"
+    return texts[0]
+
+
+def test_chunk_link_for_an_assertion_states_the_speakers_stance():
+    # The chunk link is embedded and shown like any other edge. "Document chunk mentions
+    # payment was late" states the denied proposition as a fact of the document.
+    chunk = _make_chunk("Smith denies the payment was late.")
+    data_points_by_id, _ = _construct([chunk], [_smith_denial_graph()])
+
+    assertion = _assertions(data_points_by_id)[0]
+    assert _contains_edge_text(chunk, assertion) == (
+        "Document chunk records: Smith denies that Payment was late. "
+        "Smith denies the payment was late."
+    )
+    # Plain entities keep the wording they had.
+    smith = data_points_by_id[str(Entity.id_for("Smith"))]
+    assert _contains_edge_text(chunk, smith) == "Document chunk mentions smith: the defendant"
+
+
+def test_chunk_link_without_a_speaker_states_the_speech_act_and_stance():
+    chunk = _make_chunk("The payment was late is denied.")
+    graph = _QualifiedGraph(
+        nodes=[
+            _QualifiedNode(
+                id="n1",
+                name="Payment was late",
+                type="Denial",
+                description="The answer denies the payment was late",
+                statement_type="denial",
+                polarity="negative",
+            )
+        ],
+        edges=[],
+    )
+    data_points_by_id, _ = _construct([chunk], [graph])
+
+    assertion = _assertions(data_points_by_id)[0]
+    assert _contains_edge_text(chunk, assertion) == (
+        "Document chunk records a denial with negative stance: Payment was late. "
+        "The answer denies the payment was late."
+    )
+
+
+def test_description_less_explicit_edge_adopts_the_derived_stance_text():
+    # First-wins deduplication used to hand the win to the explicit edge and its empty
+    # description, so the stance never reached storage at all.
+    chunk = _make_chunk("Smith denies the payment was late.")
+    graph = _smith_denial_graph()
+    graph.edges = [
+        KGEdge(source_node_id="n2", target_node_id="n1", relationship_name="asserted_by")
+    ]
+    data_points_by_id, edges_by_identity = _construct([chunk], [graph])
+
+    assert _relationship_names(edges_by_identity).count("asserted_by") == 1
+    assertion = _assertions(data_points_by_id)[0]
+    edge_text = edges_by_identity[
+        EdgeIdentity(
+            source_id=str(assertion.id),
+            target_id=str(Entity.id_for("Smith")),
+            relationship_name="asserted_by",
+        )
+    ].edge_text
+    assert "denies that" in edge_text
+    assert edge_text.startswith("Smith denies that Payment was late.")
+
+    # The derived duplicate is gone, so the relationship is recorded once.
+    produced_key = (str(assertion.id), str(Entity.id_for("Smith")), "asserted_by")
+    assert chunk._produced_edge_identities.count(produced_key) == 1
+    assert [
+        (source_id, target_id, relationship_name)
+        for source_id, target_id, relationship_name, _ in chunk._provenance_edges
+    ].count(produced_key) == 1
+
+
 def test_explicit_llm_edge_and_derived_edge_collapse_into_one():
     chunk = _make_chunk()
     graph = _QualifiedGraph(

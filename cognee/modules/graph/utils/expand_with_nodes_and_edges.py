@@ -219,23 +219,51 @@ def _calculate_entity_ids_by_extracted_node_id(
     return entity_ids_by_extracted_node_id
 
 
+def _chunk_link_edge_text(
+    extracted_node: Node,
+    entity: Entity,
+    speaker_node: Optional[Node],
+) -> Optional[str]:
+    """The text of the chunk's ``contains`` edge to one data point.
+
+    For an assertion it has to state the stance. "Document chunk mentions payment was
+    late" is the assertion's affirmative ``name``, which for a denial is the fact being
+    denied — and this text is embedded and shown to a reader exactly like any other edge
+    text, so a denial would be retrieved as the claim it rejects.
+    """
+    description = _strip_nonblank_text(extracted_node.description)
+    if not isinstance(entity, Assertion):
+        return f"Document chunk mentions {entity.name}: {description}" if description else None
+
+    if speaker_node is not None:
+        # The same sentence the derived asserted_by edge carries, so the two agree.
+        return (
+            "Document chunk records: "
+            f"{_derived_edge_description(extracted_node, 'asserted_by', speaker_node)}"
+        )
+
+    head = (
+        f"Document chunk records a {_statement_type_value(extracted_node)} with "
+        f"{_polarity_value(extracted_node)} stance: {_proposition_clause(extracted_node)}"
+    )
+    return " ".join(_sentence(part) for part in (head, description) if part)
+
+
 def _link_chunk_to_entity(
     data_chunk: DocumentChunk,
     extracted_node: Node,
     entity: Entity,
+    speaker_node: Optional[Node] = None,
 ) -> None:
     if data_chunk.contains is None:
         data_chunk.contains = []
 
-    entity_description = _strip_nonblank_text(extracted_node.description)
-    edge_text = (
-        f"Document chunk mentions {entity.name}: {entity_description}"
-        if entity_description
-        else None
-    )
     data_chunk.contains.append(
         (
-            Edge(relationship_type="contains", edge_text=edge_text),
+            Edge(
+                relationship_type="contains",
+                edge_text=_chunk_link_edge_text(extracted_node, entity, speaker_node),
+            ),
             entity,
         )
     )
@@ -313,6 +341,31 @@ def _create_assertion(
         source_chunk_id=str(data_chunk.id),
         occurrence=occurrence,
     )
+
+
+def _speaker_node(
+    extracted_node: Node,
+    node_id_by_reference: dict[str, str],
+    nodes_by_extracted_id: dict[str, Node],
+) -> Optional[Node]:
+    """The party node an assertion's ``asserted_by`` names, when it names one.
+
+    One test decides the stored speaker, the derived ``asserted_by`` edge and the stance
+    the chunk link states, so those three can never disagree about who spoke.
+    """
+    target_node_id = _resolve_reference(
+        getattr(extracted_node, "asserted_by", None),
+        node_id_by_reference,
+    )
+    if target_node_id is None or target_node_id == extracted_node.id:
+        return None
+
+    target_node = nodes_by_extracted_id.get(target_node_id)
+    if target_node is None or is_assertion_node(target_node):
+        # A speaker is a party; an assertion is not one (see _resolve_speaker_name).
+        return None
+
+    return target_node
 
 
 def _resolve_display_name(
@@ -438,6 +491,7 @@ def _convert_extracted_nodes_to_data_points(
         data_chunk,
     )
     entities_by_extracted_node_id: dict[str, Entity] = {}
+    nodes_by_extracted_id = {node.id: node for node in extracted_graph.nodes}
     assertion_nodes: list[Node] = []
 
     for extracted_node in extracted_graph.nodes:
@@ -503,7 +557,12 @@ def _convert_extracted_nodes_to_data_points(
         else:
             data_points_by_id[assertion_key] = assertion
         entities_by_extracted_node_id[extracted_node.id] = assertion
-        _link_chunk_to_entity(data_chunk, extracted_node, assertion)
+        _link_chunk_to_entity(
+            data_chunk,
+            extracted_node,
+            assertion,
+            _speaker_node(extracted_node, node_id_by_reference, nodes_by_extracted_id),
+        )
 
     _repoint_assertion_references_at_resolved_ids(
         assertion_nodes,
@@ -586,25 +645,32 @@ def _derive_assertion_edges(
             continue
 
         for field_name, relationship_name in _ASSERTION_REFERENCE_FIELDS:
-            target_node_id = _resolve_reference(
-                getattr(extracted_node, field_name, None),
-                node_id_by_reference,
-            )
-            if target_node_id is None or target_node_id == extracted_node.id:
-                continue
+            if relationship_name == "asserted_by":
+                # No speaker was stored for a reference naming another assertion, so no
+                # edge may claim one either.
+                target_node = _speaker_node(
+                    extracted_node,
+                    node_id_by_reference,
+                    nodes_by_extracted_id,
+                )
+                if target_node is None:
+                    continue
+            else:
+                target_node_id = _resolve_reference(
+                    getattr(extracted_node, field_name, None),
+                    node_id_by_reference,
+                )
+                if target_node_id is None or target_node_id == extracted_node.id:
+                    continue
 
-            target_node = nodes_by_extracted_id.get(target_node_id)
-            if relationship_name == "asserted_by" and (
-                target_node is None or is_assertion_node(target_node)
-            ):
-                # A speaker is a party, and no speaker was stored for a reference naming
-                # another assertion (see _resolve_speaker_name), so no edge may claim one.
-                continue
+                target_node = nodes_by_extracted_id.get(target_node_id)
+                if target_node is None:
+                    continue
 
             derived_edges.append(
                 KGEdge(
                     source_node_id=extracted_node.id,
-                    target_node_id=target_node_id,
+                    target_node_id=target_node.id,
                     relationship_name=relationship_name,
                     description=_derived_edge_description(
                         extracted_node,
@@ -615,6 +681,60 @@ def _derive_assertion_edges(
             )
 
     return derived_edges
+
+
+def _edge_key(extracted_edge: KGEdge) -> tuple[str, str, str]:
+    """The triple the edges deduplicate on, keyed on graph-local node ids."""
+    return (
+        extracted_edge.source_node_id,
+        extracted_edge.target_node_id,
+        generate_edge_name(extracted_edge.relationship_name),
+    )
+
+
+def _merge_derived_edges(
+    extracted_edges: list[KGEdge],
+    derived_edges: list[KGEdge],
+) -> list[KGEdge]:
+    """Combine the LLM's own edges with the derived ones, keeping the stance text.
+
+    The two deduplicate on (source, target, relationship) downstream and the first one
+    wins. An explicit ``asserted_by`` edge routinely arrives with no description, and it
+    used to win with no edge text at all — leaving storage to synthesize one from the
+    endpoint labels, i.e. from the assertion's affirmative name, so a denial reached
+    retrieval as the fact it denies.
+
+    A description-less explicit edge therefore adopts the derived edge's description, and
+    that derived duplicate is dropped so the chunk records the relationship exactly once.
+    An explicit edge carrying its own description is left untouched and still wins.
+    """
+    if not derived_edges:
+        return list(extracted_edges)
+
+    derived_edge_by_key: dict[tuple[str, str, str], KGEdge] = {}
+    for derived_edge in derived_edges:
+        derived_edge_by_key.setdefault(_edge_key(derived_edge), derived_edge)
+
+    merged_edges: list[KGEdge] = []
+    adopted_keys: set[tuple[str, str, str]] = set()
+    for extracted_edge in extracted_edges:
+        edge_key = _edge_key(extracted_edge)
+        derived_edge = derived_edge_by_key.get(edge_key)
+        if derived_edge is None or _strip_nonblank_text(extracted_edge.description) is not None:
+            merged_edges.append(extracted_edge)
+            continue
+
+        adopted_keys.add(edge_key)
+        merged_edges.append(
+            extracted_edge.model_copy(update={"description": derived_edge.description})
+        )
+
+    merged_edges.extend(
+        derived_edge
+        for derived_edge in derived_edges
+        if _edge_key(derived_edge) not in adopted_keys
+    )
+    return merged_edges
 
 
 def _add_extracted_edges(
@@ -685,14 +805,12 @@ def construct_data_points_and_edges(
             data_points_by_id,
             node_id_by_reference,
         )
-        # Derived edges come last, so an explicit LLM edge for the same relationship
-        # keeps its description when the two deduplicate.
         _add_extracted_edges(
             data_chunk,
-            [
-                *extracted_graph.edges,
-                *_derive_assertion_edges(extracted_graph, node_id_by_reference),
-            ],
+            _merge_derived_edges(
+                extracted_graph.edges,
+                _derive_assertion_edges(extracted_graph, node_id_by_reference),
+            ),
             entities_by_extracted_node_id,
             edges_by_identity,
         )
