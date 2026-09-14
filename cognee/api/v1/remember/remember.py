@@ -75,6 +75,8 @@ class RememberKwargs(TypedDict, total=False):
     max_rows_per_table: int
     llm_config: Any
     embedding_config: Any
+    config: Any  # per-call ontology config, see cognee.modules.ontology.ontology_config.Config
+    temporal_cognify: bool  # routed to cognify(); ignores graph_model/custom_prompt
 
 
 # Kwarg routing: which RememberKwargs go to add(), cognify(), or both.
