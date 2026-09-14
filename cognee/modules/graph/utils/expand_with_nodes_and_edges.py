@@ -22,6 +22,20 @@ _ASSERTION_REFERENCE_FIELDS = (
     ("responds_to", "responds_to"),
 )
 
+# How a derived asserted_by edge words the speaker's stance. The unknown phrase reads
+# "takes an unrecorded stance on X" rather than "... on that X": the verb takes its object
+# directly, and the text is embedded and shown to a reader, so it has to be a sentence.
+_STANCE_VERB_BY_POLARITY = {
+    "positive": "affirms that",
+    "negative": "denies that",
+}
+_UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
+
+_DERIVED_EDGE_VERBS = {
+    "attributed_to": "is attributed to",
+    "responds_to": "responds to",
+}
+
 
 def _strip_nonblank_text(value: str | None) -> str | None:
     if value is None:
@@ -442,6 +456,61 @@ def _convert_extracted_nodes_to_data_points(
     return entities_by_extracted_node_id
 
 
+def _sentence(text: str) -> str:
+    """One sentence of edge text, terminated exactly once."""
+    stripped_text = text.strip()
+    return stripped_text if stripped_text.endswith((".", "!", "?")) else f"{stripped_text}."
+
+
+def _proposition_clause(extracted_node: Node) -> str:
+    """The proposition as it reads inside a sentence, without doubling its full stop."""
+    name = _strip_nonblank_text(extracted_node.name)
+    if name is None:
+        return "this statement"
+
+    return name.rstrip(".").strip() or "this statement"
+
+
+def _reference_label(extracted_node: Node) -> str:
+    """How a derived edge names the node it points at."""
+    return (
+        _strip_nonblank_text(extracted_node.name)
+        or _strip_nonblank_text(extracted_node.type)
+        or "an unnamed party"
+    )
+
+
+def _derived_edge_description(
+    extracted_node: Node,
+    relationship_name: str,
+    target_node: Optional[Node],
+) -> Optional[str]:
+    """The text a derived edge carries, stating the stance the assertion was made with.
+
+    Without it the edge reaches storage with no ``edge_text``, and
+    ``ensure_default_edge_properties`` synthesizes one from the endpoint labels — for an
+    assertion that is its affirmative ``name``, so a denial is embedded and shown as the
+    fact it denies. The stance therefore has to travel with the edge, not be reconstructed
+    from the endpoints, which no longer carry it.
+    """
+    if target_node is None:
+        return None
+
+    proposition = _proposition_clause(extracted_node)
+    polarity = _polarity_value(extracted_node)
+    if relationship_name == "asserted_by":
+        stance_verb = _STANCE_VERB_BY_POLARITY.get(polarity, _UNRECORDED_STANCE_VERB)
+        head = f"{_reference_label(target_node)} {stance_verb} {proposition}"
+    else:
+        head = (
+            f"{proposition} ({_statement_type_value(extracted_node)}, {polarity} stance) "
+            f"{_DERIVED_EDGE_VERBS[relationship_name]} {_reference_label(target_node)}"
+        )
+
+    description = _strip_nonblank_text(extracted_node.description)
+    return " ".join(_sentence(part) for part in (head, description) if part)
+
+
 def _derive_assertion_edges(
     extracted_graph: KnowledgeGraph,
     node_id_by_reference: dict[str, str],
@@ -449,8 +518,10 @@ def _derive_assertion_edges(
     """Turn an assertion's reference fields into edges of the extracted graph.
 
     They go through the same path as the LLM's own edges, so provenance and ownership
-    bookkeeping cannot tell them apart.
+    bookkeeping cannot tell them apart, and each carries a description stating the stance
+    the statement was made with.
     """
+    nodes_by_extracted_id = {node.id: node for node in extracted_graph.nodes}
     derived_edges: list[KGEdge] = []
     for extracted_node in extracted_graph.nodes:
         if not is_assertion_node(extracted_node):
@@ -469,7 +540,11 @@ def _derive_assertion_edges(
                     source_node_id=extracted_node.id,
                     target_node_id=target_node_id,
                     relationship_name=relationship_name,
-                    description=None,
+                    description=_derived_edge_description(
+                        extracted_node,
+                        relationship_name,
+                        nodes_by_extracted_id.get(target_node_id),
+                    ),
                 )
             )
 

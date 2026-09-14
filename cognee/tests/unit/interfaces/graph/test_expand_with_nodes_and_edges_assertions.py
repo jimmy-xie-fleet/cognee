@@ -20,6 +20,7 @@ from cognee.modules.graph.utils.expand_with_nodes_and_edges import (
     is_assertion_node,
 )
 from cognee.modules.graph.utils.get_graph_from_model import get_graph_from_model
+from cognee.modules.graph.utils.prepare_edges_for_storage import ensure_default_edge_properties
 from cognee.shared.data_models import Edge as KGEdge
 from cognee.shared.data_models import KnowledgeGraph, Node
 
@@ -264,6 +265,131 @@ def _smith_denial_graph() -> _QualifiedGraph:
             ),
         ],
         edges=[],
+    )
+
+
+def test_derived_asserted_by_edge_text_states_the_speakers_stance():
+    # The edge text is what TRIPLET_COMPLETION embeds and what a completion context shows.
+    # Left empty, ensure_default_edge_properties synthesizes it from the assertion's
+    # affirmative name — "payment was late asserted by smith" — which reads as the
+    # opposite of the denial it came from.
+    chunk = _make_chunk("Smith denies the payment was late.")
+    data_points_by_id, edges_by_identity = _construct([chunk], [_smith_denial_graph()])
+
+    assertion = _assertions(data_points_by_id)[0]
+    edge = edges_by_identity[
+        EdgeIdentity(
+            source_id=str(assertion.id),
+            target_id=str(Entity.id_for("Smith")),
+            relationship_name="asserted_by",
+        )
+    ]
+
+    assert "denies" in edge.edge_text
+    assert "Smith denies the payment was late" in edge.edge_text
+    assert edge.edge_text.startswith("Smith denies that Payment was late.")
+
+    stored = ensure_default_edge_properties(
+        [
+            (
+                str(assertion.id),
+                str(Entity.id_for("Smith")),
+                "asserted_by",
+                {"edge_text": edge.edge_text},
+            )
+        ],
+        list(data_points_by_id.values()),
+    )
+    stored_text = stored[0][3]["edge_text"]
+    # Nothing was synthesized over it, and the bare affirmative proposition is not the text.
+    assert stored_text == edge.edge_text
+    assert stored_text != f"{assertion.name} asserted by smith."
+
+
+def test_derived_asserted_by_edge_text_marks_an_unrecorded_stance_as_unrecorded():
+    chunk = _make_chunk("The payment was late.")
+    graph = _QualifiedGraph(
+        nodes=[
+            _person("n1", "Smith", "the defendant"),
+            _QualifiedNode(
+                id="n2",
+                name="Payment was late",
+                type="Statement",
+                description="",
+                statement_type="statement",
+                asserted_by="n1",
+            ),
+        ],
+        edges=[],
+    )
+    data_points_by_id, edges_by_identity = _construct([chunk], [graph])
+
+    assertion = _assertions(data_points_by_id)[0]
+    edge = edges_by_identity[
+        EdgeIdentity(
+            source_id=str(assertion.id),
+            target_id=str(Entity.id_for("Smith")),
+            relationship_name="asserted_by",
+        )
+    ]
+
+    # An unknown stance is neither affirmed nor denied, and an empty description adds
+    # nothing rather than trailing whitespace.
+    assert edge.edge_text == "Smith takes an unrecorded stance on Payment was late."
+
+
+def test_derived_attribution_and_response_edges_carry_the_speech_act_and_stance():
+    chunk = _make_chunk("Jones alleges the payment was late. Smith denies it.")
+    data_points_by_id, edges_by_identity = _construct([chunk], [_dispute_graph()])
+
+    by_statement_type = _by_statement_type(data_points_by_id)
+    denial = by_statement_type["denial"]
+    allegation = by_statement_type["allegation"]
+    response_text = edges_by_identity[
+        EdgeIdentity(
+            source_id=str(denial.id),
+            target_id=str(allegation.id),
+            relationship_name="responds_to",
+        )
+    ].edge_text
+
+    assert response_text == (
+        "Payment was late (denial, negative stance) responds to Payment was late. "
+        "Smith denies the payment was late."
+    )
+
+
+def test_derived_attributed_to_edge_text_names_the_original_author():
+    chunk = _make_chunk("The brief reports Vance's appraisal.")
+    graph = _QualifiedGraph(
+        nodes=[
+            _person("n1", "Dolores Vance", "the appraiser"),
+            _QualifiedNode(
+                id="n2",
+                name="The building is worth 4.2 million dollars",
+                type="Record",
+                description="The brief reports Vance's opinion of the value.",
+                statement_type="record",
+                polarity="positive",
+                attributed_to="n1",
+            ),
+        ],
+        edges=[],
+    )
+    data_points_by_id, edges_by_identity = _construct([chunk], [graph])
+
+    assertion = _assertions(data_points_by_id)[0]
+    edge = edges_by_identity[
+        EdgeIdentity(
+            source_id=str(assertion.id),
+            target_id=str(Entity.id_for("Dolores Vance")),
+            relationship_name="attributed_to",
+        )
+    ]
+
+    assert edge.edge_text == (
+        "The building is worth 4.2 million dollars (record, positive stance) is attributed "
+        "to Dolores Vance. The brief reports Vance's opinion of the value."
     )
 
 

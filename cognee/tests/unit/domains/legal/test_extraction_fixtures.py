@@ -27,7 +27,10 @@ from cognee.modules.data.processing.document_types import TextDocument
 from cognee.modules.engine.models import Entity
 from cognee.modules.engine.models.Assertion import Assertion
 from cognee.modules.engine.utils import generate_node_name
+from cognee.modules.graph.utils.get_graph_from_model import get_graph_from_model
+from cognee.modules.graph.utils.prepare_edges_for_storage import ensure_default_edge_properties
 from cognee.shared.data_models import Node
+from cognee.tasks.storage.add_data_points import _create_triplets_from_graph
 from cognee.tests.unit.domains.legal.expected_graphs import EXPECTED
 
 egd_module = importlib.import_module("cognee.tasks.graph.extract_graph_from_data")
@@ -448,6 +451,46 @@ async def test_deposition_testimony_keeps_the_hedge_instead_of_a_flat_number():
     # would have seen, phrased affirmatively, and his stance on it is negative.
     assert unseen.name == "ellerbee saw the driver look to his right before the bus started to move"
     assert unseen.polarity == "negative"
+
+
+@pytest.mark.asyncio
+async def test_denied_testimony_reaches_the_completion_context_as_a_denial():
+    """The stance must survive all the way into the text retrieval embeds and shows.
+
+    An empty edge description is not neutral: ``ensure_default_edge_properties`` fills it
+    in from the endpoint labels, and for this assertion the affirmative proposition plus
+    "asserted by" reads as the opposite of the testimony it came from.
+    """
+    chunk, graph = await run_fixture("deposition_qa")
+    unseen = assertion_for(chunk, graph, "testimony-driver-glance")
+    ellerbee = find_one(entities(chunk), "Raymond Ellerbee")
+
+    nodes, edges = await get_graph_from_model(chunk)
+    stored_edges = ensure_default_edge_properties(edges, nodes)
+    asserted_by_edges = [
+        edge
+        for edge in stored_edges
+        if (str(edge[0]), str(edge[1]), edge[2])
+        == (str(unseen.id), str(ellerbee.id), "asserted_by")
+    ]
+    assert len(asserted_by_edges) == 1
+    edge_text = asserted_by_edges[0][3]["edge_text"]
+
+    assert "denies" in edge_text
+    assert "Ellerbee says he did not see this" in edge_text
+    # Not the synthesized fallback, which states the proposition as though it happened.
+    assert edge_text != f"{unseen.name} asserted by {ellerbee.name}."
+    assert not edge_text.startswith(unseen.name)
+
+    triplets = _create_triplets_from_graph(nodes, stored_edges)
+    triplet_texts = [
+        triplet.text
+        for triplet in triplets
+        if triplet.from_node_id == str(unseen.id) and triplet.to_node_id == str(ellerbee.id)
+    ]
+    assert len(triplet_texts) == 1
+    assert "denies" in triplet_texts[0]
+    assert edge_text in triplet_texts[0]
 
 
 @pytest.mark.asyncio
