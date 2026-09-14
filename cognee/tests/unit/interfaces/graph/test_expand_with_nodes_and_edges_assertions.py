@@ -498,3 +498,104 @@ def test_unresolved_speaker_is_kept_as_text_without_an_edge():
     assertion = _assertions(data_points_by_id)[0]
     assert assertion.asserted_by == "Unknown Party"
     assert "asserted_by" not in _relationship_names(edges_by_identity)
+
+
+def _answer_graph(responds_to: str) -> _QualifiedGraph:
+    return _QualifiedGraph(
+        nodes=[
+            _person("n1", "Jones", "the plaintiff"),
+            _person("n2", "Smith", "the defendant"),
+            _QualifiedNode(
+                id="n3",
+                name="Payment was late",
+                type="Allegation",
+                description="Jones alleges the payment was late",
+                statement_type="allegation",
+                polarity="positive",
+                asserted_by="n1",
+            ),
+            _QualifiedNode(
+                id="n4",
+                name="Payment was late",
+                type="Denial",
+                description="Smith denies the payment was late",
+                statement_type="denial",
+                polarity="negative",
+                asserted_by="n2",
+                responds_to=responds_to,
+            ),
+        ],
+        edges=[],
+    )
+
+
+def _by_statement_type(data_points_by_id) -> dict[str, Assertion]:
+    return {assertion.statement_type: assertion for assertion in _assertions(data_points_by_id)}
+
+
+def test_reference_to_another_assertion_persists_that_assertions_id():
+    # "n3" is a token of one LLM response and means nothing once stored, so the graph must
+    # keep the id of the node it named instead.
+    chunk = _make_chunk()
+    data_points_by_id, _ = _construct([chunk], [_answer_graph("n3")])
+
+    by_statement_type = _by_statement_type(data_points_by_id)
+    assert by_statement_type["denial"].responds_to == str(by_statement_type["allegation"].id)
+
+
+def test_unresolved_reference_locator_is_kept_as_written():
+    chunk = _make_chunk()
+    data_points_by_id, _ = _construct([chunk], [_answer_graph("Complaint ¶17")])
+
+    assert _by_statement_type(data_points_by_id)["denial"].responds_to == "Complaint ¶17"
+
+
+def test_attribution_to_another_assertion_persists_that_assertions_id():
+    chunk = _make_chunk()
+    graph = _QualifiedGraph(
+        nodes=[
+            _QualifiedNode(
+                id="n1",
+                name="The building is worth 4.2 million dollars",
+                type="Opinion",
+                description="Vance's appraisal opinion",
+                statement_type="opinion",
+            ),
+            _QualifiedNode(
+                id="n2",
+                name="The building is worth 4.2 million dollars",
+                type="Record",
+                description="The brief reports Vance's opinion",
+                statement_type="record",
+                attributed_to="n1",
+            ),
+        ],
+        edges=[],
+    )
+    data_points_by_id, _ = _construct([chunk], [graph])
+
+    by_statement_type = _by_statement_type(data_points_by_id)
+    assert by_statement_type["record"].attributed_to == str(by_statement_type["opinion"].id)
+
+
+def test_statement_type_text_is_normalized_the_way_identity_is():
+    # A model declaring `statement_type: str` may hand back the capitalized word; identity
+    # normalizes it, so the stored property must be normalized too.
+    chunk = _make_chunk()
+    graph = _QualifiedGraph(
+        nodes=[
+            _QualifiedNode(
+                id="n1",
+                name="Payment was late",
+                type="Denial",
+                description="Smith denies the payment was late",
+                statement_type="Denial",
+            )
+        ],
+        edges=[],
+    )
+    data_points_by_id, _ = _construct([chunk], [graph])
+
+    assertion = _assertions(data_points_by_id)[0]
+    assert assertion.statement_type == "denial"
+    assert assertion.id == Assertion.id_for("payment was late", str(chunk.id), "denial", None, 1)

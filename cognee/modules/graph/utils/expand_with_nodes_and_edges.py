@@ -50,8 +50,14 @@ def _enum_value(value):
 
 
 def _statement_type_value(extracted_node: Node) -> str:
+    """The speech act to store, normalized the way identity normalizes it.
+
+    A model declaring ``statement_type: str`` may hand back "Denial" where the enum-typed
+    model hands back "denial"; identity folds those together, so the stored property has
+    to fold them together too.
+    """
     statement_type = _enum_value(getattr(extracted_node, "statement_type", None))
-    return statement_type or generate_node_name(extracted_node.type)
+    return generate_node_name(statement_type or extracted_node.type)
 
 
 def _node_id_by_reference(extracted_graph: KnowledgeGraph) -> dict[str, str]:
@@ -283,7 +289,9 @@ def _resolve_display_name(
 
     A reference to an entity of this extraction becomes that entity's normalized name, so
     the stored value matches the node the derived edge points at. Anything else — an
-    unknown party, or a reference to another assertion — is kept as written.
+    unknown party, or a reference to another assertion — is kept as written here; a
+    reference to another assertion is rewritten to that assertion's id afterwards, once
+    every assertion exists (``_repoint_assertion_references_at_resolved_ids``).
     """
     resolved_node_id = _resolve_reference(value, node_id_by_reference)
     if resolved_node_id is not None:
@@ -294,6 +302,40 @@ def _resolve_display_name(
             return referenced_entity.name
 
     return value
+
+
+def _repoint_assertion_references_at_resolved_ids(
+    assertion_nodes: list[Node],
+    node_id_by_reference: dict[str, str],
+    entities_by_extracted_node_id: dict[str, Entity],
+) -> None:
+    """Store the id of a referenced assertion instead of the LLM's graph-local token.
+
+    "n4" or "answer-p17-denial" only means something inside the single extraction response
+    that invented it, so an assertion pointing at another assertion of the same response
+    keeps that assertion's stored id. Locators that name nothing in the response
+    ("Complaint ¶17") and references to plain entities are left exactly as they were.
+
+    Runs after every assertion exists, because the target's id is what is being stored.
+    Both fields are non-identity fields, so rewriting them cannot move a node; the
+    identity field ``asserted_by`` is deliberately untouched.
+    """
+    for extracted_node in assertion_nodes:
+        assertion = entities_by_extracted_node_id.get(extracted_node.id)
+        if not isinstance(assertion, Assertion):
+            continue
+
+        for field_name in ("responds_to", "attributed_to"):
+            target_node_id = _resolve_reference(
+                getattr(extracted_node, field_name, None),
+                node_id_by_reference,
+            )
+            if target_node_id is None or target_node_id == extracted_node.id:
+                continue
+
+            referenced_data_point = entities_by_extracted_node_id.get(target_node_id)
+            if isinstance(referenced_data_point, Assertion):
+                setattr(assertion, field_name, str(referenced_data_point.id))
 
 
 def _convert_extracted_nodes_to_data_points(
@@ -379,6 +421,12 @@ def _convert_extracted_nodes_to_data_points(
             data_points_by_id[assertion_key] = assertion
         entities_by_extracted_node_id[extracted_node.id] = assertion
         _link_chunk_to_entity(data_chunk, extracted_node, assertion)
+
+    _repoint_assertion_references_at_resolved_ids(
+        assertion_nodes,
+        node_id_by_reference,
+        entities_by_extracted_node_id,
+    )
 
     return entities_by_extracted_node_id
 
