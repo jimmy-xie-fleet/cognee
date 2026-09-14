@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from cognee.domains.legal.models import Polarity
 from cognee.infrastructure.databases.provenance import EdgeIdentity
 from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.data.processing.document_types import TextDocument
@@ -39,6 +40,12 @@ class _QualifiedNode(Node):
     scope: Optional[str] = None
     source_quote: Optional[str] = None
     responds_to: Optional[str] = None
+
+
+class _LegalLikeNode(_QualifiedNode):
+    """Mirrors the legal profile's node, whose ``polarity`` is a typed enum member."""
+
+    polarity: Optional[Polarity] = None
 
 
 class _QualifiedGraph(KnowledgeGraph):
@@ -576,6 +583,39 @@ def test_attribution_to_another_assertion_persists_that_assertions_id():
 
     by_statement_type = _by_statement_type(data_points_by_id)
     assert by_statement_type["record"].attributed_to == str(by_statement_type["opinion"].id)
+
+
+@pytest.mark.parametrize(
+    "node_class,polarity,expected",
+    [
+        (_QualifiedNode, None, "unknown"),
+        (_QualifiedNode, "negative", "negative"),
+        (_LegalLikeNode, None, "unknown"),
+        (_LegalLikeNode, Polarity.NEGATIVE, "negative"),
+        (_LegalLikeNode, Polarity.POSITIVE, "positive"),
+    ],
+    ids=["omitted", "text_negative", "enum_omitted", "enum_negative", "enum_positive"],
+)
+def test_missing_polarity_is_stored_as_unknown_never_as_positive(node_class, polarity, expected):
+    # The extraction schema leaves polarity optional, so a schema-valid extraction can omit
+    # it. Storing "positive" for a stance nobody recorded invents the speaker's agreement.
+    chunk = _make_chunk()
+    graph = _QualifiedGraph(
+        nodes=[
+            node_class(
+                id="n1",
+                name="Payment was late",
+                type="Allegation",
+                description="A claim the extraction gave no stance for",
+                statement_type="allegation",
+                polarity=polarity,
+            )
+        ],
+        edges=[],
+    )
+    data_points_by_id, _ = _construct([chunk], [graph])
+
+    assert _assertions(data_points_by_id)[0].polarity == expected
 
 
 def test_statement_type_text_is_normalized_the_way_identity_is():

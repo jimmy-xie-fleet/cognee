@@ -34,9 +34,8 @@ class Assertion(Entity):
     """
 
     statement_type: str
-    # The speaker's stance on the affirmative proposition in name: "positive" affirms it,
-    # "negative" denies or negates it. Independent of statement_type.
-    polarity: str = "positive"
+    # speaker's stance on the affirmative proposition in name: "positive" | "negative" | "unknown"
+    polarity: str = "unknown"
     asserted_by: Optional[str] = None  # normalized speaker name; an edge is derived too
     attributed_to: Optional[str] = None
     applicable_time: Optional[str] = None  # ISO date/period the claim is about

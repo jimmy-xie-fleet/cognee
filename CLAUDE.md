@@ -793,7 +793,8 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   subclass), keyed on name + chunk + statement type + speaker + occurrence — `name` is the
   proposition phrased affirmatively and `polarity` is the speaker's stance on it, so an
   allegation and the denial answering it share a name and are still always two nodes, even
-  with identical wording, and are never merged across speakers, statement types, or chunks.
+  with identical wording, and are never merged across speakers, statement types, or chunks;
+  an omitted polarity is stored as `unknown`, never assumed positive.
 - **Search**: assertions are embedded in the `Assertion_name` vector collection, separate from
   `Entity_name`.
 - **Explicit kwargs, no env var** — there is no global switch; every call that wants legal

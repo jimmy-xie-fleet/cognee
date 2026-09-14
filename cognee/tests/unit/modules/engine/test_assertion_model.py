@@ -98,6 +98,11 @@ class TestAssertionIdentity:
         )
         assert base.id != changed.id
 
+    def test_polarity_defaults_to_unknown(self):
+        # An unrecorded stance is unknown, never an affirmation of the proposition.
+        assertion = Assertion(name="x", description="d", statement_type="statement")
+        assert assertion.polarity == "unknown"
+
     def test_type_attribute_is_assertion(self):
         assertion = Assertion(name="x", description="d", statement_type="statement")
         assert assertion.type == "Assertion"

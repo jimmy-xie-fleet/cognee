@@ -60,6 +60,17 @@ def _statement_type_value(extracted_node: Node) -> str:
     return generate_node_name(statement_type or extracted_node.type)
 
 
+def _polarity_value(extracted_node: Node) -> str:
+    """The stance to store: what was extracted, or "unknown" when nothing was.
+
+    The extraction schema leaves ``polarity`` optional, so a schema-valid extraction can
+    omit it. Defaulting an unrecorded stance to "positive" would have the graph state that
+    the speaker affirms a proposition nobody said they affirm — the one reading a denial
+    must never get — so a missing stance stays missing.
+    """
+    return _enum_value(getattr(extracted_node, "polarity", None)) or "unknown"
+
+
 def _node_id_by_reference(extracted_graph: KnowledgeGraph) -> dict[str, str]:
     """Index of the references an assertion may use to point at another node.
 
@@ -262,7 +273,7 @@ def _create_assertion(
         belongs_to_set=data_chunk.belongs_to_set,
         importance_weight=data_chunk.importance_weight,
         statement_type=_statement_type_value(extracted_node),
-        polarity=_enum_value(getattr(extracted_node, "polarity", None)) or "positive",
+        polarity=_polarity_value(extracted_node),
         asserted_by=speaker_name,
         attributed_to=attributed_name,
         applicable_time=getattr(extracted_node, "applicable_time", None),
