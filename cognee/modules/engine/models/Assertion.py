@@ -25,13 +25,19 @@ STATEMENT_TYPE_NAMES = frozenset(member.value for member in StatementType)
 class Assertion(Entity):
     """One occurrence of somebody asserting something.
 
+    ``name`` is the underlying proposition phrased affirmatively, ``statement_type`` is the
+    speech act and ``polarity`` is the speaker's stance on that proposition, so an allegation
+    and the denial answering it share one name.
+
     Never merged across speakers, statement types, or chunks: an allegation and the denial that
     answers it are two nodes even when their text is identical.
     """
 
     statement_type: str
-    polarity: str = "positive"  # "positive" | "negative"
-    asserted_by: Optional[str] = None  # speaker display name; an edge is derived too
+    # The speaker's stance on the affirmative proposition in name: "positive" affirms it,
+    # "negative" denies or negates it. Independent of statement_type.
+    polarity: str = "positive"
+    asserted_by: Optional[str] = None  # normalized speaker name; an edge is derived too
     attributed_to: Optional[str] = None
     applicable_time: Optional[str] = None  # ISO date/period the claim is about
     applies_from: Optional[str] = None

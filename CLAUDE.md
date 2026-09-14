@@ -280,7 +280,7 @@ Key files:
 - **DataPoint** - Base class for all graph nodes (versioned, with metadata)
 - **Edge** - Graph relationships (source, target, relationship type)
 - **Triplet** - (Subject, Predicate, Object) representation
-- **Assertion** - An Entity subclass for one source-attributed statement occurrence (speaker, statement type, polarity, dates, quote); never merged across speakers, types or chunks
+- **Assertion** - An Entity subclass for one source-attributed statement occurrence (speaker, statement type, polarity, dates, quote); `name` is the underlying proposition phrased affirmatively and `polarity` is the speaker's stance on it (independent of statement type), so an allegation and its denial share a name; never merged across speakers, types or chunks
 
 #### Graph Models (`cognee/shared/data_models.py`)
 - **KnowledgeGraph** - Container for nodes and edges
@@ -790,16 +790,22 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
 (`load_legal_extraction_prompt()`), `ontology/legal.owl`, and `prompts/legal_extraction_system.txt`.
 
 - **Identity rule**: each statement occurrence becomes its own `Assertion` node (an `Entity`
-  subclass), keyed on name + chunk + statement type + speaker + occurrence — an allegation and
-  the denial answering it are always two nodes, even with identical wording, and are never
-  merged across speakers, statement types, or chunks.
+  subclass), keyed on name + chunk + statement type + speaker + occurrence — `name` is the
+  proposition phrased affirmatively and `polarity` is the speaker's stance on it, so an
+  allegation and the denial answering it share a name and are still always two nodes, even
+  with identical wording, and are never merged across speakers, statement types, or chunks.
 - **Search**: assertions are embedded in the `Assertion_name` vector collection, separate from
   `Entity_name`.
 - **Explicit kwargs, no env var** — there is no global switch; every call that wants legal
   extraction must splat `legal_profile()` in.
 - Recommend `self_improvement=False` until the `improve()`/`memify()` enrichment paths are made
-  assertion-aware.
-- **Limitations**: speaker context is resolved per chunk, not across the whole document;
+  assertion-aware: they are safe to run — nothing is corrupted — but they simply skip
+  assertions, because their tasks filter on `type == "Entity"` and an `Assertion` node's type
+  is `"Assertion"`.
+- **Limitations**: fuzzy grounding runs at a 0.9 cutoff, which is sensitive to pluralization —
+  a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
+  enum-constrained `statement_type` still drives the assertion property, so only the OWL `is_a`
+  link is lost; speaker context is resolved per chunk, not across the whole document;
   `HYBRID_COMPLETION` searches `Entity_name` only, so it misses assertions unless paired with a
   search type that also queries `Assertion_name`; relationship names (e.g. `asserted_by`,
   `supersedes`) are not ontology-grounded, only node types are; do not combine with

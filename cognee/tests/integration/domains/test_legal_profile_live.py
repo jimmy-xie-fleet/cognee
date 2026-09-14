@@ -26,6 +26,9 @@ import cognee
 from cognee.domains.legal import legal_profile
 from cognee.infrastructure.databases.graph import get_graph_engine
 from cognee.modules.engine.models.Assertion import STATEMENT_TYPE_NAMES
+from cognee.shared.logging_utils import get_logger
+
+logger = get_logger("tests.legal_profile_live")
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("LLM_API_KEY") or os.getenv("COGNEE_LIVE_LEGAL_TESTS") != "1",
@@ -90,4 +93,9 @@ async def test_legal_profile_extracts_grounded_assertions():
         asserted_by_edges = [edge for edge in edges if edge[2] == "asserted_by"]
         assert asserted_by_edges, "expected at least one asserted_by edge"
     finally:
-        await cognee.forget(dataset=DATASET_NAME)
+        # Cleanup must never replace the failure that brought us here: a run that failed
+        # before the dataset existed would otherwise report the forget() error instead.
+        try:
+            await cognee.forget(dataset=DATASET_NAME)
+        except Exception as cleanup_error:  # noqa: BLE001 - reported, never raised
+            logger.warning("cleanup of dataset %s failed: %s", DATASET_NAME, cleanup_error)

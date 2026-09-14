@@ -7,6 +7,11 @@ every ``source_quote`` is copied verbatim out of its passage, and the qualifier 
 carry the distinctions the profile exists to keep — who said it, when it was said as
 against when it happened, whether it was denied, and under what conditions.
 
+Every assertion ``name`` is the underlying proposition phrased affirmatively:
+``statement_type`` carries the speech act and ``polarity`` the speaker's stance on that
+proposition, so an allegation and the denial answering it share one name and differ only
+in speech act, speaker and stance.
+
 ``test_extraction_fixtures.py`` feeds these graphs to the real construction path in
 place of the LLM's output, so they are both the tests' input and the profile's worked
 examples of the behaviour the prompt asks for.
@@ -62,8 +67,9 @@ def _complaint_p17_p18_warning() -> LegalKnowledgeGraph:
                 applicable_time="2025-02-20",
                 report_date="2026-03-10",
                 source_quote=(
-                    "her supervisor had instructed warehouse staff to falsify driver "
-                    "hours-of-service logs"
+                    "On February 20, 2025, Plaintiff Amara Okafor reported to Meridian's "
+                    "Director of Human Resources that her supervisor had instructed "
+                    "warehouse staff to falsify driver hours-of-service logs."
                 ),
             ),
             LegalNode(
@@ -121,7 +127,11 @@ def _complaint_p17_p18_warning() -> LegalKnowledgeGraph:
 
 
 def _answer_p17_denial() -> LegalKnowledgeGraph:
-    """A denial stays a denial: negative polarity, no opposite fact invented."""
+    """A denial stays a denial: the affirmative proposition, negative stance.
+
+    Nothing is re-emitted as a positive statement of the opposite fact, and the recited
+    Paragraph 18 allegation and its denial share one name.
+    """
     return LegalKnowledgeGraph(
         nodes=[
             LegalNode(
@@ -156,10 +166,11 @@ def _answer_p17_denial() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="denial-p17",
-                name="Meridian denies every allegation of Paragraph 17 of the Complaint",
+                name="The allegations of Paragraph 17 of the Complaint are true",
                 type="Denial",
                 description=(
-                    "Meridian's answer to Paragraph 17. It denies the allegation; it does "
+                    "Meridian's answer to Paragraph 17. The passage states no proposition "
+                    "of its own, so the denial is of the paragraph's allegations; it does "
                     "not assert that the opposite is true."
                 ),
                 statement_type=StatementType.DENIAL,
@@ -172,18 +183,56 @@ def _answer_p17_denial() -> LegalKnowledgeGraph:
                 ),
             ),
             LegalNode(
+                id="allegation-p18-recited",
+                name=(
+                    "Meridian issued Okafor a written warning on March 3, 2025 in "
+                    "retaliation for her February 20, 2025 report"
+                ),
+                type="Allegation",
+                description=(
+                    "The allegation of Paragraph 18 of the Complaint, as the Answer recites "
+                    "it before denying it. Okafor is the one making it."
+                ),
+                statement_type=StatementType.ALLEGATION,
+                polarity=Polarity.POSITIVE,
+                asserted_by="okafor",
+                applicable_time="2025-03-03",
+                source_quote=(
+                    "the written warning issued to Ms. Okafor on March 3, 2025 was issued "
+                    "in retaliation for her February 20, 2025 report"
+                ),
+            ),
+            LegalNode(
+                id="denial-p18",
+                name=(
+                    "Meridian issued Okafor a written warning on March 3, 2025 in "
+                    "retaliation for her February 20, 2025 report"
+                ),
+                type="Denial",
+                description=(
+                    "Meridian's answer to the recited Paragraph 18 allegation: the same "
+                    "proposition, denied."
+                ),
+                statement_type=StatementType.DENIAL,
+                polarity=Polarity.NEGATIVE,
+                asserted_by="meridian",
+                report_date="2026-04-07",
+                responds_to="allegation-p18-recited",
+                source_quote="Denied.",
+            ),
+            LegalNode(
                 id="statement-audit",
                 name=(
                     "An internal audit of Meridian's driver hours-of-service records "
-                    "completed on February 14, 2025 identified no falsified entries"
+                    "completed on February 14, 2025 identified falsified entries"
                 ),
                 type="Statement",
                 description=(
-                    "A positive factual statement Meridian makes on its own account, "
-                    "limited to the period the audit reviewed."
+                    "A factual statement Meridian makes on its own account, negating the "
+                    "proposition for the period the audit reviewed."
                 ),
                 statement_type=StatementType.STATEMENT,
-                polarity=Polarity.POSITIVE,
+                polarity=Polarity.NEGATIVE,
                 asserted_by="meridian",
                 applicable_time="2025-02-14",
                 report_date="2026-04-07",
@@ -282,7 +331,7 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="denial-title",
-                name="Okafor never held the title of operations manager",
+                name="Okafor held the title of operations manager",
                 type="Denial",
                 description="Meridian denies the job title pleaded in Paragraph 2.",
                 statement_type=StatementType.DENIAL,
@@ -294,7 +343,7 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="denial-supervision",
-                name="Okafor supervised no Meridian employee",
+                name="Okafor supervised Meridian employees",
                 type="Denial",
                 description="Meridian denies the supervisory role pleaded in Paragraph 2.",
                 statement_type=StatementType.DENIAL,
@@ -306,7 +355,7 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="denial-pay-reduction",
-                name="Okafor's compensation was not reduced during her employment",
+                name="Okafor's compensation was reduced during her employment",
                 type="Denial",
                 description="Meridian denies the pay reduction pleaded in Paragraph 2.",
                 statement_type=StatementType.DENIAL,
@@ -321,7 +370,7 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="denial-residual",
-                name="Meridian denies the remaining allegations of Paragraph 2 of the Complaint",
+                name="The remaining allegations of Paragraph 2 of the Complaint are true",
                 type="Denial",
                 description="The catch-all denial closing the partial answer.",
                 statement_type=StatementType.DENIAL,
@@ -489,8 +538,9 @@ def _appraisals_opposing() -> LegalKnowledgeGraph:
 def _lease_amendment() -> LegalKnowledgeGraph:
     """An amendment supersedes a term without erasing it; both periods survive.
 
-    Contract terms have no speaker in the passage, so ``asserted_by`` stays null
-    rather than being guessed at — the prompt's rule, and the one fixture here that
+    The passage names no speaker for these terms and no pleading party appears in it,
+    so the prompt's rule — speaker not named, pleading party absent, leave
+    ``asserted_by`` null rather than guess — applies. It is the one fixture here that
     derives no ``asserted_by`` edge.
     """
     return LegalKnowledgeGraph(
@@ -542,7 +592,11 @@ def _lease_amendment() -> LegalKnowledgeGraph:
                 applies_to="2027-12-31",
                 precision=Precision.EXACT,
                 scope="base rent for Suite 210, 44 Canal Street",
-                source_quote="Tenant shall pay base rent of $4,000.00 per month",
+                source_quote=(
+                    "Tenant shall pay base rent of $4,000.00 per month, payable on the "
+                    "first day of each month, for the term commencing January 1, 2023 and "
+                    "ending December 31, 2027."
+                ),
             ),
             LegalNode(
                 id="term-amended-rent",
@@ -572,7 +626,6 @@ def _lease_amendment() -> LegalKnowledgeGraph:
                 description="The First Amendment's savings clause.",
                 statement_type=StatementType.TERM,
                 polarity=Polarity.POSITIVE,
-                applies_from="2024-07-01",
                 conditions=["Except as amended by this First Amendment"],
                 source_quote="all terms of the Lease remain in full force and effect",
             ),
@@ -677,21 +730,19 @@ def _deposition_qa() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="testimony-driver-glance",
-                name=(
-                    "Ellerbee did not see the driver look to his right before the bus "
-                    "started to move"
-                ),
+                name=("Ellerbee saw the driver look to his right before the bus started to move"),
                 type="Testimony",
                 description=(
-                    "A statement about what the witness observed, not about what the driver "
-                    "did: he was watching the crosswalk rather than the cab."
+                    "Ellerbee says he did not see this — a statement about what the witness "
+                    "observed, not about what the driver did: he was watching the crosswalk "
+                    "rather than the cab."
                 ),
                 statement_type=StatementType.TESTIMONY,
                 polarity=Polarity.NEGATIVE,
                 asserted_by="ellerbee",
                 report_date="2025-05-22",
                 scope="what the witness observed, not what the driver did",
-                source_quote="I was watching the crosswalk, not the cab.",
+                source_quote="No. I was watching the crosswalk, not the cab.",
             ),
         ],
         edges=[
@@ -809,9 +860,11 @@ def _ambiguous_names() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="statement-no-permit",
-                name="The City of Clifton has issued no building permit for 300 Harlow Street",
+                name="The City of Clifton has issued a building permit for 300 Harlow Street",
                 type="Statement",
-                description="A negative statement about the City, recorded in the minutes.",
+                description=(
+                    "Recorded in the minutes: the board states that no such permit has issued."
+                ),
                 statement_type=StatementType.STATEMENT,
                 polarity=Polarity.NEGATIVE,
                 asserted_by="clifton-planning-board",
@@ -891,7 +944,7 @@ def _email_proposal() -> LegalKnowledgeGraph:
             LegalNode(
                 id="proposal-equity-offer",
                 name=(
-                    "Stonebridge Capital Partners offers $38,500,000 in cash for 100% of "
+                    "Stonebridge Capital Partners will pay $38,500,000 in cash for 100% of "
                     "the equity of Arcadia Instruments, Inc."
                 ),
                 type="Proposal",
@@ -919,7 +972,7 @@ def _email_proposal() -> LegalKnowledgeGraph:
             ),
             LegalNode(
                 id="statement-nonbinding",
-                name="The letter of interest creates no binding obligation on either party",
+                name="The letter of interest creates a binding obligation on either party",
                 type="Statement",
                 description=("The email says in terms that it is an expression of interest only."),
                 statement_type=StatementType.STATEMENT,

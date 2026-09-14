@@ -12,6 +12,7 @@ asks for.
 from __future__ import annotations
 
 import importlib
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,14 @@ FIXTURE_STEMS = (
     "deposition_qa",
     "ambiguous_names",
     "email_proposal",
+)
+
+
+# Words an assertion ``name`` may not carry: the proposition is affirmative, so negation
+# belongs in ``polarity`` and the speech act in ``statement_type``.
+FORBIDDEN_IN_ASSERTION_NAME = re.compile(
+    r"\b(not|no|never|neither|nor|denies|denied|alleges|alleged|failed to)\b",
+    re.IGNORECASE,
 )
 
 
@@ -134,18 +143,52 @@ def relations(data_point: Entity) -> list[tuple[str, str]]:
 
 
 def find_one(points: list[Entity], name: str) -> Entity:
-    """The single data point carrying the (normalized) name of an expected node."""
+    """The single entity carrying the (normalized) name of an expected node.
+
+    Entities are addressable by name; assertions are not — see ``assertion_for``.
+    """
     matches = [point for point in points if point.name == generate_node_name(name)]
     assert len(matches) == 1, f"expected exactly one {name!r}, found {len(matches)}"
     return matches[0]
 
 
-def assertion_for(chunk: DocumentChunk, node: Node) -> Assertion:
-    return find_one(assertions(chunk), node.name)
-
-
 def node_by_id(graph: LegalKnowledgeGraph, node_id: Optional[str]) -> Optional[Node]:
     return next((node for node in graph.nodes if node.id == node_id), None)
+
+
+def speaker_name(graph: LegalKnowledgeGraph, asserted_by: Optional[str]) -> Optional[str]:
+    """What construction stores in ``asserted_by``: the speaker node's normalized name.
+
+    A reference that names no node of the graph is kept as written, exactly as
+    ``_resolve_display_name`` keeps it.
+    """
+    speaker_node = node_by_id(graph, asserted_by)
+    return generate_node_name(speaker_node.name) if speaker_node is not None else asserted_by
+
+
+def assertion_key(name: str, statement_type: str, asserted_by: Optional[str]) -> tuple:
+    return (generate_node_name(name), statement_type, asserted_by)
+
+
+def assertion_for(chunk: DocumentChunk, graph: LegalKnowledgeGraph, node_id: str) -> Assertion:
+    """The constructed assertion for one expected node, keyed the way identity is keyed.
+
+    Name alone is not a key and must never become one: an allegation and the denial
+    answering it share one proposition by design and differ by speech act and speaker.
+    """
+    node = node_by_id(graph, node_id)
+    assert node is not None, f"no expected node {node_id!r}"
+
+    wanted = assertion_key(
+        node.name, node.statement_type.value, speaker_name(graph, node.asserted_by)
+    )
+    matches = [
+        assertion
+        for assertion in assertions(chunk)
+        if assertion_key(assertion.name, assertion.statement_type, assertion.asserted_by) == wanted
+    ]
+    assert len(matches) == 1, f"expected exactly one {wanted!r}, found {len(matches)}"
+    return matches[0]
 
 
 def statement_types(chunk: DocumentChunk) -> list[str]:
@@ -183,13 +226,37 @@ def test_fixture_conditions_are_verbatim(stem):
 
 
 @pytest.mark.parametrize("stem", FIXTURE_STEMS)
+def test_assertion_names_are_affirmative_propositions(stem):
+    """The convention the prompt states: the stance lives in ``polarity``, not in ``name``.
+
+    A name carrying a negation would double-negate against ``polarity``, and a name
+    carrying the speech act would duplicate ``statement_type`` — either way an allegation
+    and the denial answering it would stop sharing one proposition.
+    """
+    for node in assertion_nodes(EXPECTED[stem]):
+        forbidden = FORBIDDEN_IN_ASSERTION_NAME.findall(node.name)
+        assert not forbidden, f"{stem}/{node.id}: {forbidden} in {node.name!r}"
+
+
+@pytest.mark.parametrize("stem", FIXTURE_STEMS)
 def test_expected_graph_is_internally_consistent(stem):
     """Ids unique, reference fields either resolve or are plain locator text."""
     graph = EXPECTED[stem]
     node_ids = [node.id for node in graph.nodes]
+    entity_names = [
+        generate_node_name(node.name) for node in graph.nodes if node.statement_type is None
+    ]
+    # Assertions are deliberately left out: an allegation and its denial share one name.
+    assertion_keys = [
+        assertion_key(node.name, node.statement_type.value, node.asserted_by)
+        for node in assertion_nodes(graph)
+    ]
 
     assert len(set(node_ids)) == len(node_ids)
-    assert len({generate_node_name(node.name) for node in graph.nodes}) == len(node_ids)
+    assert len(set(entity_names)) == len(entity_names)
+    assert len(set(assertion_keys)) == len(assertion_keys), (
+        "two assertions with one identity would be occurrences of one statement"
+    )
     for node in assertion_nodes(graph):
         assert node.type.lower() == node.statement_type.value
         if node.asserted_by is not None:
@@ -261,7 +328,7 @@ async def test_named_speakers_get_a_derived_asserted_by_edge(stem):
 
     for node in [node for node in assertion_nodes(graph) if node.asserted_by]:
         speaker_node = node_by_id(graph, node.asserted_by)
-        assertion = assertion_for(chunk, node)
+        assertion = assertion_for(chunk, graph, node.id)
 
         assert assertion.asserted_by == generate_node_name(speaker_node.name)
         assert ("asserted_by", generate_node_name(speaker_node.name)) in relations(assertion)
@@ -286,35 +353,35 @@ async def test_complaint_keeps_the_filing_date_apart_from_the_alleged_facts_date
 @pytest.mark.asyncio
 async def test_answer_denial_stays_a_denial_and_keeps_its_unresolved_locator():
     chunk, graph = await run_fixture("answer_p17_denial")
-    denial = assertion_for(chunk, node_by_id(graph, "denial-p17"))
-    audit_statement = assertion_for(chunk, node_by_id(graph, "statement-audit"))
+    denial = assertion_for(chunk, graph, "denial-p17")
+    audit_statement = assertion_for(chunk, graph, "statement-audit")
 
     assert denial.statement_type == "denial"
     assert denial.polarity == "negative"
+    # The proposition is affirmative; the denial of it lives in polarity.
+    assert denial.name == "the allegations of paragraph 17 of the complaint are true"
     # A locator that names no node is kept as text, and derives no edge.
     assert denial.responds_to == "Complaint ¶17"
     assert "responds_to" not in [name for name, _target in relations(denial)]
 
     assert audit_statement.statement_type == "statement"
-    assert audit_statement.polarity == "positive"
+    # "identified no falsified entries" is the affirmative proposition, negated.
+    assert audit_statement.polarity == "negative"
+    assert audit_statement.name.endswith("identified falsified entries")
     assert audit_statement.applicable_time == "2025-02-14"
 
 
 @pytest.mark.asyncio
 async def test_an_allegation_and_the_denial_answering_it_are_two_nodes():
-    complaint_chunk, complaint_graph = await run_fixture("complaint_p17_p18_warning")
-    answer_chunk, answer_graph = await run_fixture("answer_p17_denial")
-    allegation = assertion_for(
-        complaint_chunk, node_by_id(complaint_graph, "allegation-p17-report")
-    )
-    denial = assertion_for(answer_chunk, node_by_id(answer_graph, "denial-p17"))
+    chunk, graph = await run_fixture("complaint_p17_p18_warning")
+    allegation = assertion_for(chunk, graph, "allegation-p17-report")
 
-    assert allegation.id != denial.id
-    # And they would still be two nodes pleaded in one chunk by one speaker with one
-    # wording: the statement type is part of the identity, not decoration on it.
-    assert Assertion.id_for(allegation.name, "chunk", "allegation", "meridian", 1) != (
-        Assertion.id_for(allegation.name, "chunk", "denial", "meridian", 1)
-    )
+    # Two nodes even when pleaded in one chunk by one speaker with one wording: the
+    # statement type is part of the identity, not decoration on it. (The same pair on
+    # the real path is ``test_recited_allegation_and_its_denial_...`` below.)
+    assert Assertion.id_for(
+        allegation.name, allegation.source_chunk_id, "allegation", "meridian", 1
+    ) != (Assertion.id_for(allegation.name, allegation.source_chunk_id, "denial", "meridian", 1))
 
 
 @pytest.mark.asyncio
@@ -333,8 +400,8 @@ async def test_partial_answer_yields_one_distinct_node_per_admission_and_denial(
 @pytest.mark.asyncio
 async def test_opposing_appraisals_are_two_attributed_opinions_not_successive_facts():
     chunk, graph = await run_fixture("appraisals_opposing")
-    vance_opinion = assertion_for(chunk, node_by_id(graph, "opinion-vance-value"))
-    baptiste_opinion = assertion_for(chunk, node_by_id(graph, "opinion-baptiste-value"))
+    vance_opinion = assertion_for(chunk, graph, "opinion-vance-value")
+    baptiste_opinion = assertion_for(chunk, graph, "opinion-baptiste-value")
 
     assert [vance_opinion.statement_type, baptiste_opinion.statement_type] == ["opinion", "opinion"]
     assert vance_opinion.attributed_to == "dolores vance"
@@ -355,8 +422,8 @@ async def test_opposing_appraisals_are_two_attributed_opinions_not_successive_fa
 @pytest.mark.asyncio
 async def test_lease_amendment_supersedes_the_original_term_without_replacing_it():
     chunk, graph = await run_fixture("lease_amendment")
-    original = assertion_for(chunk, node_by_id(graph, "term-original-rent"))
-    amended = assertion_for(chunk, node_by_id(graph, "term-amended-rent"))
+    original = assertion_for(chunk, graph, "term-original-rent")
+    amended = assertion_for(chunk, graph, "term-amended-rent")
 
     assert ("supersedes", original.name) in relations(amended)
     # Both periods survive: the amendment does not overwrite the original term.
@@ -370,14 +437,16 @@ async def test_lease_amendment_supersedes_the_original_term_without_replacing_it
 @pytest.mark.asyncio
 async def test_deposition_testimony_keeps_the_hedge_instead_of_a_flat_number():
     chunk, graph = await run_fixture("deposition_qa")
-    distance = assertion_for(chunk, node_by_id(graph, "testimony-distance"))
-    unseen = assertion_for(chunk, node_by_id(graph, "testimony-driver-glance"))
+    distance = assertion_for(chunk, graph, "testimony-distance")
+    unseen = assertion_for(chunk, graph, "testimony-driver-glance")
 
     assert distance.statement_type == "testimony"
     assert distance.precision == "approximate"
     assert distance.conditions == ["I'm not certain"]
     assert distance.report_date == "2025-05-22"
-    # "I did not see it" is not "it did not happen".
+    # "I did not see it" is not "it did not happen": the proposition is what the witness
+    # would have seen, phrased affirmatively, and his stance on it is negative.
+    assert unseen.name == "ellerbee saw the driver look to his right before the bus started to move"
     assert unseen.polarity == "negative"
 
 
@@ -402,22 +471,42 @@ async def test_similar_names_stay_distinct_entities_and_speakers_resolve():
     assert smith.id != smith_holdings.id
 
     # The sidewalk promise was made by the person, not by the applicant company.
-    promise = assertion_for(chunk, node_by_id(graph, "statement-smith-sidewalk"))
+    promise = assertion_for(chunk, graph, "statement-smith-sidewalk")
     assert promise.asserted_by == "mr. smith"
     assert ("asserted_by", "mr. smith") in relations(promise)
     assert ("asserted_by", "smith holdings llc") not in relations(promise)
 
-    board_finding = assertion_for(chunk, node_by_id(graph, "finding-site-plan-recommendation"))
+    board_finding = assertion_for(chunk, graph, "finding-site-plan-recommendation")
     assert board_finding.asserted_by == "clifton planning board"
 
 
 @pytest.mark.asyncio
 async def test_diligence_email_offer_is_a_conditional_proposal_not_a_term():
     chunk, graph = await run_fixture("email_proposal")
-    offer = assertion_for(chunk, node_by_id(graph, "proposal-equity-offer"))
+    offer = assertion_for(chunk, graph, "proposal-equity-offer")
 
     assert offer.statement_type == "proposal"
     assert "term" not in statement_types(chunk)
     assert "subject to diligence" in offer.conditions
     assert offer.report_date == "2025-02-18"
     assert offer.applies_from is None and offer.applies_to is None
+
+
+@pytest.mark.asyncio
+async def test_recited_allegation_and_its_denial_share_one_name_and_stay_two_nodes():
+    """The dispute signal: one proposition, two speech acts, opposite stances."""
+    chunk, graph = await run_fixture("answer_p17_denial")
+    allegation = assertion_for(chunk, graph, "allegation-p18-recited")
+    denial = assertion_for(chunk, graph, "denial-p18")
+
+    assert allegation.name == denial.name
+    assert allegation.id != denial.id
+    assert (allegation.statement_type, allegation.polarity) == ("allegation", "positive")
+    assert (denial.statement_type, denial.polarity) == ("denial", "negative")
+    assert (allegation.asserted_by, denial.asserted_by) == (
+        "amara okafor",
+        "meridian logistics, inc.",
+    )
+    # The denial names the allegation node, so the stored reference is that node's id.
+    assert denial.responds_to == str(allegation.id)
+    assert ("responds_to", allegation.name) in relations(denial)

@@ -19,14 +19,25 @@ class Precision(str, Enum):
 
 
 class LegalNode(Node):
+    name: str = Field(
+        default="",
+        description=(
+            "The underlying proposition phrased affirmatively as one declarative sentence; "
+            "no negation words, no speech-act verbs."
+        ),
+    )
     statement_type: Optional[StatementType] = Field(
-        None, description="Set ONLY for assertion nodes: the kind of statement being made."
+        None,
+        description=(
+            "Set ONLY for assertion nodes: the speech act (allegation, denial, ...), not "
+            "the stance."
+        ),
     )
     polarity: Optional[Polarity] = Field(
         None,
         description=(
-            "negative for denials and 'did not' claims; never restate a denial as the "
-            "opposite positive fact."
+            "The speaker's stance on the name proposition: positive affirms it, negative "
+            "denies or negates it. Independent of statement_type."
         ),
     )
     asserted_by: Optional[str] = Field(

@@ -30,6 +30,7 @@ DEFAULT_WIDE_SEARCH_TOP_K = 100
 # neighborhood.
 _SEED_VECTOR_COLLECTIONS = [
     "Entity_name",
+    "Assertion_name",
     "TextSummary_text",
     "EntityType_name",
     "DocumentChunk_text",

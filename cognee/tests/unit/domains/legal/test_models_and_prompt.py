@@ -101,12 +101,17 @@ class TestSchema:
         defs = schema.get("$defs", {})
         legal_node_def = defs["LegalNode"]
         properties = legal_node_def["properties"]
+        assert properties["name"]["description"] == (
+            "The underlying proposition phrased affirmatively as one declarative "
+            "sentence; no negation words, no speech-act verbs."
+        )
         assert properties["statement_type"]["description"] == (
-            "Set ONLY for assertion nodes: the kind of statement being made."
+            "Set ONLY for assertion nodes: the speech act (allegation, denial, ...), not "
+            "the stance."
         )
         assert properties["polarity"]["description"] == (
-            "negative for denials and 'did not' claims; never restate a denial as the "
-            "opposite positive fact."
+            "The speaker's stance on the name proposition: positive affirms it, negative "
+            "denies or negates it. Independent of statement_type."
         )
         assert properties["asserted_by"]["description"] == (
             "id of the node for the person or organization making this statement."
@@ -137,25 +142,38 @@ class TestSamplePayload:
                     "description": "Defendant company named in the complaint.",
                 },
                 {
+                    # The proposition is phrased affirmatively and its speaker affirms it.
                     "id": "complaint-p18",
-                    "name": "Meridian failed to repair the roof after the March 2022 storm.",
+                    "name": "The Meridian warehouse roof leaked after the March 2022 storm.",
                     "type": "Allegation",
-                    "description": "Okafor alleges Meridian failed to repair storm damage.",
+                    "description": "Okafor alleges the roof leaked after the storm.",
                     "statement_type": "allegation",
-                    "polarity": "negative",
+                    "polarity": "positive",
                     "asserted_by": "okafor",
                     "applicable_time": "2022-03",
-                    "source_quote": "Meridian failed to repair the roof after the March 2022 storm.",
+                    "source_quote": "the roof leaked after the March 2022 storm",
                 },
                 {
-                    "id": "answer-p17-denial",
-                    "name": "Meridian denies it failed to repair the roof after the storm.",
+                    # Same proposition, denied: only statement_type and polarity move.
+                    "id": "answer-p18-denial",
+                    "name": "The Meridian warehouse roof leaked after the March 2022 storm.",
                     "type": "Denial",
-                    "description": "Meridian denies the allegation in Complaint paragraph 17.",
+                    "description": "Meridian denies the allegation in Complaint paragraph 18.",
                     "statement_type": "denial",
                     "polarity": "negative",
                     "asserted_by": "meridian",
-                    "responds_to": "Complaint ¶17",
+                    "responds_to": "Complaint ¶18",
+                },
+                {
+                    # Polarity is the stance, not the speech act: a negated allegation is
+                    # an allegation with negative polarity, never a renamed denial.
+                    "id": "complaint-p19",
+                    "name": "Meridian repaired the roof after the March 2022 storm.",
+                    "type": "Allegation",
+                    "description": "Okafor alleges Meridian never repaired the storm damage.",
+                    "statement_type": "allegation",
+                    "polarity": "negative",
+                    "asserted_by": "okafor",
                 },
             ],
             "edges": [
@@ -166,7 +184,7 @@ class TestSamplePayload:
                     "description": "Okafor asserts the roof-repair allegation.",
                 },
                 {
-                    "source_node_id": "answer-p17-denial",
+                    "source_node_id": "answer-p18-denial",
                     "target_node_id": "complaint-p18",
                     "relationship_name": "responds_to",
                     "description": "Meridian's denial responds to Okafor's allegation.",
@@ -178,9 +196,17 @@ class TestSamplePayload:
         dumped = graph.model_dump()
         round_tripped = LegalKnowledgeGraph.model_validate(dumped)
 
-        denial = next(node for node in round_tripped.nodes if node.id == "answer-p17-denial")
+        by_id = {node.id: node for node in round_tripped.nodes}
+        allegation = by_id["complaint-p18"]
+        denial = by_id["answer-p18-denial"]
+
+        # One proposition, two speech acts, opposite stances.
+        assert allegation.name == denial.name
+        assert allegation.polarity == Polarity.POSITIVE
         assert denial.polarity == Polarity.NEGATIVE
-        assert denial.responds_to == "Complaint ¶17"
+        assert denial.responds_to == "Complaint ¶18"
+        # And polarity is independent of the speech act: an allegation can be negative.
+        assert by_id["complaint-p19"].polarity == Polarity.NEGATIVE
 
 
 class TestPrompt:
