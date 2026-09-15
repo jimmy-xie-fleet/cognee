@@ -1227,6 +1227,12 @@ async def test_three_consecutive_failed_calls_break_the_circuit(caplog):
     assert summary["llm_failed"] == 3
     assert NOTE_LLM_CIRCUIT_BROKEN in summary["notes"]
     assert any("circuit" in record.message.lower() for record in caplog.records)
+    # R13's second half: a trace that never got an answer writes nothing at all, so a
+    # later pass (or a healthy provider) is free to try every one of them again.
+    patched = dict(graph.update_node_calls)
+    for assertion_id in [A_DENIAL, A_STIPULATION] + [_nid(f"denial-{index}") for index in range(4)]:
+        assert graph.edges_of(assertion_id, "responds_to") == []
+        assert assertion_id not in patched
 
 
 @pytest.mark.asyncio
@@ -1549,6 +1555,24 @@ def _stored_attempt(note, *, fingerprint=DENIAL_FINGERPRINT, max_iter=None):
     if max_iter is not None:
         record["max_iter"] = max_iter
     return record
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_stored_as_a_json_string_is_read_back():
+    """Neo4j stores a dict property as a JSON string, so the guard has to read both
+    shapes (the dict shape is covered by the test above)."""
+    graph = _base_graph()
+    graph.nodes[A_DENIAL]["responds_to_resolution"] = json.dumps(
+        _stored_attempt(NOTE_LLM_ABSTAINED)
+    )
+
+    _, summary, mocks = await _run(graph, default=abstain())
+
+    # Only the stipulation's reference was traced; the denial's was already attempted.
+    assert summary["traces_started"] == 1
+    assert mocks.llm.await_count == 1
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    assert A_DENIAL not in dict(graph.update_node_calls)
 
 
 @pytest.mark.asyncio
