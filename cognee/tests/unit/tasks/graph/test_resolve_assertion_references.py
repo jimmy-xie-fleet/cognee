@@ -1225,6 +1225,9 @@ async def test_three_consecutive_failed_calls_break_the_circuit(caplog):
 
     assert mocks.llm.await_count == 3
     assert summary["llm_failed"] == 3
+    # R25: the budget charged three attempts; none of them came back with an answer.
+    assert summary["llm_calls_attempted"] == 3
+    assert summary["llm_calls"] == 0
     assert NOTE_LLM_CIRCUIT_BROKEN in summary["notes"]
     assert any("circuit" in record.message.lower() for record in caplog.records)
     # R13's second half: a trace that never got an answer writes nothing at all, so a
@@ -2170,6 +2173,7 @@ async def test_the_summary_reports_every_budget_counter():
 
     for key in (
         "llm_calls",
+        "llm_calls_attempted",
         "llm_calls_stated",
         "llm_calls_inferred",
         "llm_budget",
@@ -2192,4 +2196,6 @@ async def test_the_summary_reports_every_budget_counter():
     assert isinstance(summary["tool_calls_by_name"], dict)
     assert summary["llm_calls_stated"] == summary["llm_calls"]
     assert summary["llm_calls_inferred"] == 0
+    # Every attempt came back, so the two spend counters agree here.
+    assert summary["llm_calls_attempted"] == summary["llm_calls"]
     assert summary["traces_finished"] == 2

@@ -16,12 +16,15 @@ Budget/behaviour flags -- leave any of these unset to let ``CognifyConfig`` deci
 stated loop). ``--show-traces`` prints each planned resolution's stored tracer steps --
 the model's one-sentence reason, then one indented line per tool call.
 
-Prints the summary counters (including the budget spent, the trace outcomes, the
-per-tool call counts, and the unstated-inference counts), one line per resolution the
-plan proposes, and one line per reference that stayed dangling (a non-UUID
-``responds_to``/``attributed_to`` reference the plan did not touch -- including a
-structured-only reference held in ``<field>_ref`` with a blank plain field -- plus
-every UUID-shaped value pointing at a node no longer in the graph).
+Prints the summary counters (including the budget spent -- ``llm_calls`` are the calls
+that came back, ``llm_calls_attempted`` is what the budget was charged -- the trace
+outcomes, the per-tool call counts, and the unstated-inference counts), one line per
+resolution the plan proposes, and one line per reference that stayed dangling (a non-UUID
+``responds_to``/``attributed_to`` reference the plan did not touch and no edge already
+answers -- including a structured-only reference held in ``<field>_ref`` with a blank
+plain field -- plus every UUID-shaped value pointing at a node no longer in the graph).
+The count beside that heading (``dangling_listed``) reconciles the list with the
+``unresolved`` and ``ambiguous`` counters above it.
 
 ``--apply`` writes the plan (edges, then node patches) via ``write_resolutions``.
 
@@ -78,15 +81,23 @@ def _resolution_line(view, resolution) -> str:
     )
 
 
+TRACE_PREVIEW_CHARS = 300
+
+
+def _one_line(value, limit: int = TRACE_PREVIEW_CHARS) -> str:
+    """A stored preview as one line: tool output is document text and carries newlines."""
+    return " ".join(str(value or "").split())[:limit]
+
+
 def _trace_lines(resolution) -> list:
     """One line for the model's reason, then one indented line per stored tool step."""
     if not getattr(resolution, "trace", None):
         return []
-    lines = [f"  reason: {resolution.reason}"]
+    lines = [f"  reason: {_one_line(resolution.reason)}"]
     for i, step in enumerate(resolution.trace, start=1):
         lines.append(
-            f"    step {i}: {step.get('tool')}({step.get('args')}) "
-            f"ok={step.get('ok')} -> {step.get('result_preview')}"
+            f"    step {i}: {step.get('tool')}({_one_line(step.get('args'))}) "
+            f"ok={step.get('ok')} -> {_one_line(step.get('result_preview'))}"
         )
     return lines
 
@@ -99,8 +110,25 @@ def _stale_line(field_name: str, reference_text: str) -> str:
     return f'{field_name}: "{reference_text}" → stale id 0.00 - -'
 
 
+def _covered_keys(view):
+    """``(assertion id, field)`` pairs that already have an edge for that field.
+
+    The planner counts those ``already_resolved`` and emits no ``Resolution`` for them,
+    so without this every such reference would be listed as unresolved. The common case
+    is the whole extraction tail: ``entity_name`` links the reference and leaves the
+    field holding the name, which reads exactly like a dangling reference.
+    """
+    return {(source_id, relationship) for source_id, _target_id, relationship in view.edge_keys}
+
+
 def _dangling_entries(
-    view, reference_fields, resolved_keys, *, parse_reference_hint, reference_display_text
+    view,
+    reference_fields,
+    resolved_keys,
+    *,
+    parse_reference_hint,
+    reference_display_text,
+    covered_keys=frozenset(),
 ):
     """References the plan left untouched -- what did not resolve.
 
@@ -108,10 +136,10 @@ def _dangling_entries(
     dangling (unresolved or ambiguous) is recovered here by walking every assertion's
     reference fields. A field is dangling when it holds no already-resolved id (an
     id-shaped string is either resolved or dead -- see ``_stale_entries`` for the dead
-    ones) and the hint built from ``<field>_ref`` (falling back to the plain field or
-    ``<field>_text``) is non-empty -- this also catches a structured-only reference
-    (``responds_to`` blank, ``responds_to_ref`` a dict), which a plain-string read would
-    miss entirely.
+    ones), no edge already answers it (``covered_keys``), and the hint built from
+    ``<field>_ref`` (falling back to the plain field or ``<field>_text``) is non-empty --
+    this also catches a structured-only reference (``responds_to`` blank,
+    ``responds_to_ref`` a dict), which a plain-string read would miss entirely.
     """
     entries = []
     for assertion_id, props in view.assertions.items():
@@ -120,6 +148,8 @@ def _dangling_entries(
             if isinstance(value, str) and _is_uuid_like(value.strip()):
                 continue
             if (assertion_id, field_name) in resolved_keys:
+                continue
+            if (assertion_id, field_name) in covered_keys:
                 continue
             hint = parse_reference_hint(
                 props.get(f"{field_name}_ref"),
@@ -134,7 +164,7 @@ def _dangling_entries(
     return entries
 
 
-def _stale_entries(view, reference_fields, resolved_keys):
+def _stale_entries(view, reference_fields, resolved_keys, covered_keys=frozenset()):
     """UUID-shaped reference values pointing at a node that is no longer in the graph.
 
     A forgotten document or an amended one re-chunked under new ids leaves the field
@@ -152,6 +182,8 @@ def _stale_entries(view, reference_fields, resolved_keys):
             if not _is_uuid_like(value) or value in view.node_ids:
                 continue
             if (assertion_id, field_name) in resolved_keys:
+                continue
+            if (assertion_id, field_name) in covered_keys:
                 continue
             entries.append((field_name, value))
     return entries
@@ -227,6 +259,7 @@ async def run(args: argparse.Namespace) -> int:
         # against CognifyConfig.
         print(
             f"llm_budget={summary.get('llm_budget', 0)} llm_calls={summary.get('llm_calls', 0)} "
+            f"llm_calls_attempted={summary.get('llm_calls_attempted', 0)} "
             f"llm_calls_stated={summary.get('llm_calls_stated', 0)} "
             f"llm_calls_inferred={summary.get('llm_calls_inferred', 0)} "
             f"llm_budget_exhausted={summary.get('llm_budget_exhausted', 0)} "
@@ -241,6 +274,7 @@ async def run(args: argparse.Namespace) -> int:
             f"llm_abstained={summary.get('llm_abstained', 0)} "
             f"llm_below_threshold={summary.get('llm_below_threshold', 0)} "
             f"llm_unknown_label={summary.get('llm_unknown_label', 0)} "
+            f"llm_malformed_step={summary.get('llm_malformed_step', 0)} "
             f"llm_failed={summary.get('llm_failed', 0)} "
             f"llm_skipped_empty_graph={summary.get('llm_skipped_empty_graph', 0)}"
         )
@@ -260,15 +294,19 @@ async def run(args: argparse.Namespace) -> int:
                     print(line)
 
         resolved_keys = {(resolution.assertion_id, resolution.field) for resolution in resolutions}
+        covered_keys = _covered_keys(view)
         dangling = _dangling_entries(
             view,
             REFERENCE_FIELDS,
             resolved_keys,
             parse_reference_hint=parse_reference_hint,
             reference_display_text=reference_display_text,
+            covered_keys=covered_keys,
         )
-        stale = _stale_entries(view, REFERENCE_FIELDS, resolved_keys)
-        print("\nunresolved / ambiguous references:")
+        stale = _stale_entries(view, REFERENCE_FIELDS, resolved_keys, covered_keys)
+        # Printed so the list reconciles with the counters above: it should now match
+        # unresolved + ambiguous.
+        print(f"\nunresolved / ambiguous references: dangling_listed={len(dangling) + len(stale)}")
         for field_name, reference_text in dangling:
             print(_dangling_line(field_name, reference_text))
         for field_name, reference_text in stale:

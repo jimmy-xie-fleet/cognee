@@ -264,8 +264,11 @@ def _empty_summary() -> Dict[str, Any]:
         "nodes_patched": 0,
         "dry_run": False,
         "notes": [],
-        # What the pass spent, and on what.
+        # What the pass spent, and on what. ``llm_calls`` counts the calls that came
+        # back; ``llm_calls_attempted`` is what the budget was charged (a failed call is
+        # charged too), so ``llm_calls_attempted == llm_budget`` is what exhaustion means.
         "llm_calls": 0,
+        "llm_calls_attempted": 0,
         "llm_calls_stated": 0,
         "llm_calls_inferred": 0,
         "llm_budget": 0,
@@ -673,6 +676,10 @@ async def plan_resolutions(
             )
 
     _fold_counters(summary, counters)
+    # Straight off the budget rather than out of the counters: it is the budget that was
+    # charged, and a report showing ``llm_calls=297/300`` beside an exhausted budget is
+    # the confusing half of that difference (R25).
+    summary["llm_calls_attempted"] = budget.used
     summary["llm_tokens_in"] = usage.tokens_in
     summary["llm_tokens_out"] = usage.tokens_out
 
