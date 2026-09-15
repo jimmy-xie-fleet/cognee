@@ -845,9 +845,14 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   ingesting document, so they do not follow that document's `forget()`; there are no
   edge-evidence rows for resolved references, and re-resolution never deletes a stale edge;
   `update_node` is implemented only on the Ladybug adapter, so other graph backends get the
-  reference edges without the field rewrite; and a `find_disputes.py`-style consumer must read
+  reference edges without the field rewrite; a `find_disputes.py`-style consumer must read
   `responds_to` **edges**, not the field, since a paragraph anchor can be a chunk id shared by
-  several allegations.
+  several allegations; a reference whose text names an existing entity (extraction often mints
+  a stub entity per cited document, e.g. `"september 22, 2026 deposition"`) is linked to that
+  entity by the `entity_name` cascade step and is never re-matched to the Document node, since
+  `entity_name` runs before document matching is attempted; and an intra-document
+  self-reference (`"realleges ¶¶ 1-23"`) is left unresolved by the own-document penalty, which
+  discounts a document match against the reference's own source document.
 
 ### Skills (Procedural Memory)
 Dataset-scoped `SKILL.md` playbooks agents can discover, load on demand, execute, and improve from run history.
