@@ -63,10 +63,14 @@ def legal_profile(
     Splat the result directly into either call, e.g. ``cognee.cognify(**legal_profile())``.
 
     ``resolve_references`` (default ``True``) ships the reference-resolver as an
-    ``enrichment_tasks`` entry, so every legal-profile cognify run ends by turning the
-    document's dangling ``responds_to``/``attributed_to`` text into graph edges scoped
-    to what this ingestion touched. Set it to ``False`` to opt out (e.g. to drive the
-    resolver separately via ``resolve_references_pipeline``).
+    ``enrichment_tasks`` entry scoped to what this ingestion touched. That tail runs
+    with ``allow_llm=False`` (decision D1: LLM calls happen only in the ``improve()``/
+    memify pass, never on ingest): it resolves only exact-id and entity-name
+    references, makes no LLM call, and reads no document text. A reference it cannot
+    answer is left dangling for the agentic pass -- ``resolve_references_pipeline()``
+    or ``improve()`` -- to trace against the full graph. Set ``resolve_references`` to
+    ``False`` to opt out of the tail entirely (e.g. to drive resolution solely via the
+    pass).
     """
     profile: dict[str, Any] = {
         "graph_model": LegalKnowledgeGraph,
@@ -83,6 +87,8 @@ def legal_profile(
         }
 
     if resolve_references:
-        profile["enrichment_tasks"] = [Task(resolve_assertion_references, scope="touched")]
+        profile["enrichment_tasks"] = [
+            Task(resolve_assertion_references, scope="touched", allow_llm=False)
+        ]
 
     return profile

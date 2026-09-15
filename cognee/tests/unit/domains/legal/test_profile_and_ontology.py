@@ -102,6 +102,12 @@ class TestLegalProfile:
         resolve_task = enrichment_tasks[0]
         assert resolve_task.executable is resolve_assertion_references
         assert resolve_task.default_params["kwargs"]["scope"] == "touched"
+        # The discriminating behavioural guarantee -- a populated graph, allow_llm=False,
+        # tracer never called, no document text read -- is
+        # test_the_tail_never_calls_the_llm_and_never_reads_a_document in
+        # cognee/tests/unit/tasks/graph/test_resolve_assertion_references.py; this
+        # assertion only pins that the shipped profile carries the kwarg.
+        assert resolve_task.default_params["kwargs"]["allow_llm"] is False
 
     def test_include_ontology_false_omits_config(self):
         profile = legal_profile(include_ontology=False)
