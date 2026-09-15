@@ -71,11 +71,14 @@ async def resolve_references_pipeline(
             ``REFERENCE_TRACER_MAX_ITER``.
         llm_confidence_threshold: Below this the agent's answer is recorded but never
             linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
-        infer_unstated: Opt into inferring unstated denial/allegation links (decision
-            D2). Accepted and forwarded now; the inference pass itself lands with the
-            ``llm_inferred`` strategy, so today the option changes nothing.
-        infer_confidence_threshold: The higher bar an inferred link is held to. Same
-            status as ``infer_unstated``.
+        infer_unstated: Also infer the link a denial or an admission that references
+            nothing is answering (decision D2, strategy ``llm_inferred``). Off by
+            default; it draws on the same ``llm_max_calls`` budget, strictly after every
+            stated reference was offered a trace. ``None`` takes
+            ``REFERENCE_INFER_UNSTATED``.
+        infer_confidence_threshold: The higher bar an inferred link is held to -- below
+            it the answer is recorded and never linked. ``None`` takes
+            ``REFERENCE_INFER_CONFIDENCE_THRESHOLD``.
         user: Acting user; the default user is used when omitted.
         dataset: Dataset name (or id) whose graph to resolve.
         run_in_background: Forwarded to ``memify``.

@@ -141,7 +141,7 @@ async def test_pipeline_rejects_an_invalid_iteration_cap(bad_iterations):
 
 @pytest.mark.asyncio
 async def test_pipeline_forwards_the_unstated_inference_options():
-    """Accepted and forwarded now; the pass itself lands in the unstated-inference task."""
+    """The detect Task binds both, and the pass reads them off its own arguments."""
     _, memify_mock, _, _ = await _run(infer_unstated=True, infer_confidence_threshold=0.8)
 
     detect_options = memify_mock.call_args.kwargs["extraction_tasks"][0].default_params["kwargs"]
