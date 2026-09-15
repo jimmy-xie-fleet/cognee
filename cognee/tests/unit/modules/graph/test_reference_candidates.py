@@ -457,7 +457,10 @@ def test_format_candidate_lines_multiple_candidates_one_line_each():
     ]
 
 
-def test_format_candidate_lines_asserts_text_has_no_newlines():
+def test_format_candidate_lines_collapses_embedded_newline_onto_one_line():
+    # A directly-constructed Candidate (e.g. a Task 7/8 tool preview) may not have gone
+    # through merge_candidates'/apply_penalty's _collapse_whitespace -- format_candidate_lines
+    # must still render it on exactly one line rather than trusting the caller.
     candidate = Candidate(
         label="A1",
         node_id="n1",
@@ -466,7 +469,67 @@ def test_format_candidate_lines_asserts_text_has_no_newlines():
         text="line one\nline two",
         document_name="Doc A",
     )
-    with pytest.raises(AssertionError):
+    result = format_candidate_lines([candidate])
+    assert len(result.splitlines()) == 1
+    assert result == '[A1] Assertion in "Doc A": "line one line two"'
+
+
+def test_format_candidate_lines_collapses_bare_carriage_return_onto_one_line():
+    # str.splitlines() (and many terminal/log renderers) break on a bare "\r" too, not
+    # just "\n" -- both must be neutralised, not only the one checked by a naive guard.
+    candidate = Candidate(
+        label="A1",
+        node_id="n1",
+        node_type="Assertion",
+        score=0.9,
+        text="line one\rline two",
+        document_name="Doc A",
+    )
+    result = format_candidate_lines([candidate])
+    assert len(result.splitlines()) == 1
+    assert result == '[A1] Assertion in "Doc A": "line one line two"'
+
+
+def test_format_candidate_lines_multiple_directly_constructed_candidates_stay_one_line_each():
+    candidates = [
+        Candidate(
+            label="A1",
+            node_id="n1",
+            node_type="Assertion",
+            score=0.9,
+            text="a\rb",
+            document_name="Doc A",
+        ),
+        Candidate(
+            label="A2",
+            node_id="n2",
+            node_type="Assertion",
+            score=0.9,
+            text="c\nd",
+            document_name="Doc A",
+        ),
+    ]
+    result = format_candidate_lines(candidates)
+    assert len(result.splitlines()) == len(candidates)
+
+
+def test_format_candidate_lines_raises_value_error_if_collapse_leaves_a_break(monkeypatch):
+    # The collapse regex (\s+) can never leave a bare \n or \r behind, so this guard is
+    # unreachable in practice -- it documents the contract and, unlike a bare assert,
+    # survives python -O / PYTHONOPTIMIZE. Force the unreachable branch by neutering the
+    # collapse step.
+    import cognee.modules.graph.utils.reference_candidates as reference_candidates_module
+
+    monkeypatch.setattr(reference_candidates_module, "_collapse_whitespace", lambda text: text)
+    candidate = Candidate(
+        label="A1",
+        node_id="n1",
+        node_type="Assertion",
+        score=0.9,
+        text="line one\nline two",
+        document_name="Doc A",
+    )
+    with pytest.raises(ValueError):
         format_candidate_lines([candidate])
 
 

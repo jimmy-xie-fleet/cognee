@@ -243,8 +243,22 @@ def _document_label(candidate: Candidate) -> str:
     return "unknown document"
 
 
+def _single_line_text(candidate: Candidate) -> str:
+    # Defensive, not merely documentary: merge_candidates/apply_penalty already collapse
+    # whitespace, but a Candidate can be constructed directly (e.g. a Task 7/8 tool
+    # preview), so this function must not trust the caller. Re-collapsing here also
+    # neutralises a bare "\r" -- str.splitlines() (and many terminal/log renderers) break
+    # on "\r" alone, not just "\n", so checking for "\n" only would miss it.
+    text = _collapse_whitespace(candidate.text)
+    if "\n" in text or "\r" in text:
+        # Unreachable through _collapse_whitespace's \s+ regex; kept as a raised error
+        # (not a bare assert) so the contract survives python -O / PYTHONOPTIMIZE.
+        raise ValueError("candidate text must render on a single line after collapsing")
+    return text
+
+
 def _format_candidate_line(candidate: Candidate) -> str:
-    assert "\n" not in candidate.text, "candidate text must already be newline-free"
+    text = _single_line_text(candidate)
 
     if candidate.node_type in _TYPE_WORD_BY_NODE_TYPE:
         type_word = _TYPE_WORD_BY_NODE_TYPE[candidate.node_type]
@@ -253,10 +267,10 @@ def _format_candidate_line(candidate: Candidate) -> str:
         )
         return (
             f'[{candidate.label}] {type_word} in "{_document_label(candidate)}"'
-            f'{chunk_suffix}: "{candidate.text}"'
+            f'{chunk_suffix}: "{text}"'
         )
 
-    return f'[{candidate.label}] Document "{_document_label(candidate)}": "{candidate.text}"'
+    return f'[{candidate.label}] Document "{_document_label(candidate)}": "{text}"'
 
 
 def format_candidate_lines(candidates: Iterable[Candidate]) -> str:
