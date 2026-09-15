@@ -77,6 +77,7 @@ class RememberKwargs(TypedDict, total=False):
     embedding_config: Any
     config: Any  # per-call ontology config, see cognee.modules.ontology.ontology_config.Config
     temporal_cognify: bool  # routed to cognify(); ignores graph_model/custom_prompt
+    enrichment_tasks: list  # routed to cognify(); appended to the pipeline tail
 
 
 # Kwarg routing: which RememberKwargs go to add(), cognify(), or both.
@@ -92,7 +93,9 @@ _ADD_ONLY = frozenset(
         "max_rows_per_table",
     }
 )
-_COGNIFY_ONLY = frozenset({"graph_model", "chunks_per_batch", "config", "temporal_cognify"})
+_COGNIFY_ONLY = frozenset(
+    {"graph_model", "chunks_per_batch", "config", "temporal_cognify", "enrichment_tasks"}
+)
 _SHARED = frozenset(
     {
         "user",
@@ -875,6 +878,7 @@ async def remember(
                 ("custom_prompt", custom_prompt is not None),
                 ("config", kwargs.get("config") is not None),
                 ("chunk_size", chunk_size is not None),
+                ("enrichment_tasks", kwargs.get("enrichment_tasks") is not None),
             )
             if is_supplied
         ]

@@ -7,11 +7,14 @@ from cognee.modules.retrieval.utils import brute_force_triplet_search as bfts_mo
 def test_remember_kwargs_declares_config_and_temporal_cognify():
     assert "config" in RememberKwargs.__annotations__
     assert "temporal_cognify" in RememberKwargs.__annotations__
+    assert "enrichment_tasks" in RememberKwargs.__annotations__
 
 
 def test_remember_routes_config_to_cognify_only():
     assert "config" in _COGNIFY_ONLY
     assert "config" not in _ADD_ONLY | _SHARED
+    assert "enrichment_tasks" in _COGNIFY_ONLY
+    assert "enrichment_tasks" not in _ADD_ONLY | _SHARED
 
 
 def test_default_collection_list_includes_assertion_name():

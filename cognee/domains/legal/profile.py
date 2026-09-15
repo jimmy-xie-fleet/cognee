@@ -5,6 +5,8 @@ from cognee.domains.legal.models import LegalKnowledgeGraph
 from cognee.domains.legal.prompt import load_legal_extraction_prompt
 from cognee.modules.ontology.matching_strategies import FuzzyMatchingStrategy
 from cognee.modules.ontology.rdf_xml.RDFLibOntologyResolver import RDFLibOntologyResolver
+from cognee.modules.pipelines.tasks.task import Task
+from cognee.tasks.graph import resolve_assertion_references
 
 DEFAULT_LEGAL_CHUNK_SIZE = 512
 LEGAL_FUZZY_CUTOFF = 0.9
@@ -54,10 +56,17 @@ def legal_profile(
     chunk_size: int = DEFAULT_LEGAL_CHUNK_SIZE,
     ontology_file: OntologyFile = None,
     include_ontology: bool = True,
+    resolve_references: bool = True,
 ) -> dict[str, Any]:
     """Build the kwargs bundle for ``cognee.remember()`` / ``cognee.cognify()``.
 
     Splat the result directly into either call, e.g. ``cognee.cognify(**legal_profile())``.
+
+    ``resolve_references`` (default ``True``) ships the reference-resolver as an
+    ``enrichment_tasks`` entry, so every legal-profile cognify run ends by turning the
+    document's dangling ``responds_to``/``attributed_to`` text into graph edges scoped
+    to what this ingestion touched. Set it to ``False`` to opt out (e.g. to drive the
+    resolver separately via ``resolve_references_pipeline``).
     """
     profile: dict[str, Any] = {
         "graph_model": LegalKnowledgeGraph,
@@ -72,5 +81,8 @@ def legal_profile(
                 "ontology_mode": ontology_mode,
             }
         }
+
+    if resolve_references:
+        profile["enrichment_tasks"] = [Task(resolve_assertion_references, scope="touched")]
 
     return profile
