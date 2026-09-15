@@ -363,8 +363,14 @@ async def test_answer_denial_stays_a_denial_and_keeps_its_unresolved_locator():
     assert denial.polarity == "negative"
     # The proposition is affirmative; the denial of it lives in polarity.
     assert denial.name == "the allegations of paragraph 17 of the complaint are true"
-    # A locator that names no node is kept as text, and derives no edge.
-    assert denial.responds_to == "Complaint ¶17"
+    # A cross-document reference is structured, not a composed string, and derives no edge.
+    assert denial.responds_to is None
+    assert denial.responds_to_ref == {
+        "document_hint": "the Complaint",
+        "locator_kind": "paragraph",
+        "locator_value": "17",
+        "basis": "cited",
+    }
     assert "responds_to" not in [name for name, _target in relations(denial)]
 
     assert audit_statement.statement_type == "statement"
@@ -394,7 +400,8 @@ async def test_partial_answer_yields_one_distinct_node_per_admission_and_denial(
 
     assert sorted(statement_types(chunk)) == ["admission", "admission"] + ["denial"] * 4
     assert len({assertion.id for assertion in pleaded}) == len(pleaded)
-    assert {assertion.responds_to for assertion in pleaded} == {"Complaint ¶2"}
+    assert {assertion.responds_to for assertion in pleaded} == {None}
+    assert {assertion.responds_to_ref["locator_value"] for assertion in pleaded} == {"2"}
     assert {
         assertion.polarity for assertion in pleaded if assertion.statement_type == "denial"
     } == {"negative"}

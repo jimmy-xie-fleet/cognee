@@ -17,7 +17,15 @@ place of the LLM's output, so they are both the tests' input and the profile's w
 examples of the behaviour the prompt asks for.
 """
 
-from cognee.domains.legal import LegalKnowledgeGraph, LegalNode, Polarity, Precision
+from cognee.domains.legal import (
+    LegalKnowledgeGraph,
+    LegalNode,
+    LegalReference,
+    LocatorKind,
+    Polarity,
+    Precision,
+    ReferenceBasis,
+)
 from cognee.modules.engine.models.Assertion import StatementType
 from cognee.shared.data_models import Edge as KGEdge
 
@@ -177,7 +185,12 @@ def _answer_p17_denial() -> LegalKnowledgeGraph:
                 polarity=Polarity.NEGATIVE,
                 asserted_by="meridian",
                 report_date="2026-04-07",
-                responds_to="Complaint ¶17",
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="17",
+                    basis=ReferenceBasis.CITED,
+                ),
                 source_quote=(
                     "Defendant denies each and every allegation of Paragraph 17 of the Complaint"
                 ),
@@ -309,7 +322,12 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
                 applies_to="2025-04-11",
                 report_date="2026-04-07",
                 precision=Precision.EXACT,
-                responds_to="Complaint ¶2",
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="2",
+                    basis=ReferenceBasis.POSITIONAL,
+                ),
                 source_quote=(
                     "it employed Plaintiff as a dispatch coordinator from June 3, 2019 "
                     "through April 11, 2025"
@@ -326,7 +344,12 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
                 applicable_time="2025-01-01",
                 report_date="2026-04-07",
                 precision=Precision.EXACT,
-                responds_to="Complaint ¶2",
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="2",
+                    basis=ReferenceBasis.POSITIONAL,
+                ),
                 source_quote="Plaintiff's annual salary was $68,400 as of January 1, 2025",
             ),
             LegalNode(
@@ -338,7 +361,12 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
                 polarity=Polarity.NEGATIVE,
                 asserted_by="meridian",
                 report_date="2026-04-07",
-                responds_to="Complaint ¶2",
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="2",
+                    basis=ReferenceBasis.POSITIONAL,
+                ),
                 source_quote="denies that Plaintiff ever held the title of operations manager",
             ),
             LegalNode(
@@ -350,7 +378,12 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
                 polarity=Polarity.NEGATIVE,
                 asserted_by="meridian",
                 report_date="2026-04-07",
-                responds_to="Complaint ¶2",
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="2",
+                    basis=ReferenceBasis.POSITIONAL,
+                ),
                 source_quote="denies that Plaintiff supervised any Meridian employee",
             ),
             LegalNode(
@@ -362,7 +395,12 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
                 polarity=Polarity.NEGATIVE,
                 asserted_by="meridian",
                 report_date="2026-04-07",
-                responds_to="Complaint ¶2",
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="2",
+                    basis=ReferenceBasis.POSITIONAL,
+                ),
                 source_quote=(
                     "denies that Plaintiff's compensation was reduced at any time during "
                     "her employment"
@@ -377,7 +415,12 @@ def _answer_p2_partial() -> LegalKnowledgeGraph:
                 polarity=Polarity.NEGATIVE,
                 asserted_by="meridian",
                 report_date="2026-04-07",
-                responds_to="Complaint ¶2",
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="2",
+                    basis=ReferenceBasis.CITED,
+                ),
                 conditions=["Except as expressly admitted herein"],
                 source_quote=(
                     "Defendant denies each and every remaining allegation of Paragraph 2 "

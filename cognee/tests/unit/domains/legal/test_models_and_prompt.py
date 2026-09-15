@@ -457,6 +457,15 @@ class TestPrompt:
             "polarity negative" in prompt
         )
 
+    def test_prompt_asks_for_structured_references_not_composed_strings(self):
+        # The old rule manufactured a "Complaint ¶N" string; the new one asks for the
+        # structured LegalReference fields instead.
+        prompt = load_legal_extraction_prompt()
+        assert "Complaint ¶" not in prompt
+        assert "responds_to_ref" in prompt
+        assert "basis" in prompt
+        assert "positional" in prompt
+
 
 class TestForbiddenFieldNames:
     def test_no_valid_from_or_valid_to_fields(self):
