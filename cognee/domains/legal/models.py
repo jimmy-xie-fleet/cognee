@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from cognee.modules.engine.models.Assertion import CaseInsensitiveEnum, StatementType
 from cognee.shared.data_models import KnowledgeGraph, Node  # whichever provider branch is active
@@ -18,6 +18,66 @@ class Precision(CaseInsensitiveEnum):
     EXACT = "exact"
     APPROXIMATE = "approximate"
     UNKNOWN = "unknown"
+
+
+class LocatorKind(CaseInsensitiveEnum):
+    PARAGRAPH = "paragraph"
+    SECTION = "section"
+    EXHIBIT = "exhibit"
+    COUNT = "count"
+    ARTICLE = "article"
+    PAGE = "page"
+    # The passage names the source as a whole, not a place inside it.
+    NONE = "none"
+
+
+class ReferenceBasis(CaseInsensitiveEnum):
+    CITED = "cited"
+    POSITIONAL = "positional"
+    DESCRIBED = "described"
+
+
+class LegalReference(BaseModel):
+    """A reference to a source outside the passage being extracted.
+
+    Never a composed string: `document_hint`/`locator_kind`/`locator_value` are kept
+    apart so a resolver can match them against known documents without parsing prose.
+    """
+
+    document_hint: str = Field(
+        "",
+        description=(
+            "The referenced source as the passage names it, in the passage's own "
+            "words: 'the Fester Report', 'the June 10 letter', 'the Complaint', 'my "
+            "September 22, 2026 deposition'. Never a filename, never invented."
+        ),
+    )
+    locator_kind: LocatorKind = Field(
+        LocatorKind.NONE,
+        description=(
+            "The kind of place inside that source the passage names; none when the "
+            "passage names the source as a whole."
+        ),
+    )
+    locator_value: Optional[str] = Field(
+        None,
+        description=(
+            "The number or letter of that place exactly as written: '13', '4.2', "
+            "'C', 'II'. Null when locator_kind is none. Never invent one."
+        ),
+    )
+    date: Optional[str] = Field(
+        None,
+        description="ISO date the passage attaches to the reference (YYYY-MM-DD, YYYY-MM or YYYY).",
+    )
+    basis: ReferenceBasis = Field(
+        ReferenceBasis.DESCRIBED,
+        description=(
+            "cited when the passage writes the reference out; positional when a "
+            "responsive pleading answers by position and cites nothing; described "
+            "otherwise."
+        ),
+    )
 
 
 class LegalNode(Node):
@@ -49,7 +109,18 @@ class LegalNode(Node):
     )
     attributed_to: Optional[str] = Field(
         None,
-        description="id of the original author when the speaker reports someone else's opinion or finding.",
+        description=(
+            "id of the original author's node when that author appears in THIS "
+            "passage; for a statement in another document use `attributed_to_ref`."
+        ),
+    )
+    attributed_to_ref: Optional[LegalReference] = Field(
+        None,
+        description=(
+            "Structured reference to the original author's source when it is in "
+            "another document; null when that author appears in THIS passage (use "
+            "attributed_to for that) or there is no attribution."
+        ),
     )
     applicable_time: Optional[str] = Field(
         None, description="ISO date (YYYY-MM-DD, YYYY-MM or YYYY) the claimed fact is about."
@@ -79,8 +150,16 @@ class LegalNode(Node):
     responds_to: Optional[str] = Field(
         None,
         description=(
-            "Locator of the statement this responds to, e.g. 'Complaint ¶17', or that "
-            "node's id when present."
+            "id of the node this statement responds to when that node appears in "
+            "THIS passage; for a statement in another document use `responds_to_ref`."
+        ),
+    )
+    responds_to_ref: Optional[LegalReference] = Field(
+        None,
+        description=(
+            "Structured reference to the statement this responds to when it is in "
+            "another document; null when the answered statement appears in THIS "
+            "passage (use responds_to for that) or when there is no response."
         ),
     )
 
