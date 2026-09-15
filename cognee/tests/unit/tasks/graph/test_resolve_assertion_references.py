@@ -67,8 +67,12 @@ MODULE = "cognee.tasks.graph.resolve_assertion_references"
 # The trace pass lives in its own module (the task module imports its names back and
 # re-exports them), so a seam inside the pass has to be patched where the pass reads it.
 PASS = "cognee.tasks.graph.reference_pass"
-# The package re-exports the task function under the module's own name, so the module
-# object itself has to come from the import machinery rather than attribute lookup.
+# ``cognee/tasks/graph/__init__.py`` re-exports the task function under its own module's
+# name, so the package attribute ``resolve_assertion_references`` is the *function*. The
+# module object therefore has to come from the import machinery, and every seam inside it
+# is patched with ``patch.object(resolve_module, ...)``: on Python 3.10 (which CI runs)
+# ``patch("cognee.tasks.graph.resolve_assertion_references.get_graph_engine")`` resolves
+# the dotted target by attribute lookup, lands on the function and raises AttributeError.
 resolve_module = import_module(MODULE)
 pass_module = import_module(PASS)
 RETRIEVAL = "cognee.tasks.graph.reference_retrieval"
@@ -443,10 +447,11 @@ def _patched(graph, texts=None, *, locations=None, steps=(), default=None, vecto
     llm = FakeTracerLLM(steps, default=default)
 
     with (
-        patch(f"{MODULE}.get_graph_engine", new=AsyncMock(return_value=graph)),
-        patch(f"{MODULE}.index_graph_edges", new=AsyncMock()) as index_mock,
-        patch(
-            f"{MODULE}.graph_provenance_write_kwargs",
+        patch.object(resolve_module, "get_graph_engine", new=AsyncMock(return_value=graph)),
+        patch.object(resolve_module, "index_graph_edges", new=AsyncMock()) as index_mock,
+        patch.object(
+            resolve_module,
+            "graph_provenance_write_kwargs",
             new=AsyncMock(return_value=dict(PROVENANCE_KWARGS)),
         ) as provenance_mock,
         patch(
@@ -1758,8 +1763,10 @@ async def test_task_returns_its_input_and_writes_edges():
 @pytest.mark.asyncio
 async def test_task_swallows_its_own_errors(caplog):
     items = ["unchanged"]
-    with patch(f"{MODULE}._load_graph_view", new=AsyncMock(side_effect=RuntimeError("boom"))):
-        with patch(f"{MODULE}.get_graph_engine", new=AsyncMock()):
+    with patch.object(
+        resolve_module, "_load_graph_view", new=AsyncMock(side_effect=RuntimeError("boom"))
+    ):
+        with patch.object(resolve_module, "get_graph_engine", new=AsyncMock()):
             with caplog.at_level("WARNING"):
                 result = await resolve_assertion_references(items)
 
@@ -1786,8 +1793,10 @@ async def test_a_failed_pass_does_not_memoize_itself():
     graph = _base_graph()
     ctx = PipelineContext(dataset=SimpleNamespace(id=DATASET_ID), pipeline_run_id="run-1")
 
-    with patch(f"{MODULE}._load_graph_view", new=AsyncMock(side_effect=RuntimeError("boom"))):
-        with patch(f"{MODULE}.get_graph_engine", new=AsyncMock()):
+    with patch.object(
+        resolve_module, "_load_graph_view", new=AsyncMock(side_effect=RuntimeError("boom"))
+    ):
+        with patch.object(resolve_module, "get_graph_engine", new=AsyncMock()):
             await resolve_assertion_references("batch-1", ctx=ctx)
 
     assert "reference_resolution_ran" not in ctx.extras
