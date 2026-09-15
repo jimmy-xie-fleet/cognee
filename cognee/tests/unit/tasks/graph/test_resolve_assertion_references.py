@@ -853,6 +853,48 @@ async def test_a_stale_id_re_resolved_by_name_replaces_the_dead_id():
 
 
 @pytest.mark.asyncio
+async def test_a_stale_id_whose_entity_edge_exists_is_patched_without_a_new_edge():
+    """R33: the link is already there, so only the dead id is outstanding -- the patch
+    goes out and the edge is left exactly as it is (its properties survive)."""
+    graph = _base_graph()
+    dead = _nid("forgotten-entity")
+    graph.nodes[A_ATTRIBUTED]["attributed_to"] = dead
+    graph.nodes[A_ATTRIBUTED]["attributed_to_text"] = "Norman Fester"
+    graph.edges.append(
+        (A_ATTRIBUTED, ENTITY_FESTER, "attributed_to", {"resolved_by": "reference_resolver"})
+    )
+
+    _, summary, _ = await _run(graph, default=abstain())
+
+    assert graph.nodes[A_ATTRIBUTED]["attributed_to"] == ENTITY_FESTER
+    assert graph.nodes[A_ATTRIBUTED]["attributed_to_text"] == "Norman Fester"
+    # Nothing was re-emitted: the edge in the graph is the one that was already there.
+    assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
+    assert summary["stale_ids"] == 1
+    blob = _resolution_blob(graph, A_ATTRIBUTED, "attributed_to")
+    assert blob["notes"] == [NOTE_STALE_ID, "edges_exist"]
+
+
+@pytest.mark.asyncio
+async def test_an_entity_name_reference_whose_edge_exists_stays_already_resolved():
+    """The other half of R33: with the name (not a dead id) in the field there is nothing
+    left to do, so the second pass writes neither an edge nor a patch."""
+    graph = _base_graph()
+    await _run(graph, default=abstain())
+    assert [edge[1] for edge in graph.edges_of(A_ATTRIBUTED, "attributed_to")] == [ENTITY_FESTER]
+    graph.add_edges_calls.clear()
+    graph.update_node_calls.clear()
+
+    _, summary, _ = await _run(graph, default=abstain())
+
+    assert graph.nodes[A_ATTRIBUTED]["attributed_to_ref"] == ATTRIBUTED_REF
+    assert "attributed_to" not in graph.nodes[A_ATTRIBUTED]
+    assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
+    assert A_ATTRIBUTED not in dict(graph.update_node_calls)
+    assert summary["already_resolved"] >= 1
+
+
+@pytest.mark.asyncio
 async def test_a_structured_only_reference_is_never_skipped():
     """Regression: the planner used to skip any assertion whose field was blank."""
     graph = _base_graph()
@@ -1349,6 +1391,70 @@ async def test_an_unstated_denial_is_inferred_into_a_marked_edge():
 
 
 @pytest.mark.asyncio
+async def test_an_inferred_link_is_never_re_inferred_without_update_node():
+    """R31: an inference never writes the field, so on a backend that cannot patch nodes
+    the edge it wrote is the only record it ran -- without that guard every pass infers
+    the same link again and re-upserts the edge, resetting its tuned properties."""
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+    graph.update_node_supported = False
+
+    # Every reference in the graph is answered on the first pass, so the second pass has
+    # nothing left to do but re-do it -- which is what the guards have to prevent.
+    _, first, first_mocks = await _run(
+        graph,
+        steps=[
+            finish_on(MARK_ALLEGATION, 0.9),
+            finish_on(MARK_STIPULATION_PASSAGE, 0.9),
+            finish_on(MARK_ALLEGATION, 0.8),
+        ],
+        infer_unstated=True,
+    )
+    assert first["inferred_resolved"] == 1
+    assert [edge[1] for edge in graph.edges_of(A_UNSTATED, "responds_to")] == [A_1]
+    assert first_mocks.llm.await_count == 3
+    graph.add_edges_calls.clear()
+
+    _, summary, mocks = await _run(
+        graph, default=finish_on(MARK_ALLEGATION, 0.8), infer_unstated=True
+    )
+
+    assert mocks.llm.await_count == 0
+    assert summary["inferred_scanned"] == 0
+    assert graph.add_edges_calls == []
+
+
+@pytest.mark.asyncio
+async def test_touched_scope_infers_only_for_the_statements_it_touched():
+    """R31(b): the inference is seeded and traced only for touched statements, the same
+    rule the stated loop follows (R26)."""
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+    untouched = _add_unstated_denial(
+        graph,
+        node_id=_nid("assertion-unstated-elsewhere"),
+        source_chunk_id=STIPULATION_CHUNK_0,
+        name="The boundary was never agreed",
+        source_quote="Defendant denies the boundary was agreed.",
+    )
+    touched = [SimpleNamespace(made_from=SimpleNamespace(id=ANSWER_CHUNK_0))]
+
+    _, summary, mocks = await _run(
+        graph,
+        scope="touched",
+        allow_llm=True,
+        data=touched,
+        default=finish_on(MARK_ALLEGATION, 0.8),
+        infer_unstated=True,
+    )
+
+    assert summary["inferred_scanned"] == 1
+    assert [edge[1] for edge in graph.edges_of(A_UNSTATED, "responds_to")] == [A_1]
+    assert graph.edges_of(untouched, "responds_to") == []
+    assert untouched not in dict(graph.update_node_calls)
+
+
+@pytest.mark.asyncio
 async def test_a_statement_that_states_its_own_reference_is_never_inferred_over():
     """``A_DENIAL`` carries a ``responds_to_ref``, so the stated loop owns it."""
     graph = _base_graph()
@@ -1405,7 +1511,7 @@ def test_a_field_the_stated_loop_answered_is_never_inferred_over():
         "statement_type": "denial",
         "source_quote": "Defendant denies it.",
     }
-    view = SimpleNamespace(assertions={A_UNSTATED: props})
+    view = SimpleNamespace(assertions={A_UNSTATED: props}, resolver_edge_keys=set())
 
     eligible = pass_module._unstated_pending(
         view, handled=set(), force=False, touched=None, counters={}

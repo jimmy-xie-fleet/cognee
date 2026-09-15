@@ -525,11 +525,21 @@ def _unstated_pending(
     it has a proposition to search on. A field the stated loop already handled is skipped
     whatever its shape, and so is a proposition a previous pass already inferred from
     (``force`` bypasses -- the guard is for propositions that have had their chance).
+
+    The two guards the stated loop gained apply here as well (R31): an inference that
+    already wrote its edge is not made again -- which is the *only* record of it on a
+    backend that cannot patch nodes, since an inference never writes the field -- and a
+    ``touched`` scope spends on the statements that ingestion produced and leaves the rest
+    to the whole-graph pass.
     """
     entries: List[_Pending] = []
 
     for assertion_id, props in view.assertions.items():
         if (assertion_id, UNSTATED_FIELD) in handled:
+            continue
+        if touched is not None and str(props.get("source_chunk_id") or "") not in touched[0]:
+            continue
+        if not force and (assertion_id, UNSTATED_FIELD) in view.resolver_edge_keys:
             continue
         statement_type = (_text_of(props.get("statement_type")) or "").strip().casefold()
         if statement_type not in UNSTATED_STATEMENT_TYPES:
@@ -571,6 +581,8 @@ def _unstated_pending(
                 fingerprint=fingerprint,
                 entry_notes=(),
                 stale=False,
+                # Always true now that the scope filter runs above, and kept explicit so
+                # the field means the same thing on every ``_Pending``.
                 own_chunk_touched=(
                     touched is None or str(props.get("source_chunk_id") or "") in touched[0]
                 ),

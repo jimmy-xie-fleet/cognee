@@ -359,8 +359,17 @@ def _resolve_entity_name(
     field_name: str,
     reference_text: str,
     view: GraphView,
+    *,
+    stale: bool = False,
 ) -> Optional[_Outcome]:
-    """Step 2: the reference names one entity. None means "not an entity name"."""
+    """Step 2: the reference names one entity. None means "not an entity name".
+
+    ``stale`` says the field holds an id that is no longer a node. Then an edge that is
+    already in the graph is not the whole answer (R33): the link stands, but the dead id
+    still has to go, so the resolution goes out marked :data:`NOTE_EDGES_EXIST` -- no edge
+    is re-emitted, and ``_replace_dead_id`` turns it into the patch that clears the field.
+    With the reference's own wording in the field there is nothing outstanding at all.
+    """
     entity_ids = view.entity_ids_by_name.get(generate_node_name(reference_text))
     if not entity_ids:
         return None
@@ -375,7 +384,8 @@ def _resolve_entity_name(
         return _Outcome("ambiguous")
 
     entity_id = entity_ids[0]
-    if (assertion_id, entity_id, field_name) in view.edge_keys:
+    edges_exist = (assertion_id, entity_id, field_name) in view.edge_keys
+    if edges_exist and not stale:
         return _Outcome("already_resolved")
 
     return _Outcome(
@@ -391,6 +401,7 @@ def _resolve_entity_name(
             anchor_type="Entity",
             target_ids=(entity_id,),
             target_type="Entity",
+            notes=(NOTE_EDGES_EXIST,) if edges_exist else (),
             patch_mode=_default_patch_mode(STRATEGY_ENTITY_NAME),
         ),
     )
@@ -466,7 +477,9 @@ def _cheap_cascade(
 
     entity_text = _entity_name_text(hint, None if holds_id else value)
     if entity_text:
-        entity_outcome = _resolve_entity_name(assertion_id, field_name, entity_text, view)
+        entity_outcome = _resolve_entity_name(
+            assertion_id, field_name, entity_text, view, stale=stale
+        )
         if entity_outcome is not None:
             if stale:
                 entity_outcome = _replace_dead_id(entity_outcome)

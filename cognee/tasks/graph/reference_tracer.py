@@ -169,17 +169,21 @@ def _reference_block(hint: Optional[ReferenceHint]) -> Optional[Dict[str, str]]:
 
     None drives the user template's ``{% if reference %}`` to its "no reference recorded"
     branch, which is the shape the unstated-inference variant always runs in.
+
+    Fence-neutralised like the source block: every field here is document wording the
+    extraction copied into the hint, so it is no more the resolver's own text than a tool
+    result is.
     """
     if hint is None:
         return None
 
     block = {
-        "text": reference_display_text(hint),
-        "document_hint": hint.document_hint or "",
-        "locator_kind": hint.locator_kind or "",
-        "locator_value": hint.locator_value or "",
-        "date": hint.date or "",
-        "basis": hint.basis or "",
+        "text": _neutralize_fences(reference_display_text(hint)),
+        "document_hint": _neutralize_fences(hint.document_hint or ""),
+        "locator_kind": _neutralize_fences(hint.locator_kind or ""),
+        "locator_value": _neutralize_fences(hint.locator_value or ""),
+        "date": _neutralize_fences(hint.date or ""),
+        "basis": _neutralize_fences(hint.basis or ""),
     }
     return block if any(block.values()) else None
 
