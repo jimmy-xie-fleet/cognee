@@ -783,8 +783,10 @@ await cognee.remember(text, dataset_name="case_123", self_improvement=False, **l
 ```
 
 `legal_profile()` returns `graph_model` (`LegalKnowledgeGraph`), `custom_prompt` (the legal
-extraction prompt), `chunk_size`, and `config` (the OWL ontology resolver, fuzzy-matched,
-`ontology_mode="annotate"` by default) — splat it into `remember()` or `cognify()`. Everything
+extraction prompt), `chunk_size`, `config` (the OWL ontology resolver, fuzzy-matched,
+`ontology_mode="annotate"` by default), and `enrichment_tasks` (the reference-resolver task
+appended to the cognify tail; empty when `resolve_references=False`) — splat it into
+`remember()` or `cognify()`. Everything
 lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGraph`),
 `profile.py` (`legal_profile()`, `legal_ontology_resolver()`), `prompt.py`
 (`load_legal_extraction_prompt()`), `ontology/legal.owl`, and `prompts/legal_extraction_system.txt`.
@@ -803,6 +805,21 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   the graph, so assertion triplets are embedded and indexed like any other node. Only the
   opt-in memify consolidation pipelines (`consolidate_entities`, `cross_connect_entities`)
   filter on `type == "Entity"`, and those skip assertions.
+- **Reference resolution**: deterministic, no LLM or vector call. `legal_profile()` appends
+  `resolve_assertion_references(scope="touched")` to the cognify tail by default
+  (`legal_profile(resolve_references=False)` opts out). Re-run over an already-ingested
+  dataset with `resolve_references_pipeline(dataset=…)` (recommended), `improve(dataset,
+  enrichment_tasks=[Task(resolve_assertion_references)], data=[{}])`, or HTTP
+  `POST /api/v1/improve {"enrichment_tasks": ["resolve_references"], "data": [{}]}`. Matches
+  document-name tokens, dates, and identifiers, plus `¶N` / `§N` / Exhibit / Count / Article
+  spans located in the **full stored text** and mapped back to chunks. Writes a typed edge
+  carrying `resolution_strategy`, `resolution_confidence`, `resolved_by="reference_resolver"`,
+  and a stance-preserving `edge_text`; the reference field itself is rewritten to the resolved
+  node id, the original wording is kept in `<field>_text`, and match details land in
+  `<field>_resolution`. Idempotent — a second pass writes nothing new unless `force=True`
+  re-resolves from the preserved `<field>_text`. `asserted_by` (the identity field) is never
+  touched. A located paragraph whose exact wording cannot be matched still resolves to its
+  document, with `locator_not_found` recorded as a note.
 - **Limitations**: fuzzy grounding runs at a 0.9 cutoff, which is sensitive to pluralization —
   a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
   enum-constrained `statement_type` still drives the assertion property, so only the OWL `is_a`
@@ -817,7 +834,20 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   chunk size; `remember(session_id=…)` rejects the profile outright (session memory is bridged
   into the graph by `improve()`, which cognifies with the default extraction); do not combine
   with `temporal_cognify=True`, which ignores `custom_prompt`/`graph_model` and would silently
-  drop the profile.
+  drop the profile. The reference resolver adds its own limits: deterministic only, so no
+  speaker inference and no fuzzy/vector matching; it needs the document's derived text file on
+  disk, falling back to the stored chunks when that file is missing or unreadable; at ingest a
+  reference resolves only to documents already in the graph, so a bulk load's earliest
+  documents can dangle until `resolve_references_pipeline(dataset=…)` runs once afterward;
+  documents ingested in one `remember()` call run concurrently (`data_per_batch=20`), so
+  cross-references between them need that same follow-up pass; edges the memify pipeline
+  writes are owned by the resolver's sentinel data id (`REFERENCE_RESOLUTION_DATA_ID`), not the
+  ingesting document, so they do not follow that document's `forget()`; there are no
+  edge-evidence rows for resolved references, and re-resolution never deletes a stale edge;
+  `update_node` is implemented only on the Ladybug adapter, so other graph backends get the
+  reference edges without the field rewrite; and a `find_disputes.py`-style consumer must read
+  `responds_to` **edges**, not the field, since a paragraph anchor can be a chunk id shared by
+  several allegations.
 
 ### Skills (Procedural Memory)
 Dataset-scoped `SKILL.md` playbooks agents can discover, load on demand, execute, and improve from run history.
