@@ -187,8 +187,16 @@ def _reference_block(hint: Optional[ReferenceHint]) -> Optional[Dict[str, str]]:
 def _source_block(
     source_props: Mapping[str, Any], source_document_name: Optional[str], field_name: str
 ) -> Dict[str, str]:
+    """The referring statement as the prompt shows it -- every value fence-neutralised.
+
+    The proposition, the quote and the document name are document text the extraction
+    copied, so they can open or close a fence exactly like a tool result can.
+    """
+
     def text(value: Any, fallback: str) -> str:
-        return str(value).strip() if isinstance(value, str) and value.strip() else fallback
+        if isinstance(value, str) and value.strip():
+            return _neutralize_fences(value.strip())
+        return fallback
 
     return {
         "source_document": text(source_document_name, "(unknown document)"),
@@ -202,7 +210,12 @@ def _source_block(
 
 
 def _neutralize_fences(text: str) -> str:
-    """Break every ``<<`` run so tool output cannot open or close a fence.
+    """Break every ``<<`` run so borrowed text cannot open or close a fence.
+
+    Applied to everything in the prompt the resolver did not write itself: a tool result,
+    the seed preview, the referring statement's own block, and the arguments a tool call
+    is echoed with. The fence tokens are the loop's alone, which is what lets the system
+    prompt tell the model that document text can never open or close one.
 
     A character scan rather than a regex, deliberately: the resolver takes no regex over
     text it did not supply itself. ``"<<<"`` becomes ``"< < <"`` -- the words survive, the
@@ -219,10 +232,16 @@ def _neutralize_fences(text: str) -> str:
 
 
 def _render_args(arguments: Mapping[str, Any]) -> str:
+    """The arguments as the echoed ``# Step N: tool(args)`` line shows them.
+
+    Neutralised too: the model chose these strings, and they are echoed above the fence
+    the loop writes for the result.
+    """
     try:
-        return json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+        rendered = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:  # pragma: no cover - defensive; arguments came from a pydantic dict
-        return str(arguments)
+        rendered = str(arguments)
+    return _neutralize_fences(rendered)
 
 
 # --------------------------------------------------------------------------- #
@@ -266,7 +285,8 @@ async def trace_reference(
         raise FileNotFoundError(f"Reference tracer system prompt not found: {system_prompt_path}")
     if not system_prompt.strip():
         raise ValueError(f"Reference tracer system prompt is empty: {system_prompt_path}")
-    context = format_candidate_lines(seed) or "(no seed candidates)"
+    # The seed opens ``{{ context }}``, and every line of it is document text.
+    context = _neutralize_fences(format_candidate_lines(seed)) or "(no seed candidates)"
     reference = _reference_block(hint)
     source = _source_block(source_props, source_document_name, field_name)
     iterations = 0
