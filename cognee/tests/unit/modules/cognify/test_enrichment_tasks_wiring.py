@@ -112,6 +112,12 @@ class TestCognifyValidatesEnrichmentTasks:
             await cognify(temporal_cognify=True, enrichment_tasks=[Task(_fake_enrichment_task)])
 
     @pytest.mark.asyncio
+    async def test_a_bare_task_instead_of_a_list_raises(self):
+        # A Task is truthy but not iterable: without a shape check this is a TypeError.
+        with pytest.raises(ValueError, match="list"):
+            await cognify(enrichment_tasks=Task(_fake_enrichment_task))
+
+    @pytest.mark.asyncio
     async def test_non_task_entry_raises(self):
         with pytest.raises(ValueError, match="Task"):
             await cognify(enrichment_tasks=["x"])

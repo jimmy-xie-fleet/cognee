@@ -30,6 +30,10 @@ os.environ.setdefault("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
 
 async def main() -> int:
+    if len(sys.argv) < 2:
+        print("usage: python scripts/legal/find_disputes.py <dataset-name>")
+        return 2
+
     dataset_name = sys.argv[1]
     from cognee.context_global_variables import set_database_global_context_variables
     from cognee.infrastructure.databases.graph import get_graph_engine
@@ -43,6 +47,10 @@ async def main() -> int:
         dataset = (
             await session.execute(select(Dataset).where(Dataset.name == dataset_name))
         ).scalar_one_or_none()
+
+    if dataset is None:
+        print(f"No such dataset: {dataset_name}")
+        return 1
 
     async with set_database_global_context_variables(dataset.id, dataset.owner_id):
         graph_engine = await get_graph_engine()

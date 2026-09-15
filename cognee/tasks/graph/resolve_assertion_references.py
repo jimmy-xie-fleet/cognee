@@ -16,12 +16,13 @@ Three entry points over one pass:
   memify pair behind the ``resolve_references`` pipeline. The apply phase deliberately does
   **not** swallow write failures: a memify run that could not write is a visible error.
 
-Nothing here calls an LLM, an embedding model or the network. The only reads are one
-filtered graph query per invocation and the stored text of the documents actually
-referenced, cached for the length of the pass.
+Matching is deterministic: no LLM, no vector search. The only reads are one filtered
+graph query per invocation and the stored text of the documents actually referenced,
+cached for the length of the pass. Writing is a normal edge write, so it embeds the new
+edge texts through ``index_graph_edges`` like every other edge cognee stores.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -80,6 +81,17 @@ DOCUMENT_NODE_TYPES = (
 VIEW_NODE_TYPES = ("Assertion", "DocumentChunk", "Entity", *DOCUMENT_NODE_TYPES)
 
 DEFAULT_CONFIDENCE_FLOOR = 0.6
+
+# Notes a resolution carries out of the cascade, into ``<field>_resolution`` and the
+# write summary.
+# The field held an id no longer in the graph -- a forgotten or re-chunked target -- so
+# the reference was re-resolved from the ``<field>_text`` the resolver preserved.
+NOTE_STALE_ID = "stale_id"
+# Every edge this resolution would write is already in the graph; only the node patch is
+# still outstanding, so the write phase patches and skips the edge upsert.
+NOTE_EDGES_EXIST = "edges_exist"
+# ``add_edges`` succeeded but ``index_graph_edges`` did not.
+NOTE_EDGE_INDEX_FAILED = "edge_index_failed"
 
 # A located paragraph whose quoted assertions were found is the strongest answer short of
 # an id; each fallback the span had to fall back on costs a tenth.
@@ -157,6 +169,8 @@ class _Outcome:
 
     kind: str  # resolved | already_resolved | unresolved | ambiguous
     resolution: Optional[Resolution] = None
+    # The field held an id that is no longer a node, whatever the cascade made of it.
+    stale: bool = False
 
 
 def _text_of(value: Any) -> Optional[str]:
@@ -402,6 +416,7 @@ def _empty_summary() -> Dict[str, Any]:
         "anchor_types": {},
         "unresolved": 0,
         "ambiguous": 0,
+        "stale_ids": 0,
         "failed": 0,
         "edges_written": 0,
         "nodes_patched": 0,
@@ -419,9 +434,14 @@ def _resolve_existing_id(
     assertion_id: str,
     field_name: str,
     value: str,
+    reference_text: str,
     view: GraphView,
 ) -> _Outcome:
-    """Step a1: the field already holds an id -- make sure the edge exists."""
+    """Step a1: the field already holds an id -- make sure the edge exists.
+
+    ``reference_text`` is the wording the document used when a previous pass preserved
+    it, so the edge quotes the reference rather than the id that replaced it.
+    """
     if value not in view.node_ids:
         logger.debug(
             "Reference %s.%s points at an unknown node %s.", assertion_id, field_name, value
@@ -437,7 +457,7 @@ def _resolve_existing_id(
         Resolution(
             assertion_id=assertion_id,
             field=field_name,
-            reference_text=value,
+            reference_text=reference_text,
             strategy=STRATEGY_EXISTING_ID,
             confidence=_RESOLVED_ID_CONFIDENCE,
             anchor_id=value,
@@ -680,6 +700,45 @@ def _resolve_document_only(
     )
 
 
+def _finalize(outcome: _Outcome, entry_notes: Tuple[str, ...], stale: bool) -> _Outcome:
+    """Stamp the cascade's entry conditions onto whatever the cascade concluded."""
+    if not entry_notes and not stale:
+        return outcome
+
+    resolution = outcome.resolution
+    if resolution is not None and entry_notes:
+        resolution = replace(resolution, notes=entry_notes + resolution.notes)
+    return _Outcome(outcome.kind, resolution, stale)
+
+
+def _edge_precheck(outcome: _Outcome, props: dict, view: GraphView) -> _Outcome:
+    """Drop a document-strategy resolution whose edges the graph already holds.
+
+    Without this a backend that cannot patch nodes re-plans the same resolution on every
+    pass, and ``add_edges`` (a MERGE that overwrites the stored properties) would reset a
+    ``feedback_weight`` ``improve()`` had tuned. Two cases once every edge is present:
+    the field holds the anchor id, so there is nothing left to do (``already_resolved``);
+    or it still holds its text, so the patch is the only outstanding half of the write
+    and the resolution goes out marked :data:`NOTE_EDGES_EXIST`.
+    """
+    resolution = outcome.resolution
+    if resolution is None or resolution.strategy not in _PATCHED_STRATEGIES:
+        return outcome
+
+    targets = set(resolution.target_ids)
+    if resolution.anchor_id:
+        targets.add(resolution.anchor_id)
+    if not targets or any(
+        (resolution.assertion_id, target_id, resolution.field) not in view.edge_keys
+        for target_id in targets
+    ):
+        return outcome
+
+    if _as_uuid(props.get(resolution.field)) is not None:
+        return _Outcome("already_resolved")
+    return _Outcome("resolved", replace(resolution, notes=resolution.notes + (NOTE_EDGES_EXIST,)))
+
+
 async def _resolve_reference(
     assertion_id: str,
     field_name: str,
@@ -695,19 +754,31 @@ async def _resolve_reference(
     """Run the cascade for one ``(assertion, field)`` pair."""
     value = _text_of(props.get(field_name))
     reference_text = value
+    entry_notes: Tuple[str, ...] = ()
+    stale = False
 
     if _as_uuid(value) is not None:
         original = _text_of(props.get(f"{field_name}_text"))
-        if force and original:
+        # An id that is no longer a node -- the target was forgotten, or an amended
+        # document was re-chunked under new ids -- has gone dark, so it re-resolves from
+        # the preserved wording without waiting for force. With no wording preserved
+        # there is nothing to re-resolve from, and the reference stays unresolved.
+        stale = value not in view.node_ids
+        if original and (force or stale):
             # Re-resolve from the wording the document used, not from the id a previous
             # pass wrote into the field.
             reference_text = original
+            entry_notes = (NOTE_STALE_ID,) if stale else ()
         else:
-            return _resolve_existing_id(assertion_id, field_name, value, view)
+            return _finalize(
+                _resolve_existing_id(assertion_id, field_name, value, original or value, view),
+                entry_notes,
+                stale,
+            )
 
     entity_outcome = _resolve_entity_name(assertion_id, field_name, reference_text, view)
     if entity_outcome is not None:
-        return entity_outcome
+        return _finalize(entity_outcome, entry_notes, stale)
 
     reference = parse_reference(reference_text)
     own_document_id = view.document_by_chunk.get(str(props.get("source_chunk_id") or ""))
@@ -715,9 +786,9 @@ async def _resolve_reference(
         reference, view, texts, profiles, own_document_id
     )
     if ambiguous:
-        return _Outcome("ambiguous")
+        return _finalize(_Outcome("ambiguous"), entry_notes, stale)
     if document_id is None:
-        return _Outcome("unresolved")
+        return _finalize(_Outcome("unresolved"), entry_notes, stale)
 
     outcome = None
     locator = reference.locator
@@ -796,9 +867,9 @@ async def _resolve_reference(
             outcome.resolution.confidence,
             confidence_floor,
         )
-        return _Outcome("unresolved")
+        return _finalize(_Outcome("unresolved"), entry_notes, stale)
 
-    return outcome
+    return _finalize(_edge_precheck(outcome, props, view), entry_notes, stale)
 
 
 async def plan_resolutions(
@@ -857,6 +928,8 @@ async def plan_resolutions(
                     continue
 
             summary["scanned"] += 1
+            if outcome.stale:
+                summary["stale_ids"] += 1
             if outcome.kind == "resolved" and outcome.resolution is not None:
                 resolutions.append(outcome.resolution)
                 summary["resolved"] += 1
@@ -867,12 +940,13 @@ async def plan_resolutions(
 
     logger.info(
         "Reference resolution planned: scanned=%d resolved=%d already=%d unresolved=%d "
-        "ambiguous=%d failed=%d",
+        "ambiguous=%d stale_ids=%d failed=%d",
         summary["scanned"],
         summary["resolved"],
         summary["already_resolved"],
         summary["unresolved"],
         summary["ambiguous"],
+        summary["stale_ids"],
         summary["failed"],
     )
     return resolutions, summary
@@ -890,15 +964,30 @@ async def write_resolutions(
 
     Edges come first because a patch points the field at a node the edges must already
     reach. ``add_edges`` upserts on ``(source, target, relationship)``, so re-emitting an
-    edge a previous pass wrote cannot duplicate it.
+    edge a previous pass wrote cannot duplicate it -- but the upsert also overwrites that
+    edge's stored properties, so a resolution the planner marked :data:`NOTE_EDGES_EXIST`
+    writes no edge at all and is patched only.
+
+    Indexing the new edge texts is the one step allowed to fail on its own: the edges are
+    already stored, so the patches still run and the failure comes back as a note rather
+    than as a half-applied write.
     """
-    summary = {"edges_written": 0, "nodes_patched": 0, "dry_run": bool(dry_run), "notes": []}
+    summary = {
+        "edges_written": 0,
+        "nodes_patched": 0,
+        "already_resolved": 0,
+        "dry_run": bool(dry_run),
+        "notes": [],
+    }
     if not resolutions:
         return summary
 
     edges = []
     endpoints: Dict[str, dict] = {}
     for resolution in resolutions:
+        if NOTE_EDGES_EXIST in resolution.notes:
+            continue
+
         source_props = view.assertions.get(resolution.assertion_id, {})
         endpoints[resolution.assertion_id] = source_props
         target_ids = list(resolution.target_ids)
@@ -929,8 +1018,18 @@ async def write_resolutions(
     if edges:
         edges = ensure_default_edge_properties(edges, nodes=list(endpoints.values()))
         await graph_engine.add_edges(edges, **(provenance_kwargs or {}))
-        await index_graph_edges(edges)
         summary["edges_written"] = len(edges)
+        try:
+            await index_graph_edges(edges)
+        except Exception as error:  # noqa: BLE001 - the edges are stored; patch anyway
+            logger.warning(
+                "Wrote %d reference edge(s) but could not index their text (%s); the "
+                "edges are in the graph, their text is not in the edge index until the "
+                "next indexing pass (improve()) re-embeds the graph's triplets.",
+                len(edges),
+                error,
+            )
+            summary["notes"].append(NOTE_EDGE_INDEX_FAILED)
 
     for resolution in resolutions:
         if resolution.strategy not in _PATCHED_STRATEGIES:
@@ -946,6 +1045,11 @@ async def write_resolutions(
             )
             summary["notes"].append("node_patch_unsupported")
             summary["nodes_patched"] = 0
+            # Nothing was left to do for a patch-only resolution, and nothing could be
+            # done: the graph already holds its edges, so it counts as already resolved.
+            summary["already_resolved"] = sum(
+                1 for planned in resolutions if NOTE_EDGES_EXIST in planned.notes
+            )
             break
         summary["nodes_patched"] += 1
 
@@ -955,6 +1059,20 @@ async def write_resolutions(
         summary["nodes_patched"],
     )
     return summary
+
+
+def _merge_write_summary(summary: Dict[str, Any], write_summary: Dict[str, Any]) -> None:
+    """Fold the write phase's counters into the plan's.
+
+    Only ``already_resolved`` adds rather than replaces: the write phase reports the
+    planned resolutions that turned out to need no write, and those stop being resolutions
+    of this pass.
+    """
+    written = dict(write_summary)
+    already = written.pop("already_resolved", 0)
+    summary["already_resolved"] = summary.get("already_resolved", 0) + already
+    summary["resolved"] = max(0, summary.get("resolved", 0) - already)
+    summary.update(written)
 
 
 def _dataset_id(ctx, dataset_id):
@@ -1057,7 +1175,7 @@ async def apply_reference_resolutions(
         provenance_kwargs=await _provenance(graph_engine, ctx),
         dry_run=dry_run,
     )
-    summary.update(write_summary)
+    _merge_write_summary(summary, write_summary)
     return summary
 
 
@@ -1112,11 +1230,12 @@ async def resolve_assertion_references(
             provenance_kwargs=await _provenance(graph_engine, ctx),
             dry_run=dry_run,
         )
-        summary.update(write_summary)
-    except Exception as error:  # noqa: BLE001 - resolution must never break ingestion
-        logger.warning("Reference resolution skipped due to an error: %s", error)
-    finally:
+        _merge_write_summary(summary, write_summary)
+        # Memoized on success only: a pass that raised has resolved nothing, so the next
+        # batch of the same run must be allowed to try again.
         if memoize:
             ctx.extras["reference_resolution_ran"] = True
+    except Exception as error:  # noqa: BLE001 - resolution must never break ingestion
+        logger.warning("Reference resolution skipped due to an error: %s", error)
 
     return data

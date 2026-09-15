@@ -220,7 +220,8 @@ async def cognify(
                  pipeline, after any opt-in tail item (record_provenance,
                  detect_contradictions, resolve_temporal_contradictions). Lets a caller
                  (typically a domain profile) run a deterministic post-pass without core
-                 importing that domain's task. Every entry must be a `Task` instance.
+                 importing that domain's task. Must be a list (or tuple) and every entry
+                 must be a `Task` instance.
                  Raises with temporal_cognify=True (the temporal pipeline does not use
                  get_default_tasks) or while connected to a remote instance (tasks cannot
                  be serialized to a remote instance).
@@ -320,7 +321,13 @@ async def cognify(
 
     if enrichment_tasks:
         # An empty list behaves like None; a non-empty one has to be all Tasks, since
-        # get_default_tasks appends these straight into the pipeline it returns.
+        # get_default_tasks appends these straight into the pipeline it returns. A bare
+        # Task is truthy but not iterable, so the shape is checked before the entries.
+        if not isinstance(enrichment_tasks, (list, tuple)):
+            raise ValueError(
+                "enrichment_tasks must be a list of Task instances, got "
+                f"{type(enrichment_tasks).__name__!r}."
+            )
         for enrichment_task in enrichment_tasks:
             if not isinstance(enrichment_task, Task):
                 raise ValueError(

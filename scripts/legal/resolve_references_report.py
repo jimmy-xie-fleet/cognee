@@ -4,7 +4,8 @@ Dry run by default: builds the graph view and document-text cache the same way
 ``resolve_assertion_references`` does, plans every resolution with
 ``plan_resolutions``, and prints what would happen -- the summary counters, one line
 per resolution the plan proposes, and one line per reference that stayed dangling
-(a non-UUID ``responds_to``/``attributed_to`` value the plan did not touch).
+(a non-UUID ``responds_to``/``attributed_to`` value the plan did not touch, plus every
+UUID-shaped value pointing at a node that is no longer in the graph).
 
 ``--apply`` writes the plan (edges, then node patches) via ``write_resolutions``.
 ``--strict`` additionally runs the acceptance gate pinned for ``adams_family_legal``
@@ -80,13 +81,18 @@ def _dangling_line(field_name: str, reference_text: str) -> str:
     return f'{field_name}: "{reference_text}" → unresolved 0.00 - -'
 
 
+def _stale_line(field_name: str, reference_text: str) -> str:
+    return f'{field_name}: "{reference_text}" → stale id 0.00 - -'
+
+
 def _dangling_entries(view, reference_fields, resolved_keys):
     """Non-UUID reference values the plan left untouched -- what did not resolve.
 
     ``plan_resolutions`` only enumerates what it resolved; a reference it left
     dangling (unresolved or ambiguous) is recovered here by walking every assertion's
     reference fields and dropping anything already an id (already_resolved, out of
-    scope for this report) or already covered by the plan.
+    scope for this report -- see ``_stale_entries`` for the ids that are not) or already
+    covered by the plan.
     """
     entries = []
     for assertion_id, props in view.assertions.items():
@@ -96,6 +102,29 @@ def _dangling_entries(view, reference_fields, resolved_keys):
                 continue
             value = value.strip()
             if _is_uuid_like(value):
+                continue
+            if (assertion_id, field_name) in resolved_keys:
+                continue
+            entries.append((field_name, value))
+    return entries
+
+
+def _stale_entries(view, reference_fields, resolved_keys):
+    """UUID-shaped reference values pointing at a node that is no longer in the graph.
+
+    A forgotten document or an amended one re-chunked under new ids leaves the field
+    holding a dead id. The resolver re-resolves those from ``<field>_text`` (the plan
+    covers them, so they are skipped here); what is left has no preserved wording to
+    re-resolve from and is dark until an operator re-ingests the reference.
+    """
+    entries = []
+    for assertion_id, props in view.assertions.items():
+        for field_name in reference_fields:
+            value = props.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip()
+            if not _is_uuid_like(value) or value in view.node_ids:
                 continue
             if (assertion_id, field_name) in resolved_keys:
                 continue
@@ -303,7 +332,8 @@ async def run(args: argparse.Namespace) -> int:
         print(
             f"scanned={summary['scanned']} already_resolved={summary['already_resolved']} "
             f"resolved={summary['resolved']} unresolved={summary['unresolved']} "
-            f"ambiguous={summary['ambiguous']} failed={summary['failed']}"
+            f"ambiguous={summary['ambiguous']} stale_ids={summary['stale_ids']} "
+            f"failed={summary['failed']}"
         )
         print(f"resolved_by_strategy={summary['resolved_by_strategy']}")
         print(f"anchor_types={summary['anchor_types']}")
@@ -316,9 +346,12 @@ async def run(args: argparse.Namespace) -> int:
 
         resolved_keys = {(resolution.assertion_id, resolution.field) for resolution in resolutions}
         dangling = _dangling_entries(view, REFERENCE_FIELDS, resolved_keys)
+        stale = _stale_entries(view, REFERENCE_FIELDS, resolved_keys)
         print("\nunresolved / ambiguous references:")
         for field_name, reference_text in dangling:
             print(_dangling_line(field_name, reference_text))
+        for field_name, reference_text in stale:
+            print(_stale_line(field_name, reference_text))
 
         if args.apply:
             provenance = await graph_provenance_write_kwargs(

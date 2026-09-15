@@ -805,21 +805,32 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   the graph, so assertion triplets are embedded and indexed like any other node. Only the
   opt-in memify consolidation pipelines (`consolidate_entities`, `cross_connect_entities`)
   filter on `type == "Entity"`, and those skip assertions.
-- **Reference resolution**: deterministic, no LLM or vector call. `legal_profile()` appends
+- **Reference resolution**: matching is deterministic (no LLM, no vector search); writing
+  embeds the new edge texts through `index_graph_edges` like any other edge write, so the
+  ingest tail needs the embedding provider up. `legal_profile()` appends
   `resolve_assertion_references(scope="touched")` to the cognify tail by default
   (`legal_profile(resolve_references=False)` opts out). Re-run over an already-ingested
   dataset with `resolve_references_pipeline(dataset=…)` (recommended), `improve(dataset,
   enrichment_tasks=[Task(resolve_assertion_references)], data=[{}])`, or HTTP
-  `POST /api/v1/improve {"enrichment_tasks": ["resolve_references"], "data": [{}]}`. Matches
-  document-name tokens, dates, and identifiers, plus `¶N` / `§N` / Exhibit / Count / Article
-  spans located in the **full stored text** and mapped back to chunks. Writes a typed edge
-  carrying `resolution_strategy`, `resolution_confidence`, `resolved_by="reference_resolver"`,
-  and a stance-preserving `edge_text`; the reference field itself is rewritten to the resolved
-  node id, the original wording is kept in `<field>_text`, and match details land in
-  `<field>_resolution`. Idempotent — a second pass writes nothing new unless `force=True`
-  re-resolves from the preserved `<field>_text`. `asserted_by` (the identity field) is never
-  touched. A located paragraph whose exact wording cannot be matched still resolves to its
-  document, with `locator_not_found` recorded as a note.
+  `POST /api/v1/improve {"enrichment_tasks": ["resolve_references"], "datasetName": "…"}` —
+  the `data=[{}]` seed is SDK-only (the endpoint's `data` is a string), so over HTTP the
+  graph projection runs first and the task's `scope="all"` once-per-run memo keeps that to a
+  single pass. Matches document-name tokens, dates, and identifiers, plus `¶N` / `§N` /
+  Exhibit / Count / Article spans located in the **full stored text** and mapped back to
+  chunks. Writes a typed edge carrying `resolution_strategy`, `resolution_confidence`,
+  `resolved_by="reference_resolver"`, and a stance-preserving `edge_text`; the reference
+  field itself is rewritten to the resolved node id, the original wording is kept in
+  `<field>_text`, and match details land in `<field>_resolution`. Idempotent — a second pass
+  writes nothing new: a field already holding its resolved id counts as `already_resolved`,
+  and a resolution whose edges are all in the graph already is at most patched, never
+  re-written (so a tuned `feedback_weight` survives).
+  `force=True` re-resolves from the preserved `<field>_text` and still writes only what
+  changed. A field holding an id that is no longer in the graph — the target was forgotten, or
+  an amended document was re-chunked under new ids — re-resolves from `<field>_text` without
+  `force`, records a `stale_id` note, and is counted in the summary's `stale_ids`.
+  `asserted_by` (the identity field) is never touched. A located paragraph whose exact
+  wording cannot be matched still resolves to its document, with `locator_not_found`
+  recorded as a note.
 - **Limitations**: fuzzy grounding runs at a 0.9 cutoff, which is sensitive to pluralization —
   a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
   enum-constrained `statement_type` still drives the assertion property, so only the OWL `is_a`
@@ -845,7 +856,12 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   ingesting document, so they do not follow that document's `forget()`; there are no
   edge-evidence rows for resolved references, and re-resolution never deletes a stale edge;
   `update_node` is implemented only on the Ladybug adapter, so other graph backends get the
-  reference edges without the field rewrite; a `find_disputes.py`-style consumer must read
+  reference edges without the field rewrite, and their idempotency rests on the edge
+  pre-check (a resolution whose edges are all present is not re-emitted) rather than on the
+  field; `update()` takes no `enrichment_tasks` parameter, so editing a document ingested
+  with the profile re-extracts it without the resolver tail, and its re-chunked assertions
+  become stale targets for references elsewhere — which the `stale_id` fall-through repairs
+  on the next resolver pass; a `find_disputes.py`-style consumer must read
   `responds_to` **edges**, not the field, since a paragraph anchor can be a chunk id shared by
   several allegations; a reference whose text names an existing entity (extraction often mints
   a stub entity per cited document, e.g. `"september 22, 2026 deposition"`) is linked to that

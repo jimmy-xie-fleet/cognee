@@ -440,21 +440,53 @@ async def test_existing_uuid_without_an_edge_emits_the_edge_only():
     assert [edge[1] for edge in edges] == [A_1]
     assert _props(edges[0])["resolution_strategy"] == STRATEGY_EXISTING_ID
     assert _props(edges[0])["resolution_confidence"] == pytest.approx(1.0)
+    # The edge quotes the wording the document used, not the id the field holds.
+    assert _props(edges[0])["reference_text"] == "Complaint ¶4"
     # existing_id never patches: the field already holds the id.
     assert A_RESOLVED not in dict(graph.update_node_calls)
     assert summary["already_resolved"] == 0
 
 
 @pytest.mark.asyncio
-async def test_uuid_pointing_outside_the_graph_stays_unresolved():
+async def test_stale_uuid_without_preserved_text_stays_unresolved_but_is_counted():
     graph = _base_graph()
     graph.nodes[A_RESOLVED]["responds_to"] = _nid("missing-node")
+    del graph.nodes[A_RESOLVED]["responds_to_text"]
     graph.edges = [edge for edge in graph.edges if edge[0] != A_RESOLVED]
 
     _, summary, _ = await _run(graph)
 
     assert graph.edges_of(A_RESOLVED, "responds_to") == []
     assert summary["unresolved"] == 1
+    # Nothing to re-resolve from, but the dark reference is still reported.
+    assert summary["stale_ids"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_uuid_re_resolves_from_the_preserved_text_without_force():
+    """An amended pleading is re-chunked: the id the field holds is no longer a node."""
+    graph = _base_graph()
+    await _run(graph)
+    assert graph.nodes[A_DENIAL]["responds_to"] == COMPLAINT_CHUNK_1
+
+    rechunked = _nid("complaint-chunk-1-rechunked")
+    graph.nodes[rechunked] = dict(graph.nodes.pop(COMPLAINT_CHUNK_1), id=rechunked)
+    graph.edges = [edge for edge in graph.edges if COMPLAINT_CHUNK_1 not in (edge[0], edge[1])]
+    graph.edges.append((rechunked, DOC_COMPLAINT, "is_part_of", {}))
+    for assertion_id in (A_1, A_2, A_3):
+        graph.nodes[assertion_id]["source_chunk_id"] = rechunked
+    graph.add_edges_calls.clear()
+    graph.update_node_calls.clear()
+
+    _, summary, _ = await _run(graph)
+
+    assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {A_1, A_2, rechunked}
+    patch_values = dict(graph.update_node_calls)[A_DENIAL]
+    assert patch_values["responds_to"] == rechunked
+    assert patch_values["responds_to_text"] == "Complaint ¶5"
+    assert patch_values["responds_to_resolution"]["notes"] == ["stale_id"]
+    assert summary["stale_ids"] == 1
+    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -486,17 +518,15 @@ async def test_force_re_resolves_from_the_stored_reference_text():
 
     _, summary, _ = await _run(graph, force=True)
 
-    # The denial's field now holds the chunk id; force reads responds_to_text instead.
-    assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {
-        A_1,
-        A_2,
-        COMPLAINT_CHUNK_1,
-    }
-    patch_values = dict(graph.update_node_calls)[A_DENIAL]
-    assert patch_values["responds_to_text"] == "Complaint ¶5"
-    # The already-resolved reference is re-read from its stored "Complaint ¶4" too.
-    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 2
+    # The already-resolved reference is re-read from its stored "Complaint ¶4" and now
+    # anchors on that paragraph's chunk instead of the single assertion it held.
     assert dict(graph.update_node_calls)[A_RESOLVED]["responds_to"] == COMPLAINT_CHUNK_0
+    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 1
+    # The denial re-resolves to the same answer, so the edge pre-check stops force from
+    # re-writing edges whose properties (a tuned feedback_weight) would be reset.
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    assert A_DENIAL not in dict(graph.update_node_calls)
+    assert summary["already_resolved"] == 3
 
 
 @pytest.mark.asyncio
@@ -673,6 +703,43 @@ async def test_node_patches_are_skipped_when_the_adapter_cannot_patch():
     assert summary["edges_written"] == 5
     assert summary["nodes_patched"] == 0
     assert summary["notes"] == ["node_patch_unsupported"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_pass_rewrites_nothing_when_the_adapter_cannot_patch():
+    """Without update_node the field keeps its text, so only the edge pre-check can stop
+    a second pass from re-emitting (and resetting the properties of) the same edges."""
+    graph = _base_graph()
+    graph.update_node_supported = False
+
+    _, first, _ = await _run(graph)
+    assert first["edges_written"] == 5
+    graph.add_edges_calls.clear()
+
+    _, summary, mocks = await _run(graph)
+
+    assert graph.add_edges_calls == []
+    assert summary["edges_written"] == 0
+    assert summary["nodes_patched"] == 0
+    assert summary["resolved"] == 0
+    assert summary["already_resolved"] == 4
+    mocks.index_graph_edges.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edge_indexing_failure_still_patches_and_is_noted(caplog):
+    graph = _base_graph()
+
+    with _patched(graph) as mocks:
+        mocks.index_graph_edges.side_effect = RuntimeError("embedding provider is down")
+        with caplog.at_level("WARNING"):
+            payload = await detect_dangling_references(None)
+            summary = await apply_reference_resolutions(payload)
+
+    assert summary["edges_written"] == 5
+    assert summary["nodes_patched"] == 2
+    assert "edge_index_failed" in summary["notes"]
+    assert any("index" in record.message.lower() for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -921,6 +988,25 @@ async def test_all_scope_runs_at_most_once_per_pipeline_run():
 
     assert ctx.extras["reference_resolution_ran"] is True
     assert len(graph.filtered_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pass_does_not_memoize_itself():
+    """A first batch that blew up must not suppress the rest of the run."""
+    graph = _base_graph()
+    ctx = PipelineContext(dataset=SimpleNamespace(id=DATASET_ID), pipeline_run_id="run-1")
+
+    with patch(f"{MODULE}._load_graph_view", new=AsyncMock(side_effect=RuntimeError("boom"))):
+        with patch(f"{MODULE}.get_graph_engine", new=AsyncMock()):
+            await resolve_assertion_references("batch-1", ctx=ctx)
+
+    assert "reference_resolution_ran" not in ctx.extras
+
+    with _patched(graph):
+        await resolve_assertion_references("batch-2", ctx=ctx)
+
+    assert ctx.extras["reference_resolution_ran"] is True
+    assert graph.add_edges_calls
 
 
 @pytest.mark.asyncio
