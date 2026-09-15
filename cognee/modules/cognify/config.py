@@ -18,6 +18,17 @@ class CognifyConfig(BaseSettings):
     # Opt-in audit-grade provenance ledger (env: PROVENANCE_TRACKING). Default
     # OFF so the standard cognify pipeline is unchanged.
     provenance_tracking: bool = False
+    # Assertion-reference resolution: what one resolver pass may spend and how sure the
+    # tracer has to be before a link is written. reference_llm_max_calls is the whole
+    # pass's budget (shared by every reference it traces); reference_tracer_max_iter is
+    # the per-reference cap, each iteration being one tool step or one finish. Unstated
+    # denial <-> allegation inference (D2) is implemented but opt-in, and held to a
+    # higher confidence bar than a reference the document actually wrote.
+    reference_llm_max_calls: int = 300
+    reference_tracer_max_iter: int = 4
+    reference_llm_confidence_threshold: float = 0.6
+    reference_infer_unstated: bool = False
+    reference_infer_confidence_threshold: float = 0.75
     model_config = SettingsConfigDict(env_file=".env", extra="allow")
 
     def to_dict(self) -> dict:
@@ -30,6 +41,11 @@ class CognifyConfig(BaseSettings):
             "contradiction_confidence_threshold": self.contradiction_confidence_threshold,
             "contradiction_max_facts": self.contradiction_max_facts,
             "provenance_tracking": self.provenance_tracking,
+            "reference_llm_max_calls": self.reference_llm_max_calls,
+            "reference_tracer_max_iter": self.reference_tracer_max_iter,
+            "reference_llm_confidence_threshold": self.reference_llm_confidence_threshold,
+            "reference_infer_unstated": self.reference_infer_unstated,
+            "reference_infer_confidence_threshold": self.reference_infer_confidence_threshold,
         }
 
 

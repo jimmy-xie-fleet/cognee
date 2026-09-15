@@ -1,0 +1,532 @@
+"""Unit tests for the bounded agentic loop that resolves one reference.
+
+Every trace here is scripted: ``LLMGateway.acreate_structured_output`` is patched at the
+tracer's own namespace with an ``AsyncMock`` whose ``side_effect`` is the exact list of
+``TracerStep``s the model "returns". No LLM, no network, no vector backend, no graph
+backend -- the tools the loop dispatches to are either the real read-only tools over a
+tiny in-memory ``GraphView`` or a stub ``ToolSpec``.
+
+The invariants these tests exist to hold: a trace never spends more than ``max_iter``
+calls, never spends an extra "fallback" call when it hits the cap, never spends a call the
+shared ``CallBudget`` cannot pay for, and never returns a label the registry does not know.
+"""
+
+from typing import Any, Dict, List
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from pydantic import BaseModel
+
+from cognee.infrastructure.llm.prompts import read_query_prompt
+from cognee.modules.graph.utils.reference_candidates import Candidate, LabelRegistry
+from cognee.modules.graph.utils.reference_resolution import ReferenceHint
+from cognee.tasks.graph.reference_graph_view import DocumentTextCache
+from cognee.tasks.graph.reference_retrieval import LexicalIndex
+from cognee.tasks.graph.reference_tracer import (
+    INFER_UNSTATED_SYSTEM_PROMPT,
+    MAX_TOOL_OUTPUT_CHARS,
+    TRACE_PREVIEW_CHARS,
+    TRACE_SYSTEM_PROMPT,
+    CallBudget,
+    TraceRecord,
+    TracerFinish,
+    TracerStep,
+    TracerToolCall,
+    trace_reference,
+)
+from cognee.tasks.graph.reference_tracer_tools import ToolSpec, build_tracer_tools
+from cognee.tests.unit.tasks.graph._reference_fakes import (
+    assertion_node,
+    build_graph_view,
+    chunk_node,
+    document_node,
+    nid,
+)
+
+MODULE = "cognee.tasks.graph.reference_tracer"
+GATEWAY = f"{MODULE}.LLMGateway.acreate_structured_output"
+
+DOC_COMPLAINT = nid("tracer-doc-complaint")
+DOC_ANSWER = nid("tracer-doc-answer")
+C0 = nid("tracer-complaint-chunk-0")
+A0 = nid("tracer-answer-chunk-0")
+A_ALLEGE = nid("tracer-assertion-allege")
+A_DENY = nid("tracer-assertion-deny")
+
+SOURCE_PROPS = {
+    "name": "the defendant failed to repair the roof",
+    "statement_type": "denial",
+    "polarity": "negative",
+    "asserted_by": "Clifton",
+    "source_quote": "Defendant denies the allegations of paragraph 5.",
+}
+
+HINT = ReferenceHint(
+    document_hint="Complaint",
+    locator_kind="paragraph",
+    locator_value="5",
+    date="2026-06-10",
+    basis="knowledge",
+)
+
+
+async def _real_tools(registry: LabelRegistry):
+    complaint = document_node(DOC_COMPLAINT, "Verified_Complaint")
+    answer = document_node(DOC_ANSWER, "Answer")
+    (c0, c0_edge) = chunk_node(C0, "¶ 5 The defendant failed to repair the roof.", 0, DOC_COMPLAINT)
+    (a0, a0_edge) = chunk_node(
+        A0, "Defendant denies the allegations of paragraph 5.", 0, DOC_ANSWER
+    )
+    nodes = [
+        complaint,
+        answer,
+        c0,
+        a0,
+        assertion_node(A_ALLEGE, "the defendant failed to repair the roof", C0),
+        assertion_node(A_DENY, "the defendant failed to repair the roof", A0),
+    ]
+    view = await build_graph_view(nodes, [c0_edge, a0_edge])
+    return build_tracer_tools(
+        view=view,
+        texts=DocumentTextCache(view),
+        lexical=LexicalIndex(view),
+        registry=registry,
+    )
+
+
+class _EchoArgs(BaseModel):
+    text: str = ""
+    repeat: int = 1
+
+
+def _echo_tool(result_text: str = "", *, fails: bool = False) -> Dict[str, ToolSpec]:
+    async def _handler(args: _EchoArgs) -> str:
+        if fails:
+            raise RuntimeError("tool exploded")
+        return (result_text or args.text) * args.repeat
+
+    return {
+        "echo": ToolSpec(
+            name="echo",
+            description="Echo the given text back.",
+            args_model=_EchoArgs,
+            handler=_handler,
+        )
+    }
+
+
+def _seed(registry: LabelRegistry) -> List[Candidate]:
+    return [
+        Candidate(
+            label=registry.label(A_ALLEGE, "Assertion"),
+            node_id=A_ALLEGE,
+            node_type="Assertion",
+            score=0.81,
+            text="the defendant failed to repair the roof",
+            document_name="Verified_Complaint",
+            chunk_index=0,
+        )
+    ]
+
+
+async def _trace(
+    steps,
+    *,
+    tools=None,
+    registry=None,
+    seed=None,
+    budget=None,
+    max_iter=4,
+    counters=None,
+    hint=HINT,
+    system_prompt_path=TRACE_SYSTEM_PROMPT,
+):
+    registry = registry if registry is not None else LabelRegistry()
+    seed = _seed(registry) if seed is None else seed
+    tools = _echo_tool() if tools is None else tools
+    counters = {} if counters is None else counters
+    budget = CallBudget(max_calls=10) if budget is None else budget
+
+    gateway = AsyncMock(side_effect=steps)
+    with patch(GATEWAY, gateway):
+        finish, records, iterations = await trace_reference(
+            system_prompt_path=system_prompt_path,
+            hint=hint,
+            source_props=SOURCE_PROPS,
+            source_document_name="Answer",
+            field_name="responds_to",
+            seed=seed,
+            tools=tools,
+            registry=registry,
+            budget=budget,
+            max_iter=max_iter,
+            counters=counters,
+        )
+    return finish, records, iterations, gateway, counters, registry, budget
+
+
+# --------------------------------------------------------------------------- #
+# CallBudget
+# --------------------------------------------------------------------------- #
+
+
+def test_call_budget_takes_until_exhausted():
+    budget = CallBudget(max_calls=2)
+
+    assert budget.exhausted is False
+    assert budget.take() is True
+    assert budget.take() is True
+    assert budget.exhausted is True
+    assert budget.take() is False
+    assert budget.used == 2
+
+
+def test_a_zero_budget_is_exhausted_from_the_start():
+    budget = CallBudget(max_calls=0)
+
+    assert budget.exhausted is True
+    assert budget.take() is False
+    assert budget.used == 0
+
+
+# --------------------------------------------------------------------------- #
+# models
+# --------------------------------------------------------------------------- #
+
+
+def test_tracer_step_schema_has_no_oneof_or_discriminator():
+    schema = str(TracerStep.model_json_schema())
+
+    assert "oneOf" not in schema
+    assert "discriminator" not in schema
+
+
+def test_tracer_finish_clamps_confidence():
+    with pytest.raises(Exception):
+        TracerFinish(candidate_label="A1", confidence=1.5)
+
+    assert TracerFinish().candidate_label is None
+    assert TracerFinish().confidence == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# the loop
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_finish_on_the_first_step_returns_it_unchanged():
+    step = TracerStep(
+        finish=TracerFinish(candidate_label="A1", confidence=0.92, reason="restates ¶ 5")
+    )
+
+    finish, records, iterations, gateway, counters, registry, budget = await _trace([step])
+
+    assert finish.candidate_label == "A1"
+    assert finish.confidence == 0.92
+    assert registry.resolve(finish.candidate_label) == A_ALLEGE
+    assert records == []
+    assert iterations == 1
+    assert gateway.await_count == 1
+    assert budget.used == 1
+    assert counters["llm_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_tool_step_then_a_finish():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="echo", arguments={"text": "hello"})),
+        TracerStep(finish=TracerFinish(candidate_label="A1", confidence=0.7, reason="best match")),
+    ]
+
+    finish, records, iterations, gateway, counters, _, budget = await _trace(steps)
+
+    assert finish.candidate_label == "A1"
+    assert iterations == 2
+    assert gateway.await_count == 2
+    assert budget.used == 2
+    assert counters["llm_calls"] == 2
+    assert counters["tool_calls_by_name"] == {"echo": 1}
+    assert [record.tool for record in records] == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_the_tool_result_is_appended_to_the_next_prompt():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="echo", arguments={"text": "ECHOED"})),
+        TracerStep(finish=TracerFinish(candidate_label=None, reason="nothing")),
+    ]
+
+    _, _, _, gateway, _, _, _ = await _trace(steps)
+
+    first_prompt = gateway.await_args_list[0].kwargs["text_input"]
+    second_prompt = gateway.await_args_list[1].kwargs["text_input"]
+    assert "ECHOED" not in first_prompt
+    assert "# Step 1: echo(" in second_prompt
+    assert "Result:\nECHOED" in second_prompt
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_tool_becomes_an_error_step_and_the_trace_continues():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="teleport", arguments={})),
+        TracerStep(finish=TracerFinish(candidate_label="A1", confidence=0.8)),
+    ]
+
+    finish, records, iterations, gateway, counters, _, _ = await _trace(steps)
+
+    second_prompt = gateway.await_args_list[1].kwargs["text_input"]
+    assert "ERROR: unknown tool" in second_prompt
+    assert finish.candidate_label == "A1"
+    assert iterations == 2
+    assert records[0].ok is False
+    assert counters["tool_calls_by_name"] == {"teleport": 1}
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_arguments_become_an_error_step():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="echo", arguments={"repeat": "lots"})),
+        TracerStep(finish=TracerFinish(candidate_label=None, reason="gave up")),
+    ]
+
+    _, records, _, gateway, _, _, _ = await _trace(steps)
+
+    second_prompt = gateway.await_args_list[1].kwargs["text_input"]
+    assert "ERROR:" in second_prompt
+    assert records[0].ok is False
+
+
+@pytest.mark.asyncio
+async def test_a_failing_tool_handler_becomes_an_error_step():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="echo", arguments={"text": "x"})),
+        TracerStep(finish=TracerFinish(candidate_label=None, reason="gave up")),
+    ]
+
+    _, records, _, gateway, _, _, _ = await _trace(steps, tools=_echo_tool(fails=True))
+
+    assert records[0].ok is False
+    assert "tool exploded" in gateway.await_args_list[1].kwargs["text_input"]
+
+
+@pytest.mark.asyncio
+async def test_a_finish_with_an_unknown_label_abstains_and_is_counted():
+    steps = [TracerStep(finish=TracerFinish(candidate_label="A9", confidence=0.95))]
+
+    finish, _, _, _, counters, _, _ = await _trace(steps)
+
+    assert finish.candidate_label is None
+    assert finish.confidence == 0.0
+    assert "A9" in finish.reason
+    assert counters["llm_unknown_label"] == 1
+    assert "llm_abstained" not in counters
+
+
+@pytest.mark.asyncio
+async def test_a_null_label_finish_is_an_abstention():
+    steps = [TracerStep(finish=TracerFinish(candidate_label=None, reason="nothing fits"))]
+
+    finish, _, _, _, counters, _, _ = await _trace(steps)
+
+    assert finish.candidate_label is None
+    assert finish.reason == "nothing fits"
+    assert counters["llm_abstained"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_step_with_neither_a_tool_call_nor_a_finish_abstains():
+    steps = [TracerStep(thought="thinking")]
+
+    finish, _, iterations, gateway, counters, _, _ = await _trace(steps)
+
+    assert finish.candidate_label is None
+    assert iterations == 1
+    assert gateway.await_count == 1
+    assert counters["llm_abstained"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_iteration_cap_spends_no_extra_call():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="echo", arguments={"text": "a"}))
+        for _ in range(5)
+    ]
+
+    finish, records, iterations, gateway, counters, _, budget = await _trace(steps, max_iter=3)
+
+    assert gateway.await_count == 3
+    assert iterations == 3
+    assert budget.used == 3
+    assert len(records) == 3
+    assert finish.candidate_label is None
+    assert finish.reason == "iteration cap reached"
+    assert counters["traces_iteration_capped"] == 1
+    assert counters["llm_calls"] == 3
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_pass_budget_spends_no_call_at_all():
+    steps = [TracerStep(finish=TracerFinish(candidate_label="A1", confidence=0.9))]
+
+    finish, records, iterations, gateway, counters, _, budget = await _trace(
+        steps, budget=CallBudget(max_calls=0)
+    )
+
+    assert gateway.await_count == 0
+    assert iterations == 0
+    assert records == []
+    assert finish.candidate_label is None
+    assert finish.reason == "pass budget exhausted"
+    assert counters["llm_budget_exhausted"] == 1
+    assert "llm_calls" not in counters
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+async def test_the_pass_budget_stops_a_trace_mid_way():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="echo", arguments={"text": "a"})),
+        TracerStep(finish=TracerFinish(candidate_label="A1", confidence=0.9)),
+    ]
+    budget = CallBudget(max_calls=1)
+
+    finish, records, iterations, gateway, counters, _, _ = await _trace(
+        steps, budget=budget, max_iter=4
+    )
+
+    assert gateway.await_count == 1
+    assert iterations == 1
+    assert len(records) == 1
+    assert finish.reason == "pass budget exhausted"
+    assert counters["llm_budget_exhausted"] == 1
+    assert budget.used == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_llm_call_consumes_a_budget_slot_and_abstains():
+    finish, records, iterations, gateway, counters, _, budget = await _trace(
+        [RuntimeError("provider down")]
+    )
+
+    assert gateway.await_count == 1
+    assert iterations == 1
+    assert budget.used == 1
+    assert finish.candidate_label is None
+    assert counters["llm_failed"] == 1
+    assert "llm_calls" not in counters
+    assert records == []
+
+
+@pytest.mark.asyncio
+async def test_a_long_tool_result_is_truncated_before_it_reaches_the_prompt():
+    steps = [
+        TracerStep(
+            tool_call=TracerToolCall(tool_name="echo", arguments={"text": "x", "repeat": 1})
+        ),
+        TracerStep(finish=TracerFinish(candidate_label=None, reason="done")),
+    ]
+
+    _, records, _, gateway, _, _, _ = await _trace(
+        steps, tools=_echo_tool("y" * (MAX_TOOL_OUTPUT_CHARS + 500))
+    )
+
+    second_prompt = gateway.await_args_list[1].kwargs["text_input"]
+    assert "… [truncated]" in second_prompt
+    assert "y" * (MAX_TOOL_OUTPUT_CHARS + 1) not in second_prompt
+    assert len(records[0].result_preview) <= TRACE_PREVIEW_CHARS
+
+
+@pytest.mark.asyncio
+async def test_trace_records_capture_the_call_and_a_short_preview():
+    steps = [
+        TracerStep(tool_call=TracerToolCall(tool_name="echo", arguments={"text": "recorded"})),
+        TracerStep(finish=TracerFinish(candidate_label="A1", confidence=0.9)),
+    ]
+
+    _, records, _, _, _, _, _ = await _trace(steps)
+
+    assert len(records) == 1
+    record = records[0]
+    assert isinstance(record, TraceRecord)
+    assert record.tool == "echo"
+    assert record.args == {"text": "recorded"}
+    assert record.result_preview == "recorded"
+    assert record.ok is True
+
+
+# --------------------------------------------------------------------------- #
+# prompts
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_the_first_prompt_carries_the_seed_the_reference_and_the_manifest():
+    registry = LabelRegistry()
+    steps = [TracerStep(finish=TracerFinish(candidate_label=None))]
+
+    _, _, _, gateway, _, _, _ = await _trace(
+        steps, registry=registry, tools=await _real_tools(registry)
+    )
+
+    prompt = gateway.await_args_list[0].kwargs["text_input"]
+    assert "the defendant failed to repair the roof" in prompt
+    assert "Complaint" in prompt
+    assert "paragraph 5" in prompt
+    assert "2026-06-10" in prompt
+    assert "knowledge" in prompt
+    assert "responds_to" in prompt
+    assert "Clifton" in prompt
+    assert "locate_paragraph" in prompt
+    assert "[A1]" in prompt
+
+
+@pytest.mark.asyncio
+async def test_an_empty_seed_renders_a_placeholder():
+    steps = [TracerStep(finish=TracerFinish(candidate_label=None))]
+
+    _, _, _, gateway, _, _, _ = await _trace(steps, seed=[])
+
+    assert "(no seed candidates)" in gateway.await_args_list[0].kwargs["text_input"]
+
+
+@pytest.mark.asyncio
+async def test_without_a_hint_the_reference_block_is_omitted():
+    steps = [TracerStep(finish=TracerFinish(candidate_label=None))]
+
+    _, _, _, gateway, _, _, _ = await _trace(steps, hint=None)
+
+    prompt = gateway.await_args_list[0].kwargs["text_input"]
+    assert "records no reference" in prompt
+    assert "2026-06-10" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_the_system_prompt_is_read_from_the_given_path():
+    steps = [TracerStep(finish=TracerFinish(candidate_label=None))]
+
+    _, _, _, gateway, _, _, _ = await _trace(steps, system_prompt_path=INFER_UNSTATED_SYSTEM_PROMPT)
+
+    system_prompt = gateway.await_args_list[0].kwargs["system_prompt"]
+    assert system_prompt == read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
+    assert system_prompt
+    assert "answering" in system_prompt
+
+
+def test_both_system_prompts_exist_and_state_the_contract():
+    stated = read_query_prompt(TRACE_SYSTEM_PROMPT)
+    unstated = read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
+
+    for prompt in (stated, unstated):
+        assert prompt
+        assert "tool_call" in prompt
+        assert "finish" in prompt
+        assert "abstention" in prompt
+    # The unstated variant is the stated prompt plus its own paragraph.
+    assert len(unstated) > len(stated)
+
+
+def test_the_response_model_is_documented_for_the_model():
+    fields: Dict[str, Any] = TracerFinish.model_fields
+    assert fields["candidate_label"].description
+    assert fields["reason"].description

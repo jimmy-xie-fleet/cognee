@@ -1,0 +1,306 @@
+"""The bounded agentic loop that resolves ONE assertion reference.
+
+Decision D3: every reference that survives the cheap, deterministic steps of the cascade
+goes to this tracer -- there is no single-shot "pick the best seed candidate" stage, and
+paragraph-marker lookup is a *tool the agent may call*, never an automatic resolution.
+Decision D7: the loop is written here rather than pulled in from a framework, every call
+goes through :class:`LLMGateway` (so rate limiting, usage accounting and quota handling
+are the ones the rest of cognee already has), and the tools are private callables that
+never appear in a search path.
+
+One trace is: render the referring statement, the reference as it was made, the tool
+manifest and a context that starts as the seed candidate list; ask for the next
+:class:`TracerStep`; either run the tool it named and append the result to the context, or
+accept the ``finish`` it returned. It stops on a finish, at ``max_iter`` steps, or when
+the pass-wide :class:`CallBudget` cannot pay for another call.
+
+Two spending rules the tests pin, because they are the difference between a bounded pass
+and an unbounded one:
+
+* ``budget.take()`` runs **before** every call, so a trace that starts after the pass
+  budget ran out costs nothing at all.
+* reaching ``max_iter`` returns an abstention **without** a final "just answer now" call
+  (unlike ``AgenticRetriever``), so a reference costs at most ``max_iter`` calls exactly.
+
+Nothing here writes to the graph. The caller (the resolver pass) maps the returned
+:class:`TracerFinish` to a ``Resolution`` and does the writing, and the returned
+:class:`TraceRecord` list is what a ``--show-traces`` report prints.
+"""
+
+import json
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+
+from pydantic import BaseModel, Field
+
+from cognee.infrastructure.llm import LLMGateway
+from cognee.infrastructure.llm.prompts import read_query_prompt, render_prompt
+from cognee.modules.graph.utils.reference_candidates import (
+    Candidate,
+    LabelRegistry,
+    format_candidate_lines,
+)
+from cognee.modules.graph.utils.reference_resolution import ReferenceHint, reference_display_text
+from cognee.shared.logging_utils import get_logger
+from cognee.tasks.graph.reference_tracer_tools import (
+    MAX_TOOL_OUTPUT_CHARS,
+    ToolSpec,
+    render_tool_manifest,
+    run_tool,
+)
+
+logger = get_logger("reference_tracer")
+
+TRACE_SYSTEM_PROMPT = "trace_reference_system.txt"
+TRACE_USER_PROMPT = "trace_reference_user.txt"
+INFER_UNSTATED_SYSTEM_PROMPT = "infer_unstated_reference_system.txt"
+
+# How much of a tool result a TraceRecord keeps. A record is for a human reading a report,
+# not for the model -- the model already saw the full (truncated) result in its context.
+TRACE_PREVIEW_CHARS = 300
+
+_TRUNCATION_NOTE = "\n… [truncated]"
+
+
+# --------------------------------------------------------------------------- #
+# response models
+# --------------------------------------------------------------------------- #
+
+
+class TracerToolCall(BaseModel):
+    tool_name: str = Field(..., description="A tool name from the manifest, exactly as written.")
+    # A plain object rather than a per-tool union: the tracer validates it against the
+    # named tool's own argument model and hands a validation failure back to the model as
+    # an ERROR string. Typed as Dict[str, Any] rather than `dict` so the emitted JSON
+    # schema is explicit; BAML rejects Any-valued maps, so this response model is only
+    # used with the litellm / litellm_native / instructor paths.
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict, description="Arguments for that tool, matching its schema."
+    )
+
+
+class TracerFinish(BaseModel):
+    candidate_label: Optional[str] = Field(
+        None, description="A label shown in this trace (A3, P2, D1), or null to abstain."
+    )
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    reason: str = Field("", description="One sentence naming the wording that decided it.")
+
+
+# The two outcomes are separate optional submodels rather than a tagged union on purpose:
+# a union makes pydantic emit the keywords several structured-output providers refuse in
+# strict mode, so the "exactly one of them" rule is enforced by the loop instead of by the
+# schema. The class docstring below is short because it is shipped to the model as the
+# schema's description.
+class TracerStep(BaseModel):
+    """One step of a trace: a thought, plus either a tool call or a finish, never both."""
+
+    thought: str = ""
+    tool_call: Optional[TracerToolCall] = None
+    finish: Optional[TracerFinish] = None
+
+
+# --------------------------------------------------------------------------- #
+# budget and trace records
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class CallBudget:
+    """LLM calls one resolver pass may spend, shared by every trace in it.
+
+    Deliberately a plain mutable object handed to each trace rather than a ContextVar: a
+    ContextVar is *copied* into a task, so concurrent traces would each get their own
+    budget. Traces run sequentially for the same reason.
+    """
+
+    max_calls: int
+    used: int = 0
+
+    def take(self) -> bool:
+        """Claim one call. False (and nothing spent) once the budget is gone."""
+        if self.used >= self.max_calls:
+            return False
+        self.used += 1
+        return True
+
+    @property
+    def exhausted(self) -> bool:
+        return self.used >= self.max_calls
+
+
+@dataclass
+class TraceRecord:
+    """One tool step of a trace, as a report would print it."""
+
+    tool: str
+    args: Dict[str, Any] = field(default_factory=dict)
+    result_preview: str = ""
+    ok: bool = True
+
+
+# --------------------------------------------------------------------------- #
+# counters
+# --------------------------------------------------------------------------- #
+
+
+def _bump(counters: MutableMapping[str, Any], key: str) -> None:
+    counters[key] = counters.get(key, 0) + 1
+
+
+def _bump_tool(counters: MutableMapping[str, Any], name: str) -> None:
+    by_name = counters.setdefault("tool_calls_by_name", {})
+    by_name[name] = by_name.get(name, 0) + 1
+
+
+# --------------------------------------------------------------------------- #
+# prompt context
+# --------------------------------------------------------------------------- #
+
+
+def _reference_block(hint: Optional[ReferenceHint]) -> Optional[Dict[str, str]]:
+    """The reference as the document made it, or None when there is nothing to show.
+
+    None drives the user template's ``{% if reference %}`` to its "no reference recorded"
+    branch, which is the shape the unstated-inference variant always runs in.
+    """
+    if hint is None:
+        return None
+
+    block = {
+        "text": reference_display_text(hint),
+        "document_hint": hint.document_hint or "",
+        "locator_kind": hint.locator_kind or "",
+        "locator_value": hint.locator_value or "",
+        "date": hint.date or "",
+        "basis": hint.basis or "",
+    }
+    return block if any(block.values()) else None
+
+
+def _source_block(
+    source_props: Mapping[str, Any], source_document_name: Optional[str], field_name: str
+) -> Dict[str, str]:
+    def text(value: Any, fallback: str) -> str:
+        return str(value).strip() if isinstance(value, str) and value.strip() else fallback
+
+    return {
+        "source_document": text(source_document_name, "(unknown document)"),
+        "speaker": text(source_props.get("asserted_by"), "(not recorded)"),
+        "statement_type": text(source_props.get("statement_type"), "statement"),
+        "polarity": text(source_props.get("polarity"), "unknown"),
+        "proposition": text(source_props.get("name"), "(no proposition recorded)"),
+        "source_quote": text(source_props.get("source_quote"), "(no quote recorded)"),
+        "field": field_name,
+    }
+
+
+def _render_args(arguments: Mapping[str, Any]) -> str:
+    try:
+        return json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:  # pragma: no cover - defensive; arguments came from a pydantic dict
+        return str(arguments)
+
+
+# --------------------------------------------------------------------------- #
+# the loop
+# --------------------------------------------------------------------------- #
+
+
+async def trace_reference(
+    *,
+    system_prompt_path: str,
+    hint: Optional[ReferenceHint],
+    source_props: Mapping[str, Any],
+    source_document_name: Optional[str],
+    field_name: str,
+    seed: Sequence[Candidate],
+    tools: Mapping[str, ToolSpec],
+    registry: LabelRegistry,
+    budget: CallBudget,
+    max_iter: int,
+    counters: MutableMapping[str, Any],
+) -> Tuple[TracerFinish, List[TraceRecord], int]:
+    """Resolve one reference, or abstain, in at most ``max_iter`` LLM calls.
+
+    Returns ``(finish, tool step records, calls actually spent)``. ``finish`` always names
+    either a label this trace's ``registry`` can resolve or ``None``: a label the model
+    invented is converted to an abstention here, so the caller never has to guess whether
+    a label is real.
+
+    Counters touched (created on first use, so a plain ``{}`` works): ``llm_calls``,
+    ``llm_failed``, ``llm_budget_exhausted``, ``llm_abstained``, ``llm_unknown_label``,
+    ``traces_iteration_capped``, and the nested ``tool_calls_by_name``.
+    """
+    records: List[TraceRecord] = []
+    manifest = render_tool_manifest(tools)
+    system_prompt = read_query_prompt(system_prompt_path) or ""
+    context = format_candidate_lines(seed) or "(no seed candidates)"
+    reference = _reference_block(hint)
+    source = _source_block(source_props, source_document_name, field_name)
+    iterations = 0
+
+    for step_number in range(1, max_iter + 1):
+        if not budget.take():
+            _bump(counters, "llm_budget_exhausted")
+            return _abstain("pass budget exhausted"), records, iterations
+
+        iterations += 1
+        user_prompt = render_prompt(
+            TRACE_USER_PROMPT,
+            {**source, "reference": reference, "tools": manifest, "context": context},
+        )
+
+        try:
+            step: TracerStep = await LLMGateway.acreate_structured_output(
+                text_input=user_prompt,
+                system_prompt=system_prompt,
+                response_model=TracerStep,
+            )
+        except Exception as error:
+            # The slot is spent either way; a retry would spend a second one for the same
+            # reference while every other reference in the pass is still waiting.
+            _bump(counters, "llm_failed")
+            logger.warning("Reference trace step %s failed: %s", step_number, error)
+            return _abstain(f"tracer call failed: {error}"), records, iterations
+        _bump(counters, "llm_calls")
+
+        finish = step.finish
+        if finish is not None:
+            label = (finish.candidate_label or "").strip()
+            if not label:
+                _bump(counters, "llm_abstained")
+                return finish, records, iterations
+            if registry.resolve(label) is None:
+                _bump(counters, "llm_unknown_label")
+                return _abstain(f"unknown candidate label {label}"), records, iterations
+            return finish, records, iterations
+
+        tool_call = step.tool_call
+        if tool_call is None:
+            _bump(counters, "llm_abstained")
+            return _abstain("step named neither a tool nor a finish"), records, iterations
+
+        name = tool_call.tool_name.strip()
+        arguments = dict(tool_call.arguments or {})
+        result = await run_tool(tools, name, arguments)
+        if len(result) > MAX_TOOL_OUTPUT_CHARS:
+            result = result[:MAX_TOOL_OUTPUT_CHARS] + _TRUNCATION_NOTE
+
+        _bump_tool(counters, name)
+        records.append(
+            TraceRecord(
+                tool=name,
+                args=arguments,
+                result_preview=result[:TRACE_PREVIEW_CHARS],
+                ok=not result.startswith("ERROR:"),
+            )
+        )
+        context += f"\n\n# Step {step_number}: {name}({_render_args(arguments)})\nResult:\n{result}"
+
+    _bump(counters, "traces_iteration_capped")
+    return _abstain("iteration cap reached"), records, iterations
+
+
+def _abstain(reason: str) -> TracerFinish:
+    return TracerFinish(candidate_label=None, confidence=0.0, reason=reason)
