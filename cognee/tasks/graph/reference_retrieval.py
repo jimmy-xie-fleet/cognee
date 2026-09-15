@@ -14,17 +14,24 @@ Candidates come from text the dataset already has indexed, never from a filename
   guard so an un-indexed collection is an empty channel rather than an error;
 * two BM25 corpora over the graph view's own text (:class:`LexicalIndex`), built at most
   once per pass, so an exact rare-token match ("Fester") can win a ranking that semantic
-  similarity alone would miss.
+  similarity alone would miss -- but only above ``BM25_MIN_RAW_SCORE``, so a merely-common
+  shared token cannot.
 
-A document is therefore reachable through its content -- an opaque scan name like
-``SKM_C55826082316050`` is never matched as a string.
+With ``kind="documents"`` a document is reachable through its *content*: chunk hits are
+rolled up to the document that owns them, which is the only way a document whose filename
+is an opaque scan name (``SKM_C55826082316050``) can be found at all. ``kind="any"``
+does not roll chunks up -- there, a document surfaces only through its own
+``<DocumentType>_name`` embedding, i.e. through its name -- so a caller looking for a
+document should ask for ``kind="documents"``. No `kind` ever matches a filename as a
+string.
 
 Dataset scoping is implicit: inside a pipeline the vector engine already resolves to the
 dataset's own databases, so this module never enters
 ``set_database_global_context_variables``. Nothing here calls an LLM.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+import asyncio
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from cognee.infrastructure.databases.vector import get_vector_engine_async
 from cognee.infrastructure.databases.vector.exceptions import CollectionNotFoundError
@@ -52,6 +59,13 @@ DOCUMENT_K = 3
 # A BM25 channel's top hit is worth this much; the rest scale below it. Kept under 1.0 so
 # a strong semantic hit can still outrank a merely-best lexical one.
 BM25_WEIGHT = 0.8
+# Raw BM25 score a result list's top hit must reach before the list is used at all. Every
+# token present in the corpus has a positive IDF (bm25_retriever.py:84), so any query
+# sharing one common token with the corpus produces a "top hit"; normalising by that top
+# would hand it the full BM25_WEIGHT and park it at or above the semantic field (a cosine
+# distance of 0.2-0.4 is a similarity of 0.6-0.8). This is the previous resolver's
+# calibrated prose gate (_PROSE_MINIMUM_SCORE, resolve_assertion_references.py:136).
+BM25_MIN_RAW_SCORE = 1.0
 # Subtracted from a candidate that lives in the referring statement's own document. A
 # penalty, never a filter: "realleges the allegations of paragraphs 1-23" is a real
 # reference back into the same pleading.
@@ -201,9 +215,13 @@ def _document_item(
 
 
 def _document_of_chunk_item(
-    chunk_id: str, similarity: float, source_tag: str, view: GraphView
+    chunk_id: str, similarity: float, source_tag: str, view: GraphView, payload: dict
 ) -> Optional[_Item]:
-    """The document a chunk hit belongs to, so a document is findable by its content."""
+    """The document a chunk hit belongs to, so a document is findable by its content.
+
+    ``payload`` is the chunk's, which says nothing about its document; it is accepted (and
+    ignored) so every channel mapper has one signature.
+    """
     document_id = view.document_by_chunk.get(chunk_id)
     if not document_id:
         return None
@@ -230,7 +248,31 @@ class LexicalIndex:
         self._view = view
         # corpus name -> retriever, or None when the corpus has no tokens at all.
         self._corpora: Dict[str, Any] = {}
+        # collection name -> whether it exists; see collection_exists.
+        self._collection_exists: Dict[str, bool] = {}
         self.builds = 0
+
+    async def collection_exists(self, vector_engine, name: str) -> bool:
+        """Whether a vector collection exists, asked once per pass and then remembered.
+
+        The collection set cannot change while a pass runs, and the guard is not free --
+        LanceDB's ``has_collection`` lists every table -- so this cache turns one listing
+        per collection per search into one per collection per pass. An engine that does
+        not expose ``has_collection`` is assumed to have the collection; the
+        ``CollectionNotFoundError`` guard around the search covers that case.
+        """
+        cached = self._collection_exists.get(name)
+        if cached is not None:
+            return cached
+
+        has_collection = getattr(vector_engine, "has_collection", None)
+        exists = True if has_collection is None else bool(await has_collection(name))
+        self._collection_exists[name] = exists
+        return exists
+
+    def mark_collection_missing(self, name: str) -> None:
+        """Record a collection a search reported gone, so the pass stops querying it."""
+        self._collection_exists[name] = False
 
     def _texts(self, corpus: str) -> Dict[str, str]:
         source = self._view.chunks if corpus == self.CHUNKS else self._view.assertions
@@ -303,12 +345,15 @@ def _weighted(results: Sequence[Tuple[str, float]]) -> List[Tuple[str, float]]:
     """Normalise raw BM25 scores by their own top score, scaled by ``BM25_WEIGHT``.
 
     BM25 scores are unbounded and corpus-dependent, so only their ranking transfers: the
-    top hit becomes ``BM25_WEIGHT`` and the rest keep their ratio to it.
+    top hit becomes ``BM25_WEIGHT`` and the rest keep their ratio to it. The floor is
+    checked on the **raw** top score and applies to the whole list: a list whose best hit
+    is only a common-token coincidence contributes nothing, while a list that clears the
+    floor keeps its weaker members, scaled below the top hit.
     """
     if not results:
         return []
     top = max(score for _, score in results)
-    if top <= 0:
+    if top < BM25_MIN_RAW_SCORE:
         return []
     return [(node_id, BM25_WEIGHT * score / top) for node_id, score in results]
 
@@ -317,7 +362,11 @@ def _weighted(results: Sequence[Tuple[str, float]]) -> List[Tuple[str, float]]:
 # the vector channel
 # --------------------------------------------------------------------------- #
 async def _collection_hits(
-    engine: Any, collection: str, queries: Sequence[Tuple[int, str]], k: int
+    engine: Any,
+    lexical: "LexicalIndex",
+    collection: str,
+    queries: Sequence[Tuple[int, str]],
+    k: int,
 ) -> List[Tuple[int, Any]]:
     """``(query index, ScoredResult)`` for one collection, or [] when it is not indexed.
 
@@ -327,8 +376,7 @@ async def _collection_hits(
     """
     query_texts = [text for _, text in queries]
     try:
-        has_collection = getattr(engine, "has_collection", None)
-        if has_collection is not None and not await has_collection(collection):
+        if not await lexical.collection_exists(engine, collection):
             logger.debug("Collection %s does not exist; skipping that channel.", collection)
             return []
 
@@ -346,6 +394,7 @@ async def _collection_hits(
                 for text in query_texts
             ]
     except CollectionNotFoundError:
+        lexical.mark_collection_missing(collection)
         logger.debug("Collection %s not found; skipping that channel.", collection)
         return []
 
@@ -423,71 +472,41 @@ async def search_candidates(
     engine = vector_engine if vector_engine is not None else await get_vector_engine_async()
     items: List[Optional[_Item]] = []
 
+    # (collection, k, item mapper), built in a fixed order. The channels are queried
+    # concurrently -- each batch_search embeds its own query texts, so serialising them
+    # would cost one embedding round trip after another -- but the items are assembled in
+    # *plan* order below, never in completion order, so the ranking is deterministic.
+    # No collection appears twice: the chunk roll-up only runs for kind="documents", where
+    # the passage channels are off.
+    channels: List[Tuple[str, int, Callable[..., Optional[_Item]]]] = []
     if want_assertions:
-        for index, result in await _collection_hits(
-            engine, ASSERTION_COLLECTION, indexed_queries, DEFAULT_K_PER_QUERY
-        ):
-            items.append(
-                _assertion_item(
-                    str(result.id),
-                    distance_to_similarity(result.score),
-                    f"vector:{index}",
-                    view,
-                    _payload_of(result),
-                )
-            )
-
+        channels.append((ASSERTION_COLLECTION, DEFAULT_K_PER_QUERY, _assertion_item))
     if want_passages:
-        for index, result in await _collection_hits(
-            engine, CHUNK_COLLECTION, indexed_queries, DEFAULT_K_PER_QUERY
-        ):
-            items.append(
-                _chunk_item(
-                    str(result.id),
-                    distance_to_similarity(result.score),
-                    f"vector:{index}",
-                    view,
-                    _payload_of(result),
-                )
-            )
-        for index, result in await _collection_hits(
-            engine, SUMMARY_COLLECTION, indexed_queries, DEFAULT_K_PER_QUERY
-        ):
-            items.append(
-                _summary_item(
-                    str(result.id),
-                    distance_to_similarity(result.score),
-                    f"vector:{index}",
-                    view,
-                    _payload_of(result),
-                )
-            )
-
+        channels.append((CHUNK_COLLECTION, DEFAULT_K_PER_QUERY, _chunk_item))
+        channels.append((SUMMARY_COLLECTION, DEFAULT_K_PER_QUERY, _summary_item))
     if want_documents:
-        for collection in DOCUMENT_COLLECTIONS:
-            for index, result in await _collection_hits(
-                engine, collection, indexed_queries, DOCUMENT_K
-            ):
-                items.append(
-                    _document_item(
-                        str(result.id),
-                        distance_to_similarity(result.score),
-                        f"vector:{index}",
-                        view,
-                        _payload_of(result),
-                    )
-                )
-
+        channels.extend(
+            (collection, DOCUMENT_K, _document_item) for collection in DOCUMENT_COLLECTIONS
+        )
     if roll_chunks_up:
-        for index, result in await _collection_hits(
-            engine, CHUNK_COLLECTION, indexed_queries, DEFAULT_K_PER_QUERY
-        ):
+        channels.append((CHUNK_COLLECTION, DEFAULT_K_PER_QUERY, _document_of_chunk_item))
+
+    hits_per_channel = await asyncio.gather(
+        *(
+            _collection_hits(engine, lexical, collection, indexed_queries, k)
+            for collection, k, _ in channels
+        )
+    )
+
+    for (_, _, to_item), hits in zip(channels, hits_per_channel):
+        for index, result in hits:
             items.append(
-                _document_of_chunk_item(
+                to_item(
                     str(result.id),
                     distance_to_similarity(result.score),
                     f"vector:{index}",
                     view,
+                    _payload_of(result),
                 )
             )
 
@@ -503,7 +522,7 @@ async def search_candidates(
                 await lexical.search_chunks(text, DEFAULT_K_PER_QUERY)
             ):
                 if roll_chunks_up:
-                    items.append(_document_of_chunk_item(node_id, similarity, source_tag, view))
+                    items.append(_document_of_chunk_item(node_id, similarity, source_tag, view, {}))
                 else:
                     items.append(_chunk_item(node_id, similarity, source_tag, view, {}))
 

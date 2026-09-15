@@ -7,6 +7,8 @@ filesystem. The vector channel is driven by ``FakeVectorEngine`` (cosine **dista
 the view's own text, so the scoring these tests pin is the scoring production runs.
 """
 
+import asyncio
+from collections import Counter
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,6 +16,7 @@ import pytest
 from cognee.modules.graph.utils.reference_candidates import LabelRegistry
 from cognee.tasks.graph.reference_retrieval import (
     ASSERTION_COLLECTION,
+    BM25_MIN_RAW_SCORE,
     BM25_WEIGHT,
     CHUNK_COLLECTION,
     DEFAULT_K_PER_QUERY,
@@ -48,12 +51,25 @@ C0 = nid("complaint-chunk-0")
 C1 = nid("complaint-chunk-1")
 A0 = nid("answer-chunk-0")
 
-C0_TEXT = "The parties entered a zorvax lease in 1997 regarding 10 Main Street."
+C0_TEXT = (
+    "The parties entered a zorvax lease in 1997 regarding 10 Main Street. "
+    "The zorvax lease was recorded."
+)
 C1_TEXT = (
     "Clifton owns 10 Main Street. The aquamarine roof was replaced in 2019 "
     "by a contractor hired from the neighbouring county office."
 )
 A0_TEXT = "Clifton denies owning 10 Main Street. Norman Fester disputes the aquamarine roof."
+# Filler passages, so the lexical corpus is big enough for IDF to separate a rare token
+# ("zorvax", "fester") from a common one ("street") the way a real document set does.
+FILLER_TEXTS = (
+    "The plaintiff further alleges that the premises at 10 Main Street were leased in good faith.",
+    "Exhibit B lists the payments made under the lease during the 1998 calendar year.",
+    "The defendant received notice of the claim at the Main Street address on 12 March.",
+    "Counsel for the parties conferred about the schedule and exchanged initial disclosures.",
+    "The court entered a scheduling order setting trial for the following spring term.",
+)
+FILLER = tuple(nid(f"complaint-filler-{index}") for index in range(len(FILLER_TEXTS)))
 
 A_ALLEGE = nid("assertion-allege")
 A_ROOF = nid("assertion-roof")
@@ -65,6 +81,9 @@ STALE = nid("assertion-deleted-but-still-indexed")
 # A query whose tokens appear nowhere in the corpus, so the BM25 channel stays silent and
 # a test can pin the vector channel on its own.
 NO_LEXICAL_MATCH = "xylophone quasar"
+# A document_name that only the chunk collection's index row carries (a renamed
+# document is the realistic case), so a test can see which channel's payload won.
+RENAMED = "Renamed_In_The_Index"
 
 
 async def _base_view():
@@ -84,11 +103,16 @@ async def _base_view():
         ),
     ]
     edges = []
-    for node, edge in (
+    chunks = [
         chunk_node(C0, C0_TEXT, 0, DOC_COMPLAINT),
         chunk_node(C1, C1_TEXT, 1, DOC_COMPLAINT),
         chunk_node(A0, A0_TEXT, 0, DOC_ANSWER),
-    ):
+        *(
+            chunk_node(FILLER[index], text, index + 2, DOC_COMPLAINT)
+            for index, text in enumerate(FILLER_TEXTS)
+        ),
+    ]
+    for node, edge in chunks:
         nodes.append(node)
         edges.append(edge)
     return await build_graph_view(nodes, edges)
@@ -156,6 +180,8 @@ def test_constants_are_the_specified_values():
     assert DEFAULT_K_PER_QUERY == 8
     assert DOCUMENT_K == 3
     assert BM25_WEIGHT == 0.8
+    # The prose gate's calibrated floor (resolve_assertion_references.py:136).
+    assert BM25_MIN_RAW_SCORE == 1.0
     assert SAME_DOCUMENT_PENALTY == 0.15
     assert SEED_LIMIT == 12
     assert ASSERTION_COLLECTION == "Assertion_name"
@@ -274,12 +300,19 @@ async def test_missing_collection_is_an_empty_channel():
 async def test_collection_not_found_error_is_an_empty_channel():
     view = await _base_view()
     engine = _base_engine(raising_collections=[ASSERTION_COLLECTION])
+    lexical = LexicalIndex(view)
 
-    candidates = await _search(view, engine=engine)
+    candidates = await _search(view, engine=engine, lexical=lexical)
 
     assert {candidate.node_id for candidate in candidates} == {C1, DOC_COMPLAINT, A0}
     # The guard passed, so the query really was attempted before the error was swallowed.
-    assert ASSERTION_COLLECTION in _collections(engine.batch_search_calls)
+    assert _collections(engine.batch_search_calls).count(ASSERTION_COLLECTION) == 1
+
+    await _search(view, engine=engine, lexical=lexical)
+
+    # ...and the failure is remembered, so the pass stops asking.
+    assert _collections(engine.batch_search_calls).count(ASSERTION_COLLECTION) == 1
+    assert engine.has_collection_calls.count(ASSERTION_COLLECTION) == 1
 
 
 @pytest.mark.asyncio
@@ -330,15 +363,76 @@ async def test_the_engine_defaults_to_the_module_seam():
     assert candidates[0].node_id == A_ALLEGE
 
 
+@pytest.mark.asyncio
+async def test_collection_existence_is_asked_once_per_pass():
+    """The collection set cannot change mid-pass, and each guard costs a table listing."""
+    view = await _base_view()
+    engine = _base_engine()
+    lexical = LexicalIndex(view)
+
+    for _ in range(3):
+        await _search(view, engine=engine, lexical=lexical)
+
+    assert set(Counter(engine.has_collection_calls).values()) == {1}
+    assert Counter(engine.has_collection_calls) == Counter(
+        [ASSERTION_COLLECTION, CHUNK_COLLECTION, SUMMARY_COLLECTION, *DOCUMENT_COLLECTIONS]
+    )
+    # The queries themselves are not memoised: one batch_search per collection per call.
+    assert _collections(engine.batch_search_calls).count(ASSERTION_COLLECTION) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_ranking_follows_the_channel_order_not_the_completion_order():
+    """Channels run concurrently, so items must be assembled in the fixed plan order."""
+
+    class _SlowAssertionChannel(FakeVectorEngine):
+        async def batch_search(self, collection_name, query_texts, **kwargs):
+            if collection_name == ASSERTION_COLLECTION:
+                await asyncio.sleep(0.02)
+            return await super().batch_search(collection_name, query_texts, **kwargs)
+
+    view = await _base_view()
+    # C1 is hit by the chunk channel (plan position 1, payload below) and by the summary
+    # channel (position 2, which derives its payload from the view) -- and the summary hit
+    # scores better. The merged candidate must still carry the chunk channel's payload,
+    # because that channel comes first in the plan, not because it answered first.
+    script = dict(_base_engine().results_by_collection)
+    script[CHUNK_COLLECTION] = [
+        scored(
+            C1, 0.25, text=C1_TEXT, document_id=DOC_COMPLAINT, document_name=RENAMED, chunk_index=1
+        ),
+        scored(A0, 0.45, text=A0_TEXT),
+    ]
+    engine = _SlowAssertionChannel(script)
+
+    candidates = await _search(view, engine=engine)
+
+    assert _by_id(candidates)[C1].document_name == RENAMED
+
+    assert [(candidate.node_id, round(candidate.score, 4)) for candidate in candidates] == [
+        (A_ALLEGE, 0.90),
+        (C1, 0.80),
+        (A_DENY, 0.70),
+        (DOC_COMPLAINT, 0.68),
+        (A_LEASE, 0.60),
+        (A0, 0.55),
+    ]
+    assert [candidate.label for candidate in candidates] == ["A1", "P1", "A2", "D1", "A3", "P2"]
+
+
 # --------------------------------------------------------------------------- #
 # the lexical channel
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_bm25_top_hit_scores_the_bm25_weight():
     view = await _base_view()
+    lexical = LexicalIndex(view)
 
-    candidates = await _search(view, queries=["zorvax"], kind="passages")
+    raw = await lexical.search_chunks("zorvax", DEFAULT_K_PER_QUERY)
+    candidates = await _search(view, lexical=lexical, queries=["zorvax"], kind="passages")
 
+    # A rare token clears the raw floor, so it keeps the full weight.
+    assert raw[0][1] >= BM25_MIN_RAW_SCORE
     assert len(candidates) == 1
     assert candidates[0].node_id == C0
     assert candidates[0].score == pytest.approx(BM25_WEIGHT)
@@ -374,6 +468,49 @@ async def test_bm25_searches_assertion_names_too():
     assert candidates[0].score == pytest.approx(BM25_WEIGHT)
     assert candidates[0].sources == ("bm25:0",)
     assert candidates[0].text == "The aquamarine roof was replaced in 2019"
+
+
+@pytest.mark.asyncio
+async def test_a_lexically_weak_match_never_reaches_the_seed():
+    """One shared common token must not put a candidate at the top of the seed.
+
+    Every token present in the corpus has a positive IDF, so BM25 always returns *some*
+    hit; normalising by the list's own top score would hand that hit the full
+    ``BM25_WEIGHT`` and park it at or above the semantic field (cosine distance 0.2-0.4 =>
+    similarity 0.6-0.8). The raw floor is what stops it.
+    """
+    view = await _base_view()
+    lexical = LexicalIndex(view)
+
+    raw = await lexical.search_chunks("street", DEFAULT_K_PER_QUERY)
+    candidates = await _search(view, lexical=lexical, queries=["street"], kind="passages")
+
+    # The corpus really does match -- it is the floor, not an empty result, that drops it.
+    assert len(raw) >= 3
+    assert max(score for _, score in raw) < BM25_MIN_RAW_SCORE
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_the_raw_floor_is_applied_to_each_result_list_on_its_own():
+    view = await _base_view()
+    lexical = LexicalIndex(view)
+
+    chunk_raw = await lexical.search_chunks("zorvax street", DEFAULT_K_PER_QUERY)
+    assertion_raw = await lexical.search_assertions("zorvax street", DEFAULT_K_PER_QUERY)
+    candidates = await _search(view, lexical=lexical, queries=["zorvax street"], kind="any")
+
+    # The chunk corpus clears the floor on "zorvax"; the assertion corpus only matches
+    # "street" and does not.
+    assert max(score for _, score in chunk_raw) >= BM25_MIN_RAW_SCORE
+    assert assertion_raw
+    assert max(score for _, score in assertion_raw) < BM25_MIN_RAW_SCORE
+
+    assert {candidate.node_type for candidate in candidates} == {"DocumentChunk"}
+    assert candidates[0].node_id == C0
+    assert candidates[0].score == pytest.approx(BM25_WEIGHT)
+    # A list that clears the floor keeps its weak members, scaled below the top hit.
+    assert candidates[-1].score < BM25_WEIGHT
 
 
 @pytest.mark.asyncio
@@ -429,7 +566,7 @@ async def test_kind_passages_covers_chunks_and_summaries():
     candidates = await _search(view, engine=engine, kind="passages")
 
     assert [candidate.node_id for candidate in candidates] == [C1, A0]
-    assert engine.has_collection_calls == [CHUNK_COLLECTION, SUMMARY_COLLECTION]
+    assert Counter(engine.has_collection_calls) == Counter([CHUNK_COLLECTION, SUMMARY_COLLECTION])
 
 
 @pytest.mark.asyncio
@@ -447,7 +584,9 @@ async def test_kind_documents_rolls_chunk_hits_up_to_their_document():
     ]
     assert [candidate.label for candidate in candidates] == ["D1", "D2"]
     assert [candidate.text for candidate in candidates] == [COMPLAINT_NAME, ANSWER_NAME]
-    assert engine.has_collection_calls == [*DOCUMENT_COLLECTIONS, CHUNK_COLLECTION]
+    assert Counter(engine.has_collection_calls) == Counter(
+        [*DOCUMENT_COLLECTIONS, CHUNK_COLLECTION]
+    )
     assert (DOCUMENT_COLLECTIONS[0], [NO_LEXICAL_MATCH], DOCUMENT_K, True) in (
         engine.batch_search_calls
     )
