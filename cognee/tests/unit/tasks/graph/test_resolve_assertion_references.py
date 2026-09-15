@@ -57,9 +57,13 @@ from cognee.tasks.graph.resolve_assertion_references import (
 from cognee.tests.unit.tasks.graph._reference_fakes import FakeVectorEngine, scored
 
 MODULE = "cognee.tasks.graph.resolve_assertion_references"
+# The trace pass lives in its own module (the task module imports its names back and
+# re-exports them), so a seam inside the pass has to be patched where the pass reads it.
+PASS = "cognee.tasks.graph.reference_pass"
 # The package re-exports the task function under the module's own name, so the module
 # object itself has to come from the import machinery rather than attribute lookup.
 resolve_module = import_module(MODULE)
+pass_module = import_module(PASS)
 RETRIEVAL = "cognee.tasks.graph.reference_retrieval"
 TRACER = "cognee.tasks.graph.reference_tracer"
 GATEWAY = f"{TRACER}.LLMGateway.acreate_structured_output"
@@ -1246,7 +1250,7 @@ async def test_one_bad_reference_fails_only_itself():
         raise RuntimeError("seed retrieval exploded")
 
     with _patched(graph, steps=[finish_on(MARK_STIPULATION_PASSAGE)]) as mocks:
-        with patch(f"{MODULE}.search_candidates", side_effect=_explode):
+        with patch(f"{PASS}.search_candidates", side_effect=_explode):
             payload = await detect_dangling_references(None)
             summary = await apply_reference_resolutions(payload)
 
@@ -1345,7 +1349,7 @@ async def test_a_mapping_failure_counts_only_its_own_reference(caplog):
     """R15: mapping a finish onto a Resolution runs inside the per-reference guard, so a
     bug there costs one reference rather than the whole pass."""
     graph = _base_graph()
-    real_precheck = resolve_module._edge_precheck
+    real_precheck = pass_module._edge_precheck
 
     def _explode(outcome, props, view):
         if outcome.resolution is not None and outcome.resolution.assertion_id == A_DENIAL:
@@ -1353,7 +1357,7 @@ async def test_a_mapping_failure_counts_only_its_own_reference(caplog):
         return real_precheck(outcome, props, view)
 
     with _patched(graph, steps=list(DENIAL_TRACE)) as mocks:
-        with patch(f"{MODULE}._edge_precheck", side_effect=_explode):
+        with patch(f"{PASS}._edge_precheck", side_effect=_explode):
             with caplog.at_level("WARNING"):
                 payload = await detect_dangling_references(None)
                 summary = await apply_reference_resolutions(payload)
