@@ -276,9 +276,11 @@ async def _raw_locations(dataset_id) -> Dict[str, str]:
 class DocumentTextCache:
     """The stored text (and chunk offsets) of the documents one pass actually reads.
 
-    A document is read at most once per pass. A read error is deliberately *not* cached:
-    it propagates so the reference that asked for it is counted as failed rather than
-    silently downgraded, and the caller's per-reference guard keeps the pass going.
+    A document is opened at most once per pass, successfully or not. A document whose
+    text cannot be read -- a PDF or image opened as UTF-8, a file that moved -- is still
+    a matched document, so the failure is cached as "no text" and the caller degrades to
+    the stored chunks. Only an error the reader was not expected to raise propagates, so
+    the ``failed`` counter keeps meaning "something is wrong here".
     """
 
     def __init__(self, view: GraphView, *, dataset_id=None):
@@ -312,7 +314,19 @@ class DocumentTextCache:
             self._texts[document_id] = None
             return None
 
-        text = await _read_processed_text(location)
+        try:
+            text = await _read_processed_text(location)
+        except (UnicodeDecodeError, OSError) as error:
+            logger.warning(
+                "Could not read stored text for document %s at %s (%s); "
+                "falling back to its chunks.",
+                document_id,
+                location,
+                error,
+            )
+            self._texts[document_id] = None
+            return None
+
         self._texts[document_id] = text
         return text
 
@@ -710,8 +724,10 @@ async def _resolve_reference(
     if locator is not None and locator.kind not in _DOCUMENT_LEVEL_LOCATOR_KINDS:
         located = await _locate_span(reference, document_id, view, texts)
         if located is None:
-            # The document is right but its text does not mark the place the reference
-            # names; a document-wide edge would claim more than was established.
+            # The document is established even though its text does not mark the place
+            # the reference names -- a renumbered pleading, an unreadable original. The
+            # document edge records what was established, the note records what was not,
+            # and <field>_text keeps the wording so force=True can try again later.
             logger.debug(
                 "Locator %s not found in document %s for %s.%s.",
                 locator,
@@ -719,49 +735,55 @@ async def _resolve_reference(
                 assertion_id,
                 field_name,
             )
-            return _Outcome("unresolved")
+            notes = notes + ("locator_not_found",)
+        else:
+            span_text, overlapping, anchor, span_notes = located
+            outcome = _resolve_document_locator(
+                assertion_id,
+                field_name,
+                reference_text,
+                document_id,
+                span_text,
+                overlapping,
+                anchor,
+                notes + span_notes,
+                view,
+            )
 
-        span_text, overlapping, anchor, span_notes = located
-        outcome = _resolve_document_locator(
-            assertion_id,
-            field_name,
-            reference_text,
-            document_id,
-            span_text,
-            overlapping,
-            anchor,
-            notes + span_notes,
-            view,
+    # Prose lookup narrows a locator-less reference to one chunk, but only ever at a
+    # fixed 0.60. A floor above that rules the answer out before it is computed, so the
+    # opt-in can never cost a resolution the document match alone would have supplied.
+    if (
+        outcome is None
+        and enable_prose_lookup
+        and locator is None
+        and _PROSE_CONFIDENCE >= confidence_floor - _TOLERANCE
+        and len(reference.hint_other_tokens) >= _PROSE_MINIMUM_TOKENS
+    ):
+        chunk_id = await _prose_chunk(
+            reference_text, view.chunks_by_document.get(document_id) or []
         )
-    else:
-        if (
-            enable_prose_lookup
-            and locator is None
-            and len(reference.hint_other_tokens) >= _PROSE_MINIMUM_TOKENS
-        ):
-            chunk_id = await _prose_chunk(
-                reference_text, view.chunks_by_document.get(document_id) or []
+        if chunk_id is not None:
+            outcome = _Outcome(
+                "resolved",
+                Resolution(
+                    assertion_id=assertion_id,
+                    field=field_name,
+                    reference_text=reference_text,
+                    strategy=STRATEGY_PROSE_LOOKUP,
+                    confidence=_PROSE_CONFIDENCE,
+                    anchor_id=chunk_id,
+                    anchor_type="DocumentChunk",
+                    target_type="DocumentChunk",
+                    document_id=document_id,
+                    notes=notes,
+                ),
             )
-            if chunk_id is not None:
-                outcome = _Outcome(
-                    "resolved",
-                    Resolution(
-                        assertion_id=assertion_id,
-                        field=field_name,
-                        reference_text=reference_text,
-                        strategy=STRATEGY_PROSE_LOOKUP,
-                        confidence=_PROSE_CONFIDENCE,
-                        anchor_id=chunk_id,
-                        anchor_type="DocumentChunk",
-                        target_type="DocumentChunk",
-                        document_id=document_id,
-                        notes=notes,
-                    ),
-                )
-        if outcome is None:
-            outcome = _resolve_document_only(
-                assertion_id, field_name, reference_text, document_id, score, notes, view
-            )
+
+    if outcome is None:
+        outcome = _resolve_document_only(
+            assertion_id, field_name, reference_text, document_id, score, notes, view
+        )
 
     if (
         outcome.resolution is not None

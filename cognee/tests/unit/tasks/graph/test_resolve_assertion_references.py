@@ -587,10 +587,37 @@ async def test_reference_to_an_absent_document_stays_unresolved():
 
 
 @pytest.mark.asyncio
-async def test_unreadable_text_fails_only_its_own_reference():
+@pytest.mark.parametrize(
+    "error",
+    [
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        FileNotFoundError("the stored file moved"),
+    ],
+    ids=["binary-document", "missing-file"],
+)
+async def test_unreadable_text_degrades_to_the_chunk_scan(error):
+    """A PDF or a moved file still names a matched document: use its stored chunks."""
     graph = _base_graph()
     texts = dict(DEFAULT_TEXTS)
-    texts[COMPLAINT_LOCATION] = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    texts[COMPLAINT_LOCATION] = error
+
+    _, summary, mocks = await _run(graph, texts)
+
+    edges = _by_target(graph.edges_of(A_DENIAL, "responds_to"))
+    assert set(edges) == {COMPLAINT_CHUNK_0}
+    assert _props(edges[COMPLAINT_CHUNK_0])["resolution_strategy"] == STRATEGY_DOCUMENT_LOCATOR
+    assert _props(edges[COMPLAINT_CHUNK_0])["resolution_confidence"] == pytest.approx(0.65)
+    assert summary["failed"] == 0
+    # The doomed open is cached: one attempt per document, not one per reference.
+    assert mocks.read_processed_text.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpected_read_error_fails_only_its_own_reference():
+    """An error the reader was not expected to raise still counts as a failure."""
+    graph = _base_graph()
+    texts = dict(DEFAULT_TEXTS)
+    texts[COMPLAINT_LOCATION] = RuntimeError("reader exploded")
 
     _, summary, _ = await _run(graph, texts)
 
@@ -599,6 +626,41 @@ async def test_unreadable_text_fails_only_its_own_reference():
     # The other references in the same pass still resolve.
     assert graph.edges_of(A_ATTRIBUTED, "attributed_to")
     assert graph.edges_of(A_STIPULATION, "responds_to")
+
+
+@pytest.mark.asyncio
+async def test_missing_locator_falls_back_to_the_document():
+    """The document is established even when its text does not mark the paragraph."""
+    graph = _base_graph()
+    graph.nodes[A_DENIAL]["responds_to"] = "Complaint ¶99"
+
+    _, summary, _ = await _run(graph)
+
+    edges = graph.edges_of(A_DENIAL, "responds_to")
+    assert [edge[1] for edge in edges] == [DOC_COMPLAINT]
+    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
+    assert _props(edges[0])["resolution_confidence"] == pytest.approx(0.60)
+
+    resolution = dict(graph.update_node_calls)[A_DENIAL]["responds_to_resolution"]
+    assert resolution["notes"] == ["locator_not_found"]
+    assert resolution["anchor_id"] == DOC_COMPLAINT
+    assert summary["unresolved"] == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_locator_in_the_chunk_scan_falls_back_to_the_document():
+    graph = _base_graph()
+    del graph.nodes[DOC_COMPLAINT]["raw_data_location"]
+    graph.nodes[A_DENIAL]["responds_to"] = "Complaint ¶99"
+
+    _, summary, _ = await _run(graph)
+
+    edges = graph.edges_of(A_DENIAL, "responds_to")
+    assert [edge[1] for edge in edges] == [DOC_COMPLAINT]
+    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
+    resolution = dict(graph.update_node_calls)[A_DENIAL]["responds_to_resolution"]
+    assert resolution["notes"] == ["locator_not_found"]
+    assert summary["unresolved"] == 0
 
 
 @pytest.mark.asyncio
@@ -766,6 +828,21 @@ async def test_prose_lookup_anchors_on_the_best_scoring_chunk():
     patch_values = dict(graph.update_node_calls)[A_PROSE]
     assert patch_values["attributed_to"] == APPRAISAL_CHUNKS[1]
     assert summary["resolved_by_strategy"] == {STRATEGY_PROSE_LOOKUP: 1}
+
+
+@pytest.mark.asyncio
+async def test_prose_lookup_never_costs_a_resolution_the_floor_would_accept():
+    """Prose lookup is a fixed 0.60, so a higher floor must fall back, not give up."""
+    graph = _prose_graph()
+    texts = {APPRAISAL_LOCATION: "".join(APPRAISAL_CHUNK_TEXTS), ANSWER_LOCATION: ANSWER_TEXT}
+
+    _, summary, _ = await _run(graph, texts, enable_prose_lookup=True, confidence_floor=0.70)
+
+    edges = graph.edges_of(A_PROSE, "attributed_to")
+    assert [edge[1] for edge in edges] == [DOC_APPRAISAL]
+    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
+    assert _props(edges[0])["resolution_confidence"] == pytest.approx(0.72)
+    assert summary["unresolved"] == 0
 
 
 @pytest.mark.asyncio
