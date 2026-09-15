@@ -34,6 +34,7 @@ def _build_task_factories() -> Dict[str, Callable[[], Task]]:
         detect_entity_duplicates,
         merge_entity_duplicates,
     )
+    from cognee.tasks.graph.resolve_assertion_references import resolve_assertion_references
     from cognee.tasks.storage.index_data_points import index_data_points
 
     return {
@@ -52,6 +53,7 @@ def _build_task_factories() -> Dict[str, Callable[[], Task]]:
         ),
         "detect_entity_duplicates": lambda: Task(detect_entity_duplicates),
         "merge_entity_duplicates": lambda: Task(merge_entity_duplicates),
+        "resolve_references": lambda: Task(resolve_assertion_references),
         "index_data_points": lambda: Task(index_data_points, task_config={"batch_size": 100}),
     }
 
