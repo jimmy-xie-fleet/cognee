@@ -89,16 +89,27 @@ async def main() -> int:
     # a paragraph anchors several allegations, so this is the count that matters once the
     # reference resolver has run (see scripts/legal/resolve_references_report.py).
     node_type_by_id = {str(node_id): (props or {}).get("type") for node_id, props in nodes}
+    props_by_id = {str(node_id): (props or {}) for node_id, props in nodes}
     responds_to_edges = [e for e in edges if e[2] == "responds_to"]
+    # The agentic tracer writes both stated (``llm_trace``) and unstated (``llm_inferred``)
+    # responds_to edges; an inferred link is the model's own guess at an unstated denial/
+    # admission, not something the document said, so it is reported on its own line and
+    # kept out of the "stated" dispute count below.
+    inferred_responds_to_edges = [
+        e for e in responds_to_edges if (e[3] or {}).get("inferred") is True
+    ]
     assertion_to_assertion = [
         e
         for e in responds_to_edges
         if node_type_by_id.get(str(e[0])) == "Assertion"
         and node_type_by_id.get(str(e[1])) == "Assertion"
     ]
+    stated_assertion_to_assertion = [
+        e for e in assertion_to_assertion if (e[3] or {}).get("inferred") is not True
+    ]
     opposite_polarity_edges = [
         e
-        for e in assertion_to_assertion
+        for e in stated_assertion_to_assertion
         if {assertions[str(e[0])].get("polarity"), assertions[str(e[1])].get("polarity")}
         == {"positive", "negative"}
     ]
@@ -111,12 +122,26 @@ async def main() -> int:
     print(
         f"\n1b. responds_to edges: {len(responds_to_edges)} total, "
         f"{len(assertion_to_assertion)} assertion->assertion, "
-        f"{len(opposite_polarity_edges)} with opposite polarity"
+        f"{len(opposite_polarity_edges)} with opposite polarity (stated only)"
     )
     print(
         f"    anchored on a passage (DocumentChunk): {len(passage_level_edges)}, "
         f"anchored on a document: {len(document_level_edges)}"
     )
+    strategy_counts = Counter(
+        (props or {}).get("resolution_strategy") for _, _, _, props in responds_to_edges
+    )
+    print(f"    resolution_strategy breakdown: {dict(strategy_counts)}")
+    print(f"    inferred (unstated) edges: {len(inferred_responds_to_edges)}")
+    for e in inferred_responds_to_edges[:6]:
+        source_props, target_props = props_by_id.get(str(e[0]), {}), props_by_id.get(str(e[1]), {})
+        target_desc = " ".join(
+            str(target_props.get("name") or target_props.get("text") or e[1]).split()
+        )[:50]
+        print(
+            f"   [{source_props.get('statement_type')}/{source_props.get('polarity')}] "
+            f"{(source_props.get('name') or '')[:50]} → {target_desc}"
+        )
     for e in opposite_polarity_edges[:6]:
         source, target = assertions[str(e[0])], assertions[str(e[1])]
         print(

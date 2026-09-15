@@ -1,17 +1,34 @@
-"""Audit and (optionally) apply the deterministic reference resolver over a dataset.
+"""Audit and (optionally) apply the reference resolver over a dataset.
 
-Dry run by default: builds the graph view and document-text cache the same way
-``resolve_assertion_references`` does, plans every resolution with
-``plan_resolutions``, and prints what would happen -- the summary counters, one line
-per resolution the plan proposes, and one line per reference that stayed dangling
-(a non-UUID ``responds_to``/``attributed_to`` value the plan did not touch, plus every
-UUID-shaped value pointing at a node that is no longer in the graph).
+As of the agentic-tracer rewrite this is no longer a deterministic resolver: the plan
+phase runs seed retrieval (lexical + vector) and then a budgeted LLM tracer
+(``trace_reference``) per dangling reference, every trace sharing one ``CallBudget``
+for the pass. **A dry run (the default -- no ``--apply``) still runs every trace and
+spends the LLM budget when it is greater than zero.** ``--apply`` only decides whether
+the plan gets written to the graph, not whether the LLM is called. Pass
+``--llm-max-calls 0`` for a zero-spend estimate: the pass then only seeds candidates,
+spends no calls, and ``traces_started`` in the summary is the would-be count (the
+summary's ``notes`` carries ``llm_estimate_only`` in this mode).
+
+Budget/behaviour flags -- leave any of these unset to let ``CognifyConfig`` decide:
+``--llm-max-calls``, ``--tracer-max-iter``, ``--llm-confidence-threshold``,
+``--infer-unstated`` (also runs the unstated denial/admission inference pass after the
+stated loop). ``--show-traces`` prints each planned resolution's stored tracer steps --
+the model's one-sentence reason, then one indented line per tool call.
+
+Prints the summary counters (including the budget spent, the trace outcomes, the
+per-tool call counts, and the unstated-inference counts), one line per resolution the
+plan proposes, and one line per reference that stayed dangling (a non-UUID
+``responds_to``/``attributed_to`` reference the plan did not touch -- including a
+structured-only reference held in ``<field>_ref`` with a blank plain field -- plus
+every UUID-shaped value pointing at a node no longer in the graph).
 
 ``--apply`` writes the plan (edges, then node patches) via ``write_resolutions``.
 
 Usage:
     python scripts/legal/resolve_references_report.py <dataset>
-    python scripts/legal/resolve_references_report.py <dataset> --apply
+    python scripts/legal/resolve_references_report.py <dataset> --llm-max-calls 0
+    python scripts/legal/resolve_references_report.py <dataset> --apply --show-traces
 """
 
 import argparse
@@ -33,6 +50,10 @@ def _is_uuid_like(value: str) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _flag_or_config(value):
+    return "config" if value is None else value
 
 
 def _target_label(view, node_id):
@@ -57,6 +78,19 @@ def _resolution_line(view, resolution) -> str:
     )
 
 
+def _trace_lines(resolution) -> list:
+    """One line for the model's reason, then one indented line per stored tool step."""
+    if not getattr(resolution, "trace", None):
+        return []
+    lines = [f"  reason: {resolution.reason}"]
+    for i, step in enumerate(resolution.trace, start=1):
+        lines.append(
+            f"    step {i}: {step.get('tool')}({step.get('args')}) "
+            f"ok={step.get('ok')} -> {step.get('result_preview')}"
+        )
+    return lines
+
+
 def _dangling_line(field_name: str, reference_text: str) -> str:
     return f'{field_name}: "{reference_text}" → unresolved 0.00 - -'
 
@@ -65,27 +99,38 @@ def _stale_line(field_name: str, reference_text: str) -> str:
     return f'{field_name}: "{reference_text}" → stale id 0.00 - -'
 
 
-def _dangling_entries(view, reference_fields, resolved_keys):
-    """Non-UUID reference values the plan left untouched -- what did not resolve.
+def _dangling_entries(
+    view, reference_fields, resolved_keys, *, parse_reference_hint, reference_display_text
+):
+    """References the plan left untouched -- what did not resolve.
 
     ``plan_resolutions`` only enumerates what it resolved; a reference it left
     dangling (unresolved or ambiguous) is recovered here by walking every assertion's
-    reference fields and dropping anything already an id (already_resolved, out of
-    scope for this report -- see ``_stale_entries`` for the ids that are not) or already
-    covered by the plan.
+    reference fields. A field is dangling when it holds no already-resolved id (an
+    id-shaped string is either resolved or dead -- see ``_stale_entries`` for the dead
+    ones) and the hint built from ``<field>_ref`` (falling back to the plain field or
+    ``<field>_text``) is non-empty -- this also catches a structured-only reference
+    (``responds_to`` blank, ``responds_to_ref`` a dict), which a plain-string read would
+    miss entirely.
     """
     entries = []
     for assertion_id, props in view.assertions.items():
         for field_name in reference_fields:
             value = props.get(field_name)
-            if not isinstance(value, str) or not value.strip():
-                continue
-            value = value.strip()
-            if _is_uuid_like(value):
+            if isinstance(value, str) and _is_uuid_like(value.strip()):
                 continue
             if (assertion_id, field_name) in resolved_keys:
                 continue
-            entries.append((field_name, value))
+            hint = parse_reference_hint(
+                props.get(f"{field_name}_ref"),
+                fallback_text=props.get(field_name) or props.get(f"{field_name}_text"),
+            )
+            if hint is None:
+                continue
+            display = reference_display_text(hint)
+            if not display.strip():
+                continue
+            entries.append((field_name, display.strip()))
     return entries
 
 
@@ -127,7 +172,9 @@ async def run(args: argparse.Namespace) -> int:
         REFERENCE_RESOLUTION_DATA_ID,
         DocumentTextCache,
         _load_graph_view,
+        parse_reference_hint,
         plan_resolutions,
+        reference_display_text,
         write_resolutions,
     )
 
@@ -145,12 +192,29 @@ async def run(args: argparse.Namespace) -> int:
         graph_engine = await get_graph_engine()
         view = await _load_graph_view(graph_engine)
         texts = DocumentTextCache(view, dataset_id=dataset.id)
-        # Budget arguments left at None so the CognifyConfig defaults apply
-        # (REFERENCE_LLM_MAX_CALLS / REFERENCE_TRACER_MAX_ITER /
-        # REFERENCE_LLM_CONFIDENCE_THRESHOLD).
-        resolutions, summary = await plan_resolutions(view, texts, force=args.force)
 
         print(f"dataset={args.dataset} id={dataset.id}")
+        # The requested spend, before a single call is made -- an unset flag means
+        # CognifyConfig decides, so it prints as "config" rather than a guessed number.
+        print(
+            "requested: "
+            f"llm_max_calls={_flag_or_config(args.llm_max_calls)} "
+            f"tracer_max_iter={_flag_or_config(args.tracer_max_iter)} "
+            f"llm_confidence_threshold={_flag_or_config(args.llm_confidence_threshold)} "
+            f"infer_unstated={True if args.infer_unstated else 'config'}"
+        )
+
+        resolutions, summary = await plan_resolutions(
+            view,
+            texts,
+            force=args.force,
+            llm_max_calls=args.llm_max_calls,
+            tracer_max_iter=args.tracer_max_iter,
+            llm_confidence_threshold=args.llm_confidence_threshold,
+            infer_unstated=args.infer_unstated or None,
+            infer_confidence_threshold=None,
+        )
+
         print(
             f"scanned={summary['scanned']} already_resolved={summary['already_resolved']} "
             f"resolved={summary['resolved']} unresolved={summary['unresolved']} "
@@ -159,15 +223,50 @@ async def run(args: argparse.Namespace) -> int:
         )
         print(f"resolved_by_strategy={summary['resolved_by_strategy']}")
         print(f"anchor_types={summary['anchor_types']}")
+        # The budget actually spent -- the effective value once None has resolved
+        # against CognifyConfig.
+        print(
+            f"llm_budget={summary.get('llm_budget', 0)} llm_calls={summary.get('llm_calls', 0)} "
+            f"llm_calls_stated={summary.get('llm_calls_stated', 0)} "
+            f"llm_calls_inferred={summary.get('llm_calls_inferred', 0)} "
+            f"llm_budget_exhausted={summary.get('llm_budget_exhausted', 0)} "
+            f"llm_tokens_in={summary.get('llm_tokens_in', 0)} "
+            f"llm_tokens_out={summary.get('llm_tokens_out', 0)}"
+        )
+        print(
+            f"traces_started={summary.get('traces_started', 0)} "
+            f"traces_finished={summary.get('traces_finished', 0)} "
+            f"traces_iteration_capped={summary.get('traces_iteration_capped', 0)} "
+            f"llm_cached={summary.get('llm_cached', 0)} "
+            f"llm_abstained={summary.get('llm_abstained', 0)} "
+            f"llm_below_threshold={summary.get('llm_below_threshold', 0)} "
+            f"llm_unknown_label={summary.get('llm_unknown_label', 0)} "
+            f"llm_failed={summary.get('llm_failed', 0)} "
+            f"llm_skipped_empty_graph={summary.get('llm_skipped_empty_graph', 0)}"
+        )
+        print(f"tool_calls_by_name={summary.get('tool_calls_by_name', {})}")
+        print(
+            f"inferred_scanned={summary.get('inferred_scanned', 0)} "
+            f"inferred_resolved={summary.get('inferred_resolved', 0)}"
+        )
         if summary.get("notes"):
             print(f"notes={summary['notes']}")
 
         print("\nplanned resolutions:")
         for resolution in resolutions:
             print(_resolution_line(view, resolution))
+            if args.show_traces:
+                for line in _trace_lines(resolution):
+                    print(line)
 
         resolved_keys = {(resolution.assertion_id, resolution.field) for resolution in resolutions}
-        dangling = _dangling_entries(view, REFERENCE_FIELDS, resolved_keys)
+        dangling = _dangling_entries(
+            view,
+            REFERENCE_FIELDS,
+            resolved_keys,
+            parse_reference_hint=parse_reference_hint,
+            reference_display_text=reference_display_text,
+        )
         stale = _stale_entries(view, REFERENCE_FIELDS, resolved_keys)
         print("\nunresolved / ambiguous references:")
         for field_name, reference_text in dangling:
@@ -209,6 +308,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-resolve references a previous pass already answered.",
+    )
+    parser.add_argument(
+        "--llm-max-calls",
+        type=int,
+        default=None,
+        help=(
+            "Cap on LLM calls this pass may spend (default: config value; "
+            "0 = seed-only, zero-spend estimate)."
+        ),
+    )
+    parser.add_argument(
+        "--tracer-max-iter",
+        type=int,
+        default=None,
+        help="Max tracer iterations (LLM calls) per reference (default: config value).",
+    )
+    parser.add_argument(
+        "--llm-confidence-threshold",
+        type=float,
+        default=None,
+        help="Minimum confidence for an llm_trace resolution (default: config value).",
+    )
+    parser.add_argument(
+        "--infer-unstated",
+        action="store_true",
+        help=(
+            "Also run the unstated denial/admission inference pass after the stated "
+            "loop (default: config value when this flag is omitted)."
+        ),
+    )
+    parser.add_argument(
+        "--show-traces",
+        action="store_true",
+        help="Print each planned resolution's stored tracer steps.",
     )
     return parser
 
