@@ -29,4 +29,6 @@ Seed candidates found by search, then the result of every step you have taken.
 
 {{ context }}
 
+This is step {{ step }} of {{ max_steps }}.
+
 Which labelled node is the referent of this reference? Emit exactly one TracerStep.

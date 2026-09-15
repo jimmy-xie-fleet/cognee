@@ -72,9 +72,30 @@ MAX_TOOL_OUTPUT_CHARS = 6_000
 # ``list_documents`` is a whole-corpus listing; past this many documents the agent should
 # be searching, not reading a catalogue.
 DOCUMENT_LIST_CAP = 80
+# A list row's preview. Much shorter than a search result's, because a catalogue is for
+# picking a document, not for reading one: 80 rows of 240-char previews are ~23k chars,
+# four times the output cap, and the overflow silently eats the "and N more" line.
+LIST_PREVIEW_CHARS = 100
+LIST_TAIL_TEMPLATE = '… and {} more (use search kind="documents")'
+# Floor on the passage body read_chunk returns, so a pathological assertion list cannot
+# squeeze the passage out entirely (and vice versa: the body is capped so the labels fit).
+READ_CHUNK_MIN_BODY_CHARS = 500
 # How much of a located span to show. Smaller than MAX_TOOL_OUTPUT_CHARS because a span
 # is one paragraph and the passages/assertions under it are the point of the call.
 LOCATOR_SPAN_CHARS = 2_000
+# "[D80] " + " — NN passages — " + the two quotes + the joining newline.
+_LIST_ROW_OVERHEAD = 40
+
+# Why a located span is less trustworthy than it looks. Rendered into locate_paragraph's
+# output so a guess and an exact hit never read the same.
+NOTE_AMBIGUOUS_MARKER = "ambiguous_marker"
+NOTE_CHUNK_SCAN = "chunk_scan"
+_NOTE_TEXT = {
+    NOTE_AMBIGUOUS_MARKER: (
+        "(note: several {kind} {value} markers in this document; this is the first)"
+    ),
+    NOTE_CHUNK_SCAN: "(note: found by scanning stored passages, not the document text)",
+}
 
 TOOL_NAMES = ("search", "list_documents", "open_document", "read_chunk", "locate_paragraph")
 
@@ -249,19 +270,32 @@ def build_tracer_tools(
         if not ordered:
             return "No documents."
 
-        lines = []
+        # Two bounds, and the tail line survives both: a row cap, and a character budget
+        # that reserves room for the tail up front. Without the second, the loop's own
+        # truncation cuts the list mid-row and takes "and N more" with it, so the agent
+        # cannot tell a complete catalogue from a clipped one.
+        reserve = len(LIST_TAIL_TEMPLATE.format(len(ordered))) + 1
+        lines: List[str] = []
+        used = 0
         for document_id, props in ordered[:DOCUMENT_LIST_CAP]:
-            label = registry.label(document_id, props.get("type") or "Document")
+            name = _document_name(view, document_id)
             chunks = view.chunks_by_document.get(document_id, [])
-            first = _preview(chunks[0].get("text") if chunks else "")
-            lines.append(
-                f"[{label}] {_document_name(view, document_id)} — {len(chunks)} passages — "
-                f'"{first}"'
-            )
+            first = _preview(chunks[0].get("text") if chunks else "", LIST_PREVIEW_CHARS)
+            # Bound the row before labelling it, so a row that does not fit never burns a
+            # label the agent will never see. _LIST_ROW_OVERHEAD covers "[D80] " and the
+            # separators, and over-estimating only makes the budget stricter.
+            projected = len(name) + len(first) + _LIST_ROW_OVERHEAD
+            if lines and used + projected + reserve > MAX_TOOL_OUTPUT_CHARS:
+                break
 
-        remaining = len(ordered) - DOCUMENT_LIST_CAP
+            label = registry.label(document_id, props.get("type") or "Document")
+            line = f'[{label}] {name} — {len(chunks)} passages — "{first}"'
+            used += len(line) + 1
+            lines.append(line)
+
+        remaining = len(ordered) - len(lines)
         if remaining > 0:
-            lines.append(f"… and {remaining} more")
+            lines.append(LIST_TAIL_TEMPLATE.format(remaining))
         return "\n".join(lines)
 
     async def _open_document(args: OpenDocumentArgs) -> str:
@@ -301,16 +335,20 @@ def build_tracer_tools(
         if node_id is None or node_id not in view.chunks:
             return f"ERROR: unknown passage label {args.passage}. Call open_document to see them."
 
-        text = view.chunks[node_id].get("text") or ""
-        if len(text) > MAX_TOOL_OUTPUT_CHARS:
-            text = text[: MAX_TOOL_OUTPUT_CHARS - 1] + "…"
-
         quoted = _assertions_in_chunks(view, {node_id})
         section = _assertion_section(
             view,
             registry,
             "Assertions quoted in this passage:",
             [assertion_id for assertion_id, _ in quoted],
+        )
+        # The WHOLE result has to fit MAX_TOOL_OUTPUT_CHARS, because the loop truncates to
+        # the same number: capping only the body hands the agent a long passage with every
+        # [A…] label cut off the end -- and those labels are the only way it can name what
+        # it just read.
+        section = _cut(section, MAX_TOOL_OUTPUT_CHARS - READ_CHUNK_MIN_BODY_CHARS)
+        text = _cut(
+            view.chunks[node_id].get("text") or "", MAX_TOOL_OUTPUT_CHARS - len(section) - 2
         )
         return f"{text}\n\n{section}"
 
@@ -334,7 +372,7 @@ def build_tracer_tools(
                 f'"{_document_name(view, document_id)}".'
             )
 
-        span_text, chunk_positions, anchor_position = located
+        span_text, chunk_positions, anchor_position, notes = located
         passages = []
         for position in chunk_positions:
             props = chunks[position]
@@ -351,9 +389,18 @@ def build_tracer_tools(
             ],
         )
         section = _assertion_section(view, registry, "Assertions quoted in the span:", anchored)
-        return (
-            f"{_span_preview(span_text)}\n\nPassages: {', '.join(passages) or '(none)'}\n{section}"
+        parts = [
+            _span_preview(span_text),
+            "",
+            f"Passages: {', '.join(passages) or '(none)'}",
+            section,
+        ]
+        parts.extend(
+            _NOTE_TEXT[note].format(kind=args.kind, value=args.value)
+            for note in notes
+            if note in _NOTE_TEXT
         )
+        return "\n".join(parts)
 
     specs = (
         ToolSpec(
@@ -408,10 +455,17 @@ def build_tracer_tools(
     return tools
 
 
+def _cut(text: str, limit: int) -> str:
+    """``text`` shortened to at most ``limit`` characters, ellipsis included."""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _span_preview(span_text: str) -> str:
-    if len(span_text) <= LOCATOR_SPAN_CHARS:
-        return span_text
-    return span_text[: LOCATOR_SPAN_CHARS - 1] + "…"
+    return _cut(span_text, LOCATOR_SPAN_CHARS)
 
 
 async def _locate(
@@ -419,13 +473,18 @@ async def _locate(
     document_id: str,
     chunks: Sequence[dict],
     locator: Locator,
-) -> Optional[Tuple[str, List[int], Optional[int]]]:
-    """``(span text, chunk positions, anchor position)`` for a locator, or None.
+) -> Optional[Tuple[str, List[int], Optional[int], Tuple[str, ...]]]:
+    """``(span text, chunk positions, anchor position, notes)`` for a locator, or None.
 
     Two paths, in the order the resolver has always used them: the document's stored text
     with chunk offsets when both are available, and a chunk-by-chunk scan when they are
     not (a PDF that cannot be read as text, chunks that no longer tile the document).
     ``chunk positions`` index ``chunks``, not the stored ``chunk_index``.
+
+    ``notes`` carries every reason the answer is weaker than it looks --
+    ``find_locator_span``'s own ``ambiguous_marker`` and, on the degraded path,
+    ``chunk_scan``. The caller renders them, because a scan result formatted exactly like
+    an authoritative one invites the model to treat a guess as a quotation.
     """
     text = await texts.text(document_id)
     offsets = await texts.offsets(document_id, chunks) if text is not None else None
@@ -434,15 +493,16 @@ async def _locate(
         span = find_locator_span(text, locator)
         if span is None:
             return None
-        start, end, _notes = span
+        start, end, notes = span
         positions = chunks_overlapping(offsets, (start, end))
-        return text[start:end], positions, anchor_chunk_index(offsets, (start, end))
+        return text[start:end], positions, anchor_chunk_index(offsets, (start, end)), tuple(notes)
 
     scanned = scan_chunks_for_marker([chunk.get("text") or "" for chunk in chunks], locator)
     if scanned is None:
         return None
     position, (start, end) = scanned
-    return (chunks[position].get("text") or "")[start:end], [position], position
+    span_text = (chunks[position].get("text") or "")[start:end]
+    return span_text, [position], position, (NOTE_CHUNK_SCAN,)
 
 
 # --------------------------------------------------------------------------- #

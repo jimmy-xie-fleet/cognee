@@ -26,6 +26,7 @@ from cognee.tasks.graph.reference_graph_view import DocumentTextCache
 from cognee.tasks.graph.reference_retrieval import LexicalIndex
 from cognee.tasks.graph.reference_tracer_tools import (
     DOCUMENT_LIST_CAP,
+    LIST_PREVIEW_CHARS,
     MAX_TOOL_OUTPUT_CHARS,
     TOOL_NAMES,
     build_tracer_tools,
@@ -310,7 +311,55 @@ async def test_list_documents_caps_the_list():
 
     lines = result.splitlines()
     assert len(lines) == DOCUMENT_LIST_CAP + 1
-    assert lines[-1] == "… and 5 more"
+    assert lines[-1] == '… and 5 more (use search kind="documents")'
+
+
+@pytest.mark.asyncio
+async def test_list_documents_fits_the_output_cap_and_always_keeps_its_tail():
+    # Finding 2: 80 rows of 240-char previews overflow MAX_TOOL_OUTPUT_CHARS, and the
+    # loop's truncation eats the "and N more" line -- so the agent sees a silently short
+    # list with no hint that anything is missing.
+    nodes, edges = [], []
+    for index in range(DOCUMENT_LIST_CAP):
+        document_id = nid(f"tools-fat-doc-{index:03d}")
+        nodes.append(document_node(document_id, f"A_very_long_document_name_{index:03d}"))
+        chunk, edge = chunk_node(
+            nid(f"tools-fat-chunk-{index:03d}"), "paragraph text " * 60, 0, document_id
+        )
+        nodes.append(chunk)
+        edges.append(edge)
+
+    view = await build_graph_view(nodes, edges)
+    registry = LabelRegistry()
+    tools = build_tracer_tools(
+        view=view,
+        texts=DocumentTextCache(view),
+        lexical=LexicalIndex(view),
+        registry=registry,
+    )
+
+    result = await run_tool(tools, "list_documents", {})
+
+    lines = result.splitlines()
+    assert len(result) <= MAX_TOOL_OUTPUT_CHARS
+    assert len(lines) < DOCUMENT_LIST_CAP  # the character budget bound before the row cap
+    assert lines[-1].startswith("… and ")
+    assert 'search kind="documents"' in lines[-1]
+    shown = len(lines) - 1
+    assert lines[-1] == f'… and {DOCUMENT_LIST_CAP - shown} more (use search kind="documents")'
+    # Only the documents actually listed consumed a label.
+    assert len(registry.labels()) == shown
+
+
+@pytest.mark.asyncio
+async def test_list_documents_previews_are_short():
+    tools, _, _ = await _tools()
+
+    result = await run_tool(tools, "list_documents", {})
+
+    for line in result.splitlines():
+        preview = line.split(" — ", 2)[-1]
+        assert len(preview) <= LIST_PREVIEW_CHARS + 2  # the two quote characters
 
 
 @pytest.mark.asyncio
@@ -443,8 +492,52 @@ async def test_read_chunk_truncates_a_very_long_passage():
     result = await run_tool(tools, "read_chunk", {"passage": "P1"})
 
     body = result.split("\n\nAssertions quoted in this passage:")[0]
-    assert len(body) <= MAX_TOOL_OUTPUT_CHARS
+    # Finding 1: the WHOLE result has to fit the cap, not just the body -- the loop
+    # truncates to the same number and would otherwise cut the assertion section off.
+    assert len(result) <= MAX_TOOL_OUTPUT_CHARS
+    assert len(body) < MAX_TOOL_OUTPUT_CHARS
     assert body.endswith("…")
+    assert "Assertions quoted in this passage:" in result
+
+
+@pytest.mark.asyncio
+async def test_read_chunk_keeps_its_assertion_labels_on_a_long_passage():
+    # The reviewer's reproduction: a passage just over the cap loses every [A…] label to
+    # the loop's truncation, which is the only thing that makes the passage resolvable.
+    document_id = nid("tools-overflow-doc")
+    chunk_id = nid("tools-overflow-chunk")
+    quote = "The defendant failed to repair the roof in 2019."
+    chunk, edge = chunk_node(chunk_id, ("filler " * 900) + quote, 0, document_id)
+    assertion_id = nid("tools-overflow-assertion")
+    view = await build_graph_view(
+        [
+            document_node(document_id, "Overflowing"),
+            chunk,
+            assertion_node(
+                assertion_id,
+                "the defendant failed to repair the roof",
+                chunk_id,
+                source_quote=quote,
+            ),
+        ],
+        [edge],
+    )
+    registry = LabelRegistry()
+    tools = build_tracer_tools(
+        view=view,
+        texts=DocumentTextCache(view),
+        lexical=LexicalIndex(view),
+        registry=registry,
+    )
+    await run_tool(tools, "list_documents", {})
+    await run_tool(tools, "open_document", {"document": "D1"})
+
+    result = await run_tool(tools, "read_chunk", {"passage": "P1"})
+
+    assert len(result) > MAX_TOOL_OUTPUT_CHARS - 200  # genuinely at the cap
+    assert len(result) <= MAX_TOOL_OUTPUT_CHARS
+    assert "Assertions quoted in this passage:" in result
+    assert "allegation/positive: the defendant failed to repair the roof" in result
 
 
 @pytest.mark.asyncio
@@ -496,6 +589,50 @@ async def test_locate_paragraph_degrades_to_a_chunk_scan_without_readable_text()
     assert not result.startswith("ERROR:")
     assert "The defendant failed to repair the roof in 2019." in result
     assert "Passages: [P1] (chunk 1, anchor)" in result
+    # Finding 3: a degraded lookup must not look identical to an authoritative one.
+    assert "(note: found by scanning stored passages, not the document text)" in result
+
+
+@pytest.mark.asyncio
+async def test_locate_paragraph_says_when_the_marker_was_ambiguous():
+    # Two "¶ 5" markers and no "¶ 6", so find_locator_span cannot pick by sequence and
+    # returns its ambiguous_marker note. The agent has to be told it got a guess.
+    document_id = nid("tools-ambiguous-doc")
+    chunk_text = "¶ 5 First mention of the roof.\n\n¶ 5 Second mention of the roof.\n"
+    chunk, edge = chunk_node(nid("tools-ambiguous-chunk"), chunk_text, 0, document_id)
+    view = await build_graph_view(
+        [document_node(document_id, "Ambiguous", raw_data_location="/fake/ambiguous.txt"), chunk],
+        [edge],
+    )
+    registry = LabelRegistry()
+    tools = build_tracer_tools(
+        view=view,
+        texts=DocumentTextCache(view),
+        lexical=LexicalIndex(view),
+        registry=registry,
+    )
+    await run_tool(tools, "list_documents", {})
+
+    with _read_text_patch({"/fake/ambiguous.txt": chunk_text}):
+        result = await run_tool(
+            tools, "locate_paragraph", {"document": "D1", "kind": "paragraph", "value": "5"}
+        )
+
+    assert not result.startswith("ERROR:")
+    assert "(note: several paragraph 5 markers in this document; this is the first)" in result
+
+
+@pytest.mark.asyncio
+async def test_locate_paragraph_adds_no_note_when_the_lookup_was_authoritative():
+    tools, _, _ = await _tools()
+    await run_tool(tools, "list_documents", {})
+
+    with _read_text_patch({"/fake/complaint.txt": COMPLAINT_TEXT}):
+        result = await run_tool(
+            tools, "locate_paragraph", {"document": "D2", "kind": "paragraph", "value": "5"}
+        )
+
+    assert "(note:" not in result
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,12 @@ INFER_UNSTATED_SYSTEM_PROMPT = "infer_unstated_reference_system.txt"
 TRACE_PREVIEW_CHARS = 300
 
 _TRUNCATION_NOTE = "\n… [truncated]"
+# Tool output is document text, and document text is untrusted: without a delimiter it
+# can write "# Step 3: read_chunk(...)\nResult:" and forge a step the tools never ran.
+# The loop is the only writer of these two tokens -- any "<<<" run inside a result is
+# broken before it is fenced -- and the system prompt tells the model so.
+FENCE_OPEN_TEMPLATE = "<<<tool-result step={step} tool={tool}>>>"
+FENCE_CLOSE = "<<<end-tool-result>>>"
 
 
 # --------------------------------------------------------------------------- #
@@ -195,6 +201,23 @@ def _source_block(
     }
 
 
+def _neutralize_fences(text: str) -> str:
+    """Break every ``<<`` run so tool output cannot open or close a fence.
+
+    A character scan rather than a regex, deliberately: the resolver takes no regex over
+    text it did not supply itself. ``"<<<"`` becomes ``"< < <"`` -- the words survive, the
+    token does not, and the result is stable under a second pass.
+    """
+    if "<<" not in text:
+        return text
+
+    characters = list(text)
+    for index in range(len(characters) - 1):
+        if characters[index] == "<" and characters[index + 1] == "<":
+            characters[index] = "< "
+    return "".join(characters)
+
+
 def _render_args(arguments: Mapping[str, Any]) -> str:
     try:
         return json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
@@ -234,22 +257,40 @@ async def trace_reference(
     """
     records: List[TraceRecord] = []
     manifest = render_tool_manifest(tools)
-    system_prompt = read_query_prompt(system_prompt_path) or ""
+    # A missing or blank system prompt is a deployment bug, not a per-reference failure:
+    # tracing without one would spend the whole pass budget on an unguided model that has
+    # been told nothing about labels, abstention or the fence. Raise before any slot is
+    # taken, so the pass fails loudly having spent nothing.
+    system_prompt = read_query_prompt(system_prompt_path)
+    if system_prompt is None:
+        raise FileNotFoundError(f"Reference tracer system prompt not found: {system_prompt_path}")
+    if not system_prompt.strip():
+        raise ValueError(f"Reference tracer system prompt is empty: {system_prompt_path}")
     context = format_candidate_lines(seed) or "(no seed candidates)"
     reference = _reference_block(hint)
     source = _source_block(source_props, source_document_name, field_name)
     iterations = 0
 
     for step_number in range(1, max_iter + 1):
+        # Rendered before the slot is claimed: a template error is a bug in this repo, and
+        # burning a pass-wide call on it would charge every other reference for it.
+        user_prompt = render_prompt(
+            TRACE_USER_PROMPT,
+            {
+                **source,
+                "reference": reference,
+                "tools": manifest,
+                "context": context,
+                "step": step_number,
+                "max_steps": max_iter,
+            },
+        )
+
         if not budget.take():
             _bump(counters, "llm_budget_exhausted")
             return _abstain("pass budget exhausted"), records, iterations
 
         iterations += 1
-        user_prompt = render_prompt(
-            TRACE_USER_PROMPT,
-            {**source, "reference": reference, "tools": manifest, "context": context},
-        )
 
         try:
             step: TracerStep = await LLMGateway.acreate_structured_output(
@@ -270,7 +311,9 @@ async def trace_reference(
             label = (finish.candidate_label or "").strip()
             if not label:
                 _bump(counters, "llm_abstained")
-                return finish, records, iterations
+                # "" and "   " are abstentions the model wrote clumsily; normalise them so
+                # a caller only ever has to test `candidate_label is None`.
+                return finish.model_copy(update={"candidate_label": None}), records, iterations
             if registry.resolve(label) is None:
                 _bump(counters, "llm_unknown_label")
                 return _abstain(f"unknown candidate label {label}"), records, iterations
@@ -283,8 +326,9 @@ async def trace_reference(
 
         name = tool_call.tool_name.strip()
         arguments = dict(tool_call.arguments or {})
-        result = await run_tool(tools, name, arguments)
+        result = _neutralize_fences(await run_tool(tools, name, arguments))
         if len(result) > MAX_TOOL_OUTPUT_CHARS:
+            # Inside the fence, so the model can see that what it got was cut short.
             result = result[:MAX_TOOL_OUTPUT_CHARS] + _TRUNCATION_NOTE
 
         _bump_tool(counters, name)
@@ -296,7 +340,11 @@ async def trace_reference(
                 ok=not result.startswith("ERROR:"),
             )
         )
-        context += f"\n\n# Step {step_number}: {name}({_render_args(arguments)})\nResult:\n{result}"
+        fence_open = FENCE_OPEN_TEMPLATE.format(step=step_number, tool=name)
+        context += (
+            f"\n\n# Step {step_number}: {name}({_render_args(arguments)})\n"
+            f"{fence_open}\n{result}\n{FENCE_CLOSE}"
+        )
 
     _bump(counters, "traces_iteration_capped")
     return _abstain("iteration cap reached"), records, iterations
