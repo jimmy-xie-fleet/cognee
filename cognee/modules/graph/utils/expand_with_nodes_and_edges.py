@@ -8,6 +8,7 @@ from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.engine.models import Entity, EntityType
 from cognee.modules.engine.models.Assertion import Assertion, verify_source_quote
 from cognee.modules.engine.utils import generate_edge_name, generate_node_name
+from cognee.modules.graph.utils.reference_resolution import derived_edge_text
 from cognee.shared.data_models import Edge as KGEdge
 from cognee.shared.data_models import KnowledgeGraph, Node
 
@@ -17,20 +18,6 @@ _ASSERTION_REFERENCE_FIELDS = (
     ("attributed_to", "attributed_to"),
     ("responds_to", "responds_to"),
 )
-
-# How a derived asserted_by edge words the speaker's stance. The unknown phrase reads
-# "takes an unrecorded stance on X" rather than "... on that X": the verb takes its object
-# directly, and the text is embedded and shown to a reader, so it has to be a sentence.
-_STANCE_VERB_BY_POLARITY = {
-    "positive": "affirms that",
-    "negative": "denies that",
-}
-_UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
-
-_DERIVED_EDGE_VERBS = {
-    "attributed_to": "is attributed to",
-    "responds_to": "responds to",
-}
 
 
 def _strip_nonblank_text(value: str | None) -> str | None:
@@ -602,30 +589,23 @@ def _derived_edge_description(
     relationship_name: str,
     target_node: Optional[Node],
 ) -> Optional[str]:
-    """The text a derived edge carries, stating the stance the assertion was made with.
+    """The text a derived edge carries, for an extraction still in ``KnowledgeGraph`` form.
 
-    Without it the edge reaches storage with no ``edge_text``, and
-    ``ensure_default_edge_properties`` synthesizes one from the endpoint labels — for an
-    assertion that is its affirmative ``name``, so a denial is embedded and shown as the
-    fact it denies. The stance therefore has to travel with the edge, not be reconstructed
-    from the endpoints, which no longer carry it.
+    The wording lives in ``derived_edge_text`` so the resolver that writes reference edges
+    against stored nodes words them exactly the same way; this reads the same values off
+    an extracted node.
     """
     if target_node is None:
         return None
 
-    proposition = _proposition_clause(extracted_node)
-    polarity = _polarity_value(extracted_node)
-    if relationship_name == "asserted_by":
-        stance_verb = _STANCE_VERB_BY_POLARITY.get(polarity, _UNRECORDED_STANCE_VERB)
-        head = f"{_reference_label(target_node)} {stance_verb} {proposition}"
-    else:
-        head = (
-            f"{proposition} ({_statement_type_value(extracted_node)}, {polarity} stance) "
-            f"{_DERIVED_EDGE_VERBS[relationship_name]} {_reference_label(target_node)}"
-        )
-
-    description = _strip_nonblank_text(extracted_node.description)
-    return " ".join(_sentence(part) for part in (head, description) if part)
+    return derived_edge_text(
+        _proposition_clause(extracted_node),
+        _statement_type_value(extracted_node),
+        _polarity_value(extracted_node),
+        relationship_name,
+        _reference_label(target_node),
+        extracted_node.description,
+    )
 
 
 def _derive_assertion_edges(
