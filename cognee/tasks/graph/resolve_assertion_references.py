@@ -806,7 +806,9 @@ def _answer_to_outcome(
         target_type = "Assertion" if target_ids else "DocumentChunk"
         document_id = view.document_by_chunk.get(node_id)
     else:
-        anchor_type = view.documents[node_id].get("type")
+        # ``.get``: the node resolved out of this trace's own registry, but a view that no
+        # longer holds it as a document must degrade to an untyped anchor, not a KeyError.
+        anchor_type = view.documents.get(node_id, {}).get("type")
         target_ids = ()
         target_type = anchor_type
         document_id = node_id
@@ -1073,7 +1075,10 @@ async def _trace_pending(
         cached = cache.get(cache_key)
         if cached is not None:
             _bump(counters, "llm_cached")
-            record(entry, _edge_precheck_outcome(entry, cached, view, threshold, counters))
+            try:
+                record(entry, _edge_precheck_outcome(entry, cached, view, threshold, counters))
+            except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
+                fail(entry, error)
             continue
 
         tools = build_tracer_tools(
@@ -1138,6 +1143,9 @@ async def _trace_pending(
             continue
 
         _bump(counters, "traces_finished")
+        # Mapping the finish onto a Resolution runs inside the guard as well: it reads
+        # the view and replays the trace's own locator lookup, and a bug in either must
+        # cost this one reference rather than abort a pass that has already been paid for.
         try:
             answer = await _build_answer(
                 entry,
@@ -1149,12 +1157,11 @@ async def _trace_pending(
                 texts=texts,
                 counters=counters,
             )
+            cache[cache_key] = answer
+            record(entry, _edge_precheck_outcome(entry, answer, view, threshold, counters))
         except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
             fail(entry, error)
             continue
-
-        cache[cache_key] = answer
-        record(entry, _edge_precheck_outcome(entry, answer, view, threshold, counters))
 
     if exhausted_references:
         summary["notes"].append(NOTE_LLM_BUDGET_EXHAUSTED)
@@ -1502,6 +1509,13 @@ async def resolve_assertion_references(
     if memoize and getattr(ctx, "extras", {}).get("reference_resolution_ran"):
         return data
 
+    # This entry point is also the memify registry's ``resolve_references`` task, which
+    # binds scope="all" -- so it spends LLM calls, and R11 has to hold here too: a missing
+    # or blank tracer prompt must fail loudly rather than become one WARNING and a pass
+    # that wrote nothing. The tail (allow_llm=False) never reads a prompt and keeps
+    # swallowing everything, because it may not break an ingestion.
+    spends_llm = _allow_llm(scope, allow_llm)
+
     try:
         graph_engine, view, resolutions, summary = await _plan(
             data,
@@ -1527,6 +1541,8 @@ async def resolve_assertion_references(
         if memoize:
             ctx.extras["reference_resolution_ran"] = True
     except Exception as error:  # noqa: BLE001 - resolution must never break ingestion
+        if spends_llm and isinstance(error, (FileNotFoundError, ValueError)):
+            raise
         logger.warning("Reference resolution skipped due to an error: %s", error)
 
     return data

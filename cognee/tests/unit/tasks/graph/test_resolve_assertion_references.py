@@ -23,6 +23,7 @@ registry actually issued out of the prompt.
 
 import json
 from contextlib import contextmanager
+from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import NAMESPACE_URL, uuid5
@@ -56,6 +57,9 @@ from cognee.tasks.graph.resolve_assertion_references import (
 from cognee.tests.unit.tasks.graph._reference_fakes import FakeVectorEngine, scored
 
 MODULE = "cognee.tasks.graph.resolve_assertion_references"
+# The package re-exports the task function under the module's own name, so the module
+# object itself has to come from the import machinery rather than attribute lookup.
+resolve_module = import_module(MODULE)
 RETRIEVAL = "cognee.tasks.graph.reference_retrieval"
 TRACER = "cognee.tasks.graph.reference_tracer"
 GATEWAY = f"{TRACER}.LLMGateway.acreate_structured_output"
@@ -1274,6 +1278,128 @@ async def test_a_blank_system_prompt_aborts_the_pass():
         with patch(f"{TRACER}.read_query_prompt", return_value="   "):
             with pytest.raises(ValueError):
                 await detect_dangling_references(None)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_system_prompt_fails_the_task_on_the_pass_path():
+    """R11 has to hold on the task entry point too: the memify registry binds it with
+    scope="all", so its blanket except would otherwise turn a bad file into one WARNING
+    and a pass that writes nothing."""
+    graph = _base_graph()
+
+    with _patched(graph) as mocks:
+        with patch(f"{TRACER}.read_query_prompt", return_value=None):
+            with pytest.raises(FileNotFoundError):
+                await resolve_assertion_references(["item"])
+
+    assert mocks.llm.await_count == 0
+    assert graph.add_edges_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_blank_system_prompt_fails_the_task_on_the_pass_path():
+    graph = _base_graph()
+
+    with _patched(graph):
+        with patch(f"{TRACER}.read_query_prompt", return_value="   "):
+            with pytest.raises(ValueError):
+                await resolve_assertion_references(["item"])
+
+
+@pytest.mark.asyncio
+async def test_the_tail_never_fails_its_pipeline_over_a_prompt_it_does_not_read():
+    """The ingest tail runs no trace, so it never asks for the prompt -- and it must
+    keep swallowing everything, because it may not break an ingestion."""
+    graph = _base_graph()
+    items = ["unchanged"]
+
+    with _patched(graph) as mocks:
+        with patch(f"{TRACER}.read_query_prompt", return_value=None):
+            result = await resolve_assertion_references(items, scope="touched", allow_llm=False)
+
+    assert result is items
+    assert mocks.llm.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_pass_task_still_swallows_every_other_error(caplog):
+    """Only the two configuration errors escape; a write that blew up still cannot break
+    the pipeline the task is appended to."""
+    graph = _base_graph()
+    items = ["unchanged"]
+
+    async def _boom(_edges, **_kwargs):
+        raise RuntimeError("write failed")
+
+    graph.add_edges = _boom
+    with _patched(graph, steps=list(DENIAL_TRACE)):
+        with caplog.at_level("WARNING"):
+            result = await resolve_assertion_references(items)
+
+    assert result is items
+    assert any("write failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_failure_counts_only_its_own_reference(caplog):
+    """R15: mapping a finish onto a Resolution runs inside the per-reference guard, so a
+    bug there costs one reference rather than the whole pass."""
+    graph = _base_graph()
+    real_precheck = resolve_module._edge_precheck
+
+    def _explode(outcome, props, view):
+        if outcome.resolution is not None and outcome.resolution.assertion_id == A_DENIAL:
+            raise KeyError("the picked node left the view")
+        return real_precheck(outcome, props, view)
+
+    with _patched(graph, steps=list(DENIAL_TRACE)) as mocks:
+        with patch(f"{MODULE}._edge_precheck", side_effect=_explode):
+            with caplog.at_level("WARNING"):
+                payload = await detect_dangling_references(None)
+                summary = await apply_reference_resolutions(payload)
+
+    assert summary["failed"] == 1
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    # The pass carried on: the other references were still answered and written.
+    assert graph.edges_of(A_ATTRIBUTED, "attributed_to")
+    assert mocks.llm.await_count == 3
+
+
+def test_a_picked_document_the_view_no_longer_holds_never_raises():
+    """R15: the document branch reads the view with .get(), so a node id that is not a
+    document in this view degrades to an untyped anchor instead of a KeyError."""
+    view = SimpleNamespace(
+        assertions={},
+        chunks={},
+        documents={},
+        document_by_chunk={},
+        node_ids={"gone"},
+    )
+    entry = resolve_module._Pending(
+        assertion_id="a1",
+        field_name="responds_to",
+        props={},
+        hint=ReferenceHint(document_hint="the Complaint"),
+        reference_text="the Complaint",
+        fingerprint="ff",
+        entry_notes=(),
+        stale=False,
+        own_chunk_touched=True,
+    )
+    answer = resolve_module._TraceAnswer(
+        finish=TracerFinish(candidate_label="D1", confidence=0.9, reason="r"),
+        trace=(),
+        iterations=1,
+        node_id="gone",
+        targets=(),
+        capped=False,
+    )
+
+    outcome = resolve_module._answer_to_outcome(entry, answer, view, threshold=0.6, counters={})
+
+    assert outcome.kind == "resolved"
+    assert outcome.resolution.anchor_id == "gone"
+    assert outcome.resolution.anchor_type is None
 
 
 # --------------------------------------------------------------------------- #
