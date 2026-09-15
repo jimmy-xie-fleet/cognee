@@ -969,8 +969,10 @@ async def write_resolutions(
     writes no edge at all and is patched only.
 
     Indexing the new edge texts is the one step allowed to fail on its own: the edges are
-    already stored, so the patches still run and the failure comes back as a note rather
-    than as a half-applied write.
+    already stored, so the patches still run and the failure comes back as the
+    ``edge_index_failed`` note rather than as a half-applied write. Nothing retries it --
+    a later pass finds those edges present and re-emits nothing -- so the note means an
+    operator has to re-index: ``index_graph_edges()`` with no argument rescans the graph.
     """
     summary = {
         "edges_written": 0,
@@ -1024,8 +1026,12 @@ async def write_resolutions(
         except Exception as error:  # noqa: BLE001 - the edges are stored; patch anyway
             logger.warning(
                 "Wrote %d reference edge(s) but could not index their text (%s); the "
-                "edges are in the graph, their text is not in the edge index until the "
-                "next indexing pass (improve()) re-embeds the graph's triplets.",
+                "edges are in the graph and remain traversable, but their text stays out "
+                "of the EdgeType_relationship_name collection until index_graph_edges "
+                "runs over them again. Nothing does that automatically -- a later "
+                "resolver pass finds the edges present and re-emits nothing, and "
+                "improve() indexes triplets rather than edge texts -- so re-index "
+                "explicitly: index_graph_edges() with no argument rescans the graph.",
                 len(edges),
                 error,
             )

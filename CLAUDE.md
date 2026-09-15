@@ -801,8 +801,11 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   `Entity_name`.
 - **Explicit kwargs, no env var** — there is no global switch; every call that wants legal
   extraction must splat `legal_profile()` in.
-- **`improve()` covers assertions**: its default enrichment streams every triplet straight from
-  the graph, so assertion triplets are embedded and indexed like any other node. Only the
+- **`improve()` covers assertions**: with `TRIPLET_EMBEDDING=true` its default enrichment
+  streams every triplet straight from the graph, so assertion triplets are embedded and
+  indexed like any other node; with the default `false` the default extraction task list is
+  empty, so a default `improve()` run indexes nothing for assertions. Either way it never
+  re-indexes edge texts — that is `index_graph_edges`, a separate collection. Only the
   opt-in memify consolidation pipelines (`consolidate_entities`, `cross_connect_entities`)
   filter on `type == "Entity"`, and those skip assertions.
 - **Reference resolution**: matching is deterministic (no LLM, no vector search); writing
