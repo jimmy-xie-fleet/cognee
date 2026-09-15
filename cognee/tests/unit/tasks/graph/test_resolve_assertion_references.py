@@ -246,8 +246,14 @@ def _patched(graph, texts=None, *, locations=None):
             f"{MODULE}.graph_provenance_write_kwargs",
             new=AsyncMock(return_value=dict(PROVENANCE_KWARGS)),
         ) as provenance_mock,
-        patch(f"{MODULE}._raw_locations", new=AsyncMock(return_value=locations or {})),
-        patch(f"{MODULE}._read_processed_text", new=AsyncMock(side_effect=_read)) as read_mock,
+        patch(
+            "cognee.tasks.graph.reference_graph_view._raw_locations",
+            new=AsyncMock(return_value=locations or {}),
+        ),
+        patch(
+            "cognee.tasks.graph.reference_graph_view._read_processed_text",
+            new=AsyncMock(side_effect=_read),
+        ) as read_mock,
     ):
         yield SimpleNamespace(
             index_graph_edges=index_mock,
