@@ -784,8 +784,10 @@ def test_assertion_identity_is_unchanged_by_the_resolution_fields():
         responds_to="chunk-9",
         responds_to_text="Complaint ¶5",
         responds_to_resolution={"strategy": "document_locator"},
+        responds_to_ref={"document_hint": "the Complaint", "locator_value": "5"},
         attributed_to_text="Whitfield report",
         attributed_to_resolution={"strategy": "document_only"},
+        attributed_to_ref={"document_hint": "the Whitfield report"},
     )
     expected_id = Assertion.id_for("the sky is blue", "chunk-1", "testimony", "witness a", 2)
     assert base.id == expected_id
@@ -794,8 +796,10 @@ def test_assertion_identity_is_unchanged_by_the_resolution_fields():
     assert resolved.responds_to == "chunk-9"
     assert resolved.responds_to_text == "Complaint ¶5"
     assert resolved.responds_to_resolution == {"strategy": "document_locator"}
+    assert resolved.responds_to_ref == {"document_hint": "the Complaint", "locator_value": "5"}
     assert resolved.attributed_to_text == "Whitfield report"
     assert resolved.attributed_to_resolution == {"strategy": "document_only"}
+    assert resolved.attributed_to_ref == {"document_hint": "the Whitfield report"}
     assert base.responds_to_text is None
     assert Assertion.model_fields["metadata"].default["identity_fields"] == [
         "name",

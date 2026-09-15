@@ -1,7 +1,7 @@
 """Assertion nodes are grounded by type only: their claim-text name must never be matched,
 renamed, or collapsed against ontology individuals."""
 
-from typing import Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -29,6 +29,7 @@ class _QualifiedNode(Node):
     asserted_by: Optional[str] = None
     attributed_to: Optional[str] = None
     responds_to: Optional[str] = None
+    responds_to_ref: Optional[Any] = None
 
 
 class _QualifiedGraph(KnowledgeGraph):
@@ -333,3 +334,39 @@ def test_get_subgraph_called_once_per_distinct_key_and_never_for_assertion_indiv
         ("individuals", "smith"),
     }
     assert ("individuals", "payment was late") not in lookup_keys
+
+
+def test_structured_reference_is_left_untouched_by_grounding_and_repointing():
+    # ``responds_to``/``asserted_by`` are rewritten (a name to a node id, then to whichever
+    # node survives collapsing duplicates); ``responds_to_ref`` sits beside them but is not
+    # one of the fields ``_pin_assertion_references_to_node_ids`` /
+    # ``_repoint_assertion_references_at_surviving_nodes`` ever touch.
+    chunk = _make_chunk()
+    structured_reference = {"document_hint": "the Complaint", "locator_kind": "paragraph"}
+    graph = _QualifiedGraph(
+        nodes=[
+            _speaker("n1", "Smith"),
+            _speaker("n9", "Smith"),
+            _QualifiedNode(
+                id="the-denial",
+                name="Payment was late",
+                type="Denial",
+                description="Smith denies the payment was late",
+                statement_type="denial",
+                asserted_by="n9",
+                responds_to_ref=structured_reference,
+            ),
+        ],
+        edges=[],
+    )
+
+    data_points_by_id, _ = construct_data_points_and_edges_with_ontology(
+        [chunk],
+        [graph],
+        _SpeakerResolver(),
+    )
+
+    assertion = _only_assertion(data_points_by_id)
+    # The collapse-following repoint still ran (proves the fixture actually exercises it).
+    assert assertion.asserted_by == "smith"
+    assert assertion.responds_to_ref == structured_reference

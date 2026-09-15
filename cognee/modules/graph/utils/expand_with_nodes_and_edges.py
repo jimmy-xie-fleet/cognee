@@ -2,6 +2,8 @@ from enum import Enum
 from typing import Optional
 from uuid import UUID
 
+from pydantic import BaseModel
+
 from cognee.infrastructure.databases.provenance import EdgeIdentity
 from cognee.infrastructure.engine.models.Edge import Edge
 from cognee.modules.chunking.models import DocumentChunk
@@ -296,6 +298,29 @@ def _assertion_occurrences(
     return occurrence_by_extracted_node_id
 
 
+def _reference_payload(extracted_node: Node, field_name: str) -> Optional[dict]:
+    """The structured reference an extraction emitted for ``field_name``, as a plain dict.
+
+    Core cannot import ``cognee.domains``, so this duck-types instead of importing the real
+    ``LegalReference`` model: a pydantic ``BaseModel`` is dumped (``mode="json"`` renders its
+    enums as their string values), a plain ``dict`` passes through unchanged, and anything
+    else -- a bare string, ``None`` -- yields ``None``. Blank values ("", "none") are dropped
+    the same way ``_strip_nonblank_text`` drops them for the string reference fields, and a
+    payload left empty by that filtering collapses to ``None`` rather than an empty dict.
+
+    Never calls ``_resolve_reference``: the value is stored verbatim, not resolved against
+    the extracted graph, and derives no edge.
+    """
+    value = getattr(extracted_node, field_name, None)
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json", exclude_none=True)
+    if not isinstance(value, dict):
+        return None
+
+    payload = {key: item for key, item in value.items() if item not in (None, "", "none")}
+    return payload or None
+
+
 def _create_assertion(
     extracted_node: Node,
     entity_type: EntityType,
@@ -315,6 +340,7 @@ def _create_assertion(
         polarity=_polarity_value(extracted_node),
         asserted_by=reference_names["asserted_by"],
         attributed_to=reference_names["attributed_to"],
+        attributed_to_ref=_reference_payload(extracted_node, "attributed_to_ref"),
         applicable_time=getattr(extracted_node, "applicable_time", None),
         applies_from=getattr(extracted_node, "applies_from", None),
         applies_to=getattr(extracted_node, "applies_to", None),
@@ -325,6 +351,7 @@ def _create_assertion(
         source_quote=source_quote,
         source_quote_verified=verify_source_quote(source_quote, getattr(data_chunk, "text", None)),
         responds_to=reference_names["responds_to"],
+        responds_to_ref=_reference_payload(extracted_node, "responds_to_ref"),
         source_chunk_id=str(data_chunk.id),
         occurrence=occurrence,
     )

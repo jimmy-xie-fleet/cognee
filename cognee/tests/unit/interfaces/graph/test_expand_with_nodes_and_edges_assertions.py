@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from enum import Enum
+from typing import Any, Optional
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel
 
 from cognee.domains.legal.models import Polarity
 from cognee.infrastructure.databases.provenance import EdgeIdentity
@@ -41,6 +43,8 @@ class _QualifiedNode(Node):
     scope: Optional[str] = None
     source_quote: Optional[str] = None
     responds_to: Optional[str] = None
+    responds_to_ref: Optional[Any] = None
+    attributed_to_ref: Optional[Any] = None
 
 
 class _LegalLikeNode(_QualifiedNode):
@@ -935,3 +939,156 @@ def test_statement_type_text_is_normalized_the_way_identity_is():
     assertion = _assertions(data_points_by_id)[0]
     assert assertion.statement_type == "denial"
     assert assertion.id == Assertion.id_for("payment was late", str(chunk.id), "denial", None, 1)
+
+
+# ---------------------------------------------------------------------------
+# Structured references (``responds_to_ref`` / ``attributed_to_ref``)
+# ---------------------------------------------------------------------------
+
+
+class _StubLocatorKind(str, Enum):
+    PARAGRAPH = "paragraph"
+    NONE = "none"
+
+
+class _StubReferenceBasis(str, Enum):
+    POSITIONAL = "positional"
+    DESCRIBED = "described"
+
+
+class _StubReference(BaseModel):
+    """Mirrors the shape of ``cognee.domains.legal.models.LegalReference`` for this test.
+
+    Core cannot import ``cognee.domains``, so ``_reference_payload`` duck-types on
+    ``BaseModel``/``dict`` instead of importing the real model. This local stand-in is what
+    proves that duck-typing without reaching into the legal profile.
+    """
+
+    document_hint: str = ""
+    locator_kind: _StubLocatorKind = _StubLocatorKind.NONE
+    locator_value: Optional[str] = None
+    date: Optional[str] = None
+    basis: _StubReferenceBasis = _StubReferenceBasis.DESCRIBED
+
+
+def _reference_graph(responds_to_ref: Any, attributed_to_ref: Any = None) -> _QualifiedGraph:
+    return _QualifiedGraph(
+        nodes=[
+            _QualifiedNode(
+                id="n1",
+                name="Payment was late",
+                type="Denial",
+                description="Smith denies the payment was late",
+                statement_type="denial",
+                responds_to_ref=responds_to_ref,
+                attributed_to_ref=attributed_to_ref,
+            )
+        ],
+        edges=[],
+    )
+
+
+def test_structured_reference_lands_as_a_plain_dict_with_enum_values_as_strings():
+    chunk = _make_chunk()
+    reference = _StubReference(
+        document_hint="the Complaint",
+        locator_kind=_StubLocatorKind.PARAGRAPH,
+        locator_value="17",
+        basis=_StubReferenceBasis.POSITIONAL,
+    )
+    data_points_by_id, _ = _construct([chunk], [_reference_graph(reference)])
+
+    denial = _assertions(data_points_by_id)[0]
+    assert denial.responds_to_ref == {
+        "document_hint": "the Complaint",
+        "locator_kind": "paragraph",
+        "locator_value": "17",
+        "basis": "positional",
+    }
+    assert all(isinstance(value, str) for value in denial.responds_to_ref.values())
+    # A structured reference derives no edge and resolves nothing on its own.
+    assert denial.responds_to is None
+
+
+def test_a_dict_valued_structured_reference_passes_through_unchanged():
+    chunk = _make_chunk()
+    raw = {
+        "document_hint": "the Fester Report",
+        "locator_kind": "section",
+        "locator_value": "4.2",
+    }
+    data_points_by_id, _ = _construct([chunk], [_reference_graph(raw)])
+
+    assert _assertions(data_points_by_id)[0].responds_to_ref == raw
+
+
+def test_blank_and_none_fields_are_dropped_from_the_structured_reference():
+    chunk = _make_chunk()
+    raw = {
+        "document_hint": "",
+        "locator_kind": "none",
+        "locator_value": None,
+        "date": "2026-06-10",
+        "basis": "described",
+    }
+    data_points_by_id, _ = _construct([chunk], [_reference_graph(raw)])
+
+    assert _assertions(data_points_by_id)[0].responds_to_ref == {
+        "date": "2026-06-10",
+        "basis": "described",
+    }
+
+
+def test_an_all_blank_structured_reference_stores_as_none():
+    chunk = _make_chunk()
+    raw = {"document_hint": "", "locator_kind": "none", "locator_value": None}
+    data_points_by_id, _ = _construct([chunk], [_reference_graph(raw)])
+
+    assert _assertions(data_points_by_id)[0].responds_to_ref is None
+
+
+def test_no_structured_reference_stores_as_none():
+    chunk = _make_chunk()
+    data_points_by_id, _ = _construct([chunk], [_reference_graph(None)])
+
+    assert _assertions(data_points_by_id)[0].responds_to_ref is None
+
+
+def test_structured_reference_never_reaches_the_string_reference_resolver():
+    # A dict/BaseModel has no ``.strip()``. If a `_ref` value ever reached
+    # ``_resolve_reference``/``_strip_nonblank_text`` (which call ``.strip()`` on it), this
+    # would raise instead of quietly storing ``None``.
+    class _ExplodingIfTreatedAsAReferenceString:
+        def strip(self):
+            raise AssertionError("a structured reference must never reach _resolve_reference")
+
+    chunk = _make_chunk()
+    data_points_by_id, _ = _construct(
+        [chunk], [_reference_graph(_ExplodingIfTreatedAsAReferenceString())]
+    )
+
+    # Not a BaseModel/dict, so it stores as None -- and, more importantly, no exception.
+    assert _assertions(data_points_by_id)[0].responds_to_ref is None
+
+
+def test_attributed_to_ref_is_stored_independently_of_responds_to_ref():
+    chunk = _make_chunk()
+    data_points_by_id, _ = _construct(
+        [chunk],
+        [_reference_graph(None, attributed_to_ref={"document_hint": "my deposition"})],
+    )
+
+    denial = _assertions(data_points_by_id)[0]
+    assert denial.responds_to_ref is None
+    assert denial.attributed_to_ref == {"document_hint": "my deposition"}
+
+
+def test_assertion_reference_fields_tuple_never_gains_a_ref_name():
+    from cognee.modules.graph.utils.expand_with_nodes_and_edges import (
+        _ASSERTION_REFERENCE_FIELDS,
+    )
+
+    assert not any(
+        field_name.endswith("_ref") or relationship_name.endswith("_ref")
+        for field_name, relationship_name in _ASSERTION_REFERENCE_FIELDS
+    )
