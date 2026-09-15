@@ -174,6 +174,10 @@ class Resolution:
     patch_mode: str = "full"
     iterations: int = 0
     trace: Tuple[Dict[str, Any], ...] = ()
+    # The per-reference step cap a trace was held to, recorded only by the record that
+    # hit it: the guard that skips an already-attempted reference honours such a record
+    # only while the cap it was capped at is still in force (R22).
+    max_iter: Optional[int] = None
 
 
 # --------------------------------------------------------------------------------------
@@ -666,6 +670,7 @@ def build_node_patch(
             "reason": resolution.reason,
             "fingerprint": resolution.fingerprint,
             "iterations": resolution.iterations,
+            "max_iter": resolution.max_iter,
             "trace": [dict(record) for record in resolution.trace],
         }
     }

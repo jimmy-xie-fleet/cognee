@@ -347,6 +347,7 @@ def test_build_node_patch_records_the_resolution():
         "reason": None,
         "fingerprint": None,
         "iterations": 0,
+        "max_iter": None,
         "trace": [],
     }
 

@@ -23,6 +23,7 @@ from uuid import UUID
 from cognee.infrastructure.files.utils.open_data_file import open_data_file
 from cognee.modules.chunking.incremental_chunking import IncrementalPlanError, chunk_offsets
 from cognee.modules.engine.utils.generate_node_name import generate_node_name
+from cognee.modules.graph.utils.reference_resolution import RESOLVED_BY
 from cognee.shared.logging_utils import get_logger
 
 logger = get_logger("resolve_assertion_references")
@@ -54,6 +55,10 @@ class GraphView:
     entity_ids_by_name: Dict[str, List[str]] = field(default_factory=dict)
     node_ids: Set[str] = field(default_factory=set)
     edge_keys: Set[Tuple[str, str, str]] = field(default_factory=set)
+    # (source id, relationship) of every edge a resolver pass wrote. On a backend that
+    # cannot patch nodes this is the only record that a reference was already answered,
+    # so it is what stops the next pass paying for the same trace again (R23).
+    resolver_edge_keys: Set[Tuple[str, str]] = field(default_factory=set)
     # document id -> its chunk property dicts, sorted by chunk_index.
     chunks_by_document: Dict[str, List[dict]] = field(default_factory=dict)
     # chunk id -> the document it is part of, for the "reference back at myself" penalty.
@@ -118,6 +123,10 @@ async def _load_graph_view(graph_engine) -> GraphView:
     cascade asks about: ``is_part_of`` for chunk ownership and the already-written
     ``responds_to`` / ``attributed_to`` that make a second pass a no-op. Adapters without
     attribute filtering fall back to the full graph.
+
+    An edge's properties come back with it, so an edge a previous pass wrote can be told
+    from one the extraction did: it carries ``resolved_by="reference_resolver"``, and its
+    ``(source, relationship)`` pair goes into ``resolver_edge_keys``.
     """
     try:
         nodes, edges = await graph_engine.get_filtered_graph_data([{"type": list(VIEW_NODE_TYPES)}])
@@ -153,6 +162,9 @@ async def _load_graph_view(graph_engine) -> GraphView:
             continue
         source_id, target_id, relationship = str(edge[0]), str(edge[1]), str(edge[2])
         view.edge_keys.add((source_id, target_id, relationship))
+        properties = edge[3] if len(edge) > 3 else None
+        if isinstance(properties, dict) and properties.get("resolved_by") == RESOLVED_BY:
+            view.resolver_edge_keys.add((source_id, relationship))
         if relationship == "is_part_of" and source_id in view.chunks:
             view.document_by_chunk[source_id] = target_id
             view.chunks_by_document.setdefault(target_id, []).append(view.chunks[source_id])

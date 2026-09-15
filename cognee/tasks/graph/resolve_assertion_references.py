@@ -40,6 +40,7 @@ Three entry points over one pass:
   **not** swallow write failures: a memify run that could not write is a visible error.
 """
 
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import NAMESPACE_URL, uuid5
 
@@ -78,11 +79,15 @@ from cognee.tasks.graph.reference_graph_view import (
 from cognee.tasks.graph.reference_pass import (
     CIRCUIT_BREAKER_FAILURES,
     NOTE_EDGES_EXIST,
+    NOTE_FORCE_KEPT_PRIOR,
     NOTE_LLM_ABSTAINED,
     NOTE_LLM_BELOW_THRESHOLD,
     NOTE_LLM_BUDGET_EXHAUSTED,
     NOTE_LLM_CIRCUIT_BROKEN,
     NOTE_LLM_ITERATION_CAP,
+    NOTE_LLM_MALFORMED_STEP,
+    NOTE_LLM_SELF_REFERENCE,
+    NOTE_LLM_UNKNOWN_LABEL,
     NOTE_UNSTATED,
     PATCH_FULL,
     PATCH_NONE,
@@ -144,11 +149,15 @@ __all__ = [
     "_chunk_index",
     "CIRCUIT_BREAKER_FAILURES",
     "NOTE_EDGES_EXIST",
+    "NOTE_FORCE_KEPT_PRIOR",
     "NOTE_LLM_ABSTAINED",
     "NOTE_LLM_BELOW_THRESHOLD",
     "NOTE_LLM_BUDGET_EXHAUSTED",
     "NOTE_LLM_CIRCUIT_BROKEN",
     "NOTE_LLM_ITERATION_CAP",
+    "NOTE_LLM_MALFORMED_STEP",
+    "NOTE_LLM_SELF_REFERENCE",
+    "NOTE_LLM_UNKNOWN_LABEL",
     "NOTE_UNSTATED",
     "PATCH_FULL",
     "PATCH_NONE",
@@ -269,6 +278,7 @@ def _empty_summary() -> Dict[str, Any]:
         "llm_abstained": 0,
         "llm_below_threshold": 0,
         "llm_unknown_label": 0,
+        "llm_malformed_step": 0,
         "llm_failed": 0,
         "tool_calls_by_name": {},
         "llm_tokens_in": 0,
@@ -383,6 +393,21 @@ def _resolve_entity_name(
     )
 
 
+def _replace_dead_id(outcome: _Outcome) -> _Outcome:
+    """R27: a stale id re-resolved by name has to actually replace the dead id.
+
+    ``entity_name`` patches nothing by default -- the field keeps the words the document
+    used, which is the ingest contract. A field holding an id that is no longer a node is
+    the one exception: leaving it alone would keep a dead UUID in the graph forever, so
+    this resolution writes the entity's id. The wording is not lost -- the preserved
+    ``<field>_text`` is what the re-resolution read in the first place.
+    """
+    resolution = outcome.resolution
+    if resolution is None or resolution.patch_mode == PATCH_FULL:
+        return outcome
+    return _Outcome(outcome.kind, replace(resolution, patch_mode=PATCH_FULL), outcome.stale)
+
+
 def _cheap_cascade(
     assertion_id: str,
     field_name: str,
@@ -391,6 +416,7 @@ def _cheap_cascade(
     *,
     force: bool,
     own_chunk_touched: bool,
+    max_iter: Optional[int] = None,
 ) -> Tuple[Optional[_Outcome], Optional[_Pending]]:
     """Steps 1-3 for one ``(assertion, field)``: no retrieval, no LLM, no document reads.
 
@@ -439,6 +465,8 @@ def _cheap_cascade(
     if entity_text:
         entity_outcome = _resolve_entity_name(assertion_id, field_name, entity_text, view)
         if entity_outcome is not None:
+            if stale:
+                entity_outcome = _replace_dead_id(entity_outcome)
             return _finalize(entity_outcome, entry_notes, stale), None
 
     if hint is None:
@@ -448,7 +476,14 @@ def _cheap_cascade(
     # A stale id means the stored answer is dark, so a matching fingerprint must not stop
     # the re-resolution -- the guard is for references that already had their chance.
     if not force and not stale:
-        prior = _prior_attempt(props, field_name)
+        # An edge a resolver pass already wrote out of this assertion on this field is an
+        # answer, whether or not the node could be patched to remember it (R23). Without
+        # this, every pass on a backend with no ``update_node`` re-spends the whole budget
+        # tracing references it has already answered.
+        if (assertion_id, field_name) in view.resolver_edge_keys:
+            return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
+
+        prior = _prior_attempt(props, field_name, max_iter=max_iter)
         if prior is not None and prior.get("fingerprint") == fingerprint:
             return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
 
@@ -462,6 +497,9 @@ def _cheap_cascade(
         entry_notes=entry_notes,
         stale=stale,
         own_chunk_touched=own_chunk_touched,
+        # Only ``force`` reaches here with a live id in the field; a negative trace must
+        # then leave that answer (and its audit blob) exactly where it is.
+        field_holds_live_id=holds_id and not stale,
     )
 
 
@@ -502,8 +540,10 @@ async def plan_resolutions(
     """Run the cascade over every dangling reference in the view.
 
     ``touched`` restricts the pass to one ingestion: a reference is in scope when the
-    assertion carrying it came from a touched chunk, or when it names a touched document
-    (an earlier document pointing at the one just ingested).
+    assertion carrying it came from a touched chunk. A reference on an untouched
+    statement is left to the whole-graph pass rather than traced and then discarded
+    (R26) -- a cheap answer that happens to name a touched document is still kept, so an
+    earlier document pointing at the one just ingested is recorded when it costs nothing.
 
     ``allow_llm=False`` stops after the entity-name step -- the ingest tail's contract,
     and the one setting under which the unstated inference never runs at all.
@@ -552,6 +592,7 @@ async def plan_resolutions(
                         view,
                         force=force,
                         own_chunk_touched=own_chunk_touched,
+                        max_iter=max_iter,
                     )
                 except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
                     logger.warning(
@@ -568,8 +609,19 @@ async def plan_resolutions(
                     handled.add((assertion_id, field_name))
 
                 if entry is not None:
-                    if allow_llm:
+                    if allow_llm and (touched is None or own_chunk_touched):
                         pending.append(entry)
+                    elif allow_llm:
+                        # R26: out of scope, and the seed and the trace are what this pass
+                        # spends. Tracing it and discarding the answer at record time would
+                        # charge this ingestion for the whole graph's residue. Nothing is
+                        # recorded either -- the whole-graph pass owns this reference.
+                        logger.debug(
+                            "Leaving %s.%s to the whole-graph pass: its statement is "
+                            "outside this ingestion.",
+                            assertion_id,
+                            field_name,
+                        )
                     else:
                         # The tail writes nothing for a reference it cannot answer, so
                         # the pass retries it from scratch.
@@ -593,7 +645,12 @@ async def plan_resolutions(
         # that reference nothing at all, and only when a caller opted in.
         unstated = (
             _unstated_pending(
-                view, handled=handled, force=force, touched=touched, counters=counters
+                view,
+                handled=handled,
+                force=force,
+                touched=touched,
+                counters=counters,
+                max_iter=max_iter,
             )
             if allow_llm and infer
             else []

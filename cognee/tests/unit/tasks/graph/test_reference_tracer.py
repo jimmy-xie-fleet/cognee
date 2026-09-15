@@ -453,7 +453,8 @@ async def test_a_null_label_finish_is_an_abstention():
 
 
 @pytest.mark.asyncio
-async def test_a_step_with_neither_a_tool_call_nor_a_finish_abstains():
+async def test_a_step_with_neither_a_tool_call_nor_a_finish_is_counted_apart():
+    """R24: a malformed step is not an abstention -- the model never looked."""
     steps = [TracerStep(thought="thinking")]
 
     finish, _, iterations, gateway, counters, _, _ = await _trace(steps)
@@ -461,7 +462,8 @@ async def test_a_step_with_neither_a_tool_call_nor_a_finish_abstains():
     assert finish.candidate_label is None
     assert iterations == 1
     assert gateway.await_count == 1
-    assert counters["llm_abstained"] == 1
+    assert counters["llm_malformed_step"] == 1
+    assert "llm_abstained" not in counters
 
 
 @pytest.mark.asyncio

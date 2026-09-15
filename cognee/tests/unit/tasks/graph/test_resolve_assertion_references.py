@@ -43,12 +43,17 @@ from cognee.modules.pipelines.tasks.task import Task
 from cognee.tasks.graph.reference_tracer import TracerFinish, TracerStep, TracerToolCall
 from cognee.tasks.graph.reference_pass import (
     INFERRED_EDGE_FEEDBACK_WEIGHT,
+    NOTE_FORCE_KEPT_PRIOR,
     NOTE_LLM_ESTIMATE_ONLY,
+    NOTE_LLM_MALFORMED_STEP,
+    NOTE_LLM_SELF_REFERENCE,
+    NOTE_LLM_UNKNOWN_LABEL,
     NOTE_UNSTATED,
     UNSTATED_BASIS,
 )
 from cognee.tasks.graph.resolve_assertion_references import (
     DOCUMENT_NODE_TYPES,
+    NOTE_STALE_ID,
     NOTE_LLM_ABSTAINED,
     NOTE_LLM_BELOW_THRESHOLD,
     NOTE_LLM_BUDGET_EXHAUSTED,
@@ -167,6 +172,8 @@ MARK_STIPULATION_DOCUMENT = f'Document "{STIPULATION_NAME}"'
 MARK_COMPLAINT_PASSAGE_1 = f'Passage in "{COMPLAINT_NAME}" (chunk 1)'
 MARK_STIPULATION_PASSAGE = f'Passage in "{STIPULATION_NAME}" (chunk 0)'
 MARK_ALLEGATION = '"Clifton owns 10 Main Street"'
+MARK_ANSWER_DOCUMENT = f'Document "{ANSWER_NAME}"'
+MARK_ANSWER_PASSAGE_0 = '(chunk 0): "ANSWER'
 
 
 def _document(node_id, name, location):
@@ -391,6 +398,20 @@ def abstain(reason="nothing in this set is the referent"):
 
 def call_tool(name, **arguments):
     return TracerStep(tool_call=TracerToolCall(tool_name=name, arguments=arguments))
+
+
+def call_tool_on(name, argument, marker, **arguments):
+    """A tool call naming a node by whichever label the registry gave the ``marker`` line."""
+
+    def _step(prompt):
+        return TracerStep(
+            tool_call=TracerToolCall(
+                tool_name=name,
+                arguments={argument: _label_for(prompt, marker), **arguments},
+            )
+        )
+
+    return _step
 
 
 def locate(document_marker, kind="paragraph", value="5"):
@@ -811,6 +832,27 @@ async def test_stale_uuid_re_resolves_from_the_preserved_reference_without_force
 
 
 @pytest.mark.asyncio
+async def test_a_stale_id_re_resolved_by_name_replaces_the_dead_id():
+    """R27: entity_name keeps the field's wording -- except when the field holds an id
+    that has gone dark, where leaving it would keep a dead UUID in the graph forever."""
+    graph = _base_graph()
+    dead = _nid("forgotten-entity")
+    graph.nodes[A_ATTRIBUTED]["attributed_to"] = dead
+    graph.nodes[A_ATTRIBUTED]["attributed_to_text"] = "Norman Fester"
+
+    _, summary, _ = await _run(graph, default=abstain())
+
+    assert graph.nodes[A_ATTRIBUTED]["attributed_to"] == ENTITY_FESTER
+    # The wording the document used is still there; only the dead id moved.
+    assert graph.nodes[A_ATTRIBUTED]["attributed_to_text"] == "Norman Fester"
+    assert [edge[1] for edge in graph.edges_of(A_ATTRIBUTED, "attributed_to")] == [ENTITY_FESTER]
+    assert summary["stale_ids"] == 1
+    blob = _resolution_blob(graph, A_ATTRIBUTED, "attributed_to")
+    assert blob["notes"] == [NOTE_STALE_ID]
+    assert blob["strategy"] == STRATEGY_ENTITY_NAME
+
+
+@pytest.mark.asyncio
 async def test_a_structured_only_reference_is_never_skipped():
     """Regression: the planner used to skip any assertion whose field was blank."""
     graph = _base_graph()
@@ -967,6 +1009,78 @@ async def test_the_iteration_cap_is_recorded_without_an_extra_call():
 
 
 @pytest.mark.asyncio
+async def test_the_cap_record_stores_the_cap_it_was_held_to():
+    """R22: the record has to say which cap stopped it, or a raised cap can never retry."""
+    graph = _base_graph()
+    await _run(
+        graph,
+        steps=[call_tool("list_documents")],
+        default=call_tool("list_documents"),
+        tracer_max_iter=1,
+    )
+
+    blob = _resolution_blob(graph, A_DENIAL)
+    assert blob["notes"] == [NOTE_LLM_ITERATION_CAP]
+    assert blob["max_iter"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_capped_reference_is_not_retried_at_the_same_cap():
+    graph = _base_graph()
+    await _run(
+        graph,
+        steps=[call_tool("list_documents")],
+        default=call_tool("list_documents"),
+        tracer_max_iter=1,
+    )
+    graph.update_node_calls.clear()
+
+    _, summary, mocks = await _run(graph, tracer_max_iter=1)
+
+    assert mocks.llm.await_count == 0
+    assert summary["traces_started"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_capped_reference_is_retried_once_the_cap_is_raised():
+    graph = _base_graph()
+    await _run(
+        graph,
+        steps=[call_tool("list_documents")],
+        default=call_tool("list_documents"),
+        tracer_max_iter=1,
+    )
+    graph.update_node_calls.clear()
+
+    _, summary, mocks = await _run(
+        graph,
+        steps=[finish_on(MARK_ALLEGATION, confidence=0.9)],
+        default=abstain(),
+        tracer_max_iter=3,
+    )
+
+    assert summary["traces_started"] == 2
+    assert [edge[1] for edge in graph.edges_of(A_DENIAL, "responds_to")] == [A_1]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_label_and_a_malformed_step_record_their_own_cause():
+    """R24: both used to be persisted as llm_abstained, which hid why."""
+    graph = _base_graph()
+    _, summary, _ = await _run(
+        graph,
+        steps=[TracerStep(finish=TracerFinish(candidate_label="Z9", confidence=0.95))],
+        default=TracerStep(thought="I am thinking about it"),
+    )
+
+    assert _resolution_blob(graph, A_DENIAL)["notes"] == [NOTE_LLM_UNKNOWN_LABEL]
+    assert _resolution_blob(graph, A_STIPULATION)["notes"] == [NOTE_LLM_MALFORMED_STEP]
+    assert summary["llm_unknown_label"] == 1
+    assert summary["llm_malformed_step"] == 1
+    assert summary["llm_abstained"] == 0
+
+
+@pytest.mark.asyncio
 async def test_the_stored_trace_records_every_tool_step():
     graph = _base_graph()
     await _run(graph, steps=list(DENIAL_TRACE))
@@ -1058,6 +1172,39 @@ async def test_an_identical_reference_with_an_identical_seed_is_answered_from_th
     assert [edge[1] for edge in graph.edges_of(twin, "responds_to")] == [A_1]
     assert summary["traces_started"] == 2  # the traced denial and the stipulation
     assert mocks.llm.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_cached_answer_naming_the_asking_assertion_abstains():
+    """The in-pass cache is keyed on (fingerprint, seed set), which excludes the asking
+    assertion's own id (R21), so a trace that picked a twin's neighbour can hand that
+    twin itself back as its answer. A statement never responds to itself."""
+    graph = _base_graph()
+    twin = _nid("assertion-denial-twin")
+    graph.nodes[twin] = dict(graph.nodes[A_DENIAL], id=twin)
+    # Same reference, same chunk, and propositions that share no token with anything, so
+    # neither denial reaches the other's seed and both seeds are the same set.
+    first, second = sorted([A_DENIAL, twin])
+    graph.nodes[first]["name"] = "alpha widget"
+    graph.nodes[second]["name"] = "beta gadget"
+
+    # The first denial reads its own passage, is shown its twin there, and picks it.
+    steps = [
+        call_tool_on("open_document", "document", MARK_ANSWER_DOCUMENT),
+        call_tool_on("read_chunk", "passage", MARK_ANSWER_PASSAGE_0),
+        finish_on("beta gadget", confidence=0.92),
+    ]
+
+    _, summary, mocks = await _run(graph, steps=steps, default=abstain())
+
+    # One trace answered both denials: the second one read it off the cache.
+    assert summary["llm_cached"] == 1
+    assert [edge[1] for edge in graph.edges_of(first, "responds_to")] == [second]
+    # ... and the answer was the asking assertion itself, so nothing was linked.
+    assert graph.edges_of(second, "responds_to") == []
+    assert NOTE_LLM_SELF_REFERENCE in _resolution_blob(graph, second)["notes"]
+    assert _resolution_blob(graph, second)["anchor_id"] is None
+    assert mocks.llm.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -1384,6 +1531,67 @@ async def test_a_recorded_attempt_with_the_same_fingerprint_is_not_retried():
     assert summary["already_resolved"] == 4
 
 
+def _stored_attempt(note, *, fingerprint=DENIAL_FINGERPRINT, max_iter=None):
+    """A ``<field>_resolution`` record as a previous pass would have left it."""
+    record = {
+        "strategy": STRATEGY_LLM_TRACE,
+        "confidence": 0.0,
+        "target_type": None,
+        "target_ids": [],
+        "anchor_id": None,
+        "document_id": None,
+        "notes": [note],
+        "reason": "nothing in this set is the referent",
+        "fingerprint": fingerprint,
+        "iterations": 4,
+        "trace": [],
+    }
+    if max_iter is not None:
+        record["max_iter"] = max_iter
+    return record
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_cap_record_without_a_stored_cap_is_still_an_attempt():
+    """R22b: a record written before the cap was stored says nothing about which cap
+    stopped it, so it keeps counting as an attempt -- force is the way to re-open it."""
+    graph = _base_graph()
+    graph.nodes[A_DENIAL]["responds_to_resolution"] = _stored_attempt(NOTE_LLM_ITERATION_CAP)
+
+    _, summary, mocks = await _run(graph, default=abstain(), tracer_max_iter=6)
+
+    assert summary["traces_started"] == 1
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+
+
+@pytest.mark.asyncio
+async def test_a_cap_record_below_the_current_cap_is_traced_again():
+    graph = _base_graph()
+    graph.nodes[A_DENIAL]["responds_to_resolution"] = _stored_attempt(
+        NOTE_LLM_ITERATION_CAP, max_iter=4
+    )
+
+    _, summary, _ = await _run(
+        graph, steps=[finish_on(MARK_ALLEGATION)], default=abstain(), tracer_max_iter=6
+    )
+
+    assert summary["traces_started"] == 2
+    assert [edge[1] for edge in graph.edges_of(A_DENIAL, "responds_to")] == [A_1]
+
+
+@pytest.mark.asyncio
+async def test_a_cap_record_at_or_above_the_current_cap_is_not_retried():
+    graph = _base_graph()
+    graph.nodes[A_DENIAL]["responds_to_resolution"] = _stored_attempt(
+        NOTE_LLM_ITERATION_CAP, max_iter=6
+    )
+
+    _, summary, _ = await _run(graph, default=abstain(), tracer_max_iter=4)
+
+    assert summary["traces_started"] == 1
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+
+
 @pytest.mark.asyncio
 async def test_force_bypasses_the_attempt_guard():
     graph = _base_graph()
@@ -1402,6 +1610,37 @@ async def test_force_bypasses_the_attempt_guard():
         COMPLAINT_CHUNK_1,
     }
     assert summary["resolved_by_strategy"][STRATEGY_LLM_TRACE] == 1
+    # The re-opened reference abstained, so its live answer stands: no patch was written
+    # for it, and the field still holds the id it already had.
+    assert A_RESOLVED not in dict(graph.update_node_calls)
+    assert graph.nodes[A_RESOLVED]["responds_to"] == A_1
+    assert "responds_to_resolution" not in graph.nodes[A_RESOLVED]
+    assert NOTE_FORCE_KEPT_PRIOR in summary["notes"]
+
+
+@pytest.mark.asyncio
+async def test_a_forced_recheck_that_abstains_keeps_the_prior_answer_and_blob():
+    """force re-opens a live answer, and the re-check is allowed to come back empty --
+    which must not turn a positive audit blob into an abstention over an answer the
+    field still holds."""
+    graph = _base_graph()
+    await _run(graph, steps=list(DENIAL_TRACE), default=abstain())
+    field_before = graph.nodes[A_DENIAL]["responds_to"]
+    blob_before = json.dumps(graph.nodes[A_DENIAL]["responds_to_resolution"], sort_keys=True)
+    graph.add_edges_calls.clear()
+    graph.update_node_calls.clear()
+
+    _, summary, mocks = await _run(graph, force=True, default=abstain())
+
+    assert graph.nodes[A_DENIAL]["responds_to"] == field_before
+    assert (
+        json.dumps(graph.nodes[A_DENIAL]["responds_to_resolution"], sort_keys=True) == blob_before
+    )
+    assert A_DENIAL not in dict(graph.update_node_calls)
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    # The re-check was traced and paid for; it just changed nothing.
+    assert mocks.llm.await_count >= 1
+    assert summary["notes"].count(NOTE_FORCE_KEPT_PRIOR) == 1
 
 
 @pytest.mark.asyncio
@@ -1472,9 +1711,10 @@ async def test_node_patches_are_skipped_when_the_adapter_cannot_patch():
 
 
 @pytest.mark.asyncio
-async def test_a_second_pass_rewrites_nothing_when_the_adapter_cannot_patch():
-    """Without update_node the field keeps its reference, so only the edge pre-check can
-    stop a second pass from re-emitting (and resetting the properties of) the same edges."""
+async def test_a_forced_pass_rewrites_nothing_when_the_adapter_cannot_patch():
+    """force re-opens even an answered reference, and without update_node the field keeps
+    its reference text, so the edge pre-check is the only thing that can stop the same
+    edges being re-emitted (which would reset properties improve() had tuned)."""
     graph = _base_graph()
     graph.update_node_supported = False
 
@@ -1482,13 +1722,40 @@ async def test_a_second_pass_rewrites_nothing_when_the_adapter_cannot_patch():
     assert first["edges_written"] == 4
     graph.add_edges_calls.clear()
 
-    _, summary, mocks = await _run(graph, steps=list(DENIAL_TRACE))
+    _, summary, mocks = await _run(graph, steps=list(DENIAL_TRACE), default=abstain(), force=True)
 
+    # The denial was re-traced (two steps) and landed on the same answer; the stipulation
+    # and the already-resolved reference force re-opened abstained on one call each.
+    assert mocks.llm.await_count == 4
     assert graph.add_edges_calls == []
     assert summary["edges_written"] == 0
     assert summary["nodes_patched"] == 0
     assert summary["resolved"] == 0
     mocks.index_graph_edges.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_answered_reference_is_never_re_traced_without_update_node():
+    """R23: on an adapter that cannot patch nodes, nothing remembers the fingerprint, so
+    without this guard every pass re-spends the whole budget on references it has already
+    answered."""
+    graph = _base_graph()
+    graph.update_node_supported = False
+
+    _, first, first_mocks = await _run(
+        graph, steps=list(DENIAL_TRACE), default=finish_on(MARK_STIPULATION_PASSAGE)
+    )
+    assert first["edges_written"] == 5
+    assert first_mocks.llm.await_count == 3
+    graph.add_edges_calls.clear()
+
+    _, summary, mocks = await _run(graph, steps=list(DENIAL_TRACE))
+
+    assert mocks.llm.await_count == 0
+    assert summary["traces_started"] == 0
+    assert graph.add_edges_calls == []
+    assert summary["already_resolved"] == 4
+    assert graph.update_node_calls == []
 
 
 @pytest.mark.asyncio
@@ -1712,8 +1979,13 @@ def test_touched_ids_reads_summaries_chunks_and_dicts():
 
 
 @pytest.mark.asyncio
-async def test_touched_scope_keeps_incoming_references_to_the_ingested_document():
+async def test_touched_scope_spends_only_on_the_statements_it_touched():
+    """R26: with a touched scope the pass filters its pending references by scope *before*
+    seeding and tracing them, rather than paying for every dangling reference in the graph
+    and discarding the answers afterwards."""
     graph = _base_graph()
+    # An allegation in the freshly ingested chunk, carrying a dangling reference of its own.
+    graph.nodes[A_3]["responds_to_ref"] = dict(STIPULATION_REF)
     touched = [
         SimpleNamespace(
             made_from=SimpleNamespace(
@@ -1722,17 +1994,22 @@ async def test_touched_scope_keeps_incoming_references_to_the_ingested_document(
         )
     ]
 
-    _, summary, _ = await _run(
-        graph, scope="touched", allow_llm=True, data=touched, steps=list(DENIAL_TRACE)
+    _, summary, mocks = await _run(
+        graph,
+        scope="touched",
+        allow_llm=True,
+        data=touched,
+        steps=[finish_on(MARK_STIPULATION_PASSAGE, confidence=0.9)],
+        default=abstain(),
     )
 
-    # The Answer's denial points at the freshly ingested Complaint -> resolved.
-    assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {
-        A_1,
-        A_2,
-        COMPLAINT_CHUNK_1,
-    }
-    # References that touch neither the ingested chunks nor the ingested document are left alone.
+    # Exactly one trace ran: the reference the ingestion actually produced.
+    assert summary["traces_started"] == 1
+    assert mocks.llm.await_count == 1
+    assert [edge[1] for edge in graph.edges_of(A_3, "responds_to")] == [STIPULATION_CHUNK_0]
+    # The Answer's denial points at the freshly ingested Complaint, but the statement
+    # making it was not touched, so this pass does not spend a call on it.
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
     assert graph.edges_of(A_STIPULATION, "responds_to") == []
     assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
     assert summary["resolved"] == 1

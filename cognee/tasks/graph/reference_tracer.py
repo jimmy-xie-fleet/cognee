@@ -272,7 +272,9 @@ async def trace_reference(
 
     Counters touched (created on first use, so a plain ``{}`` works): ``llm_calls``,
     ``llm_failed``, ``llm_budget_exhausted``, ``llm_abstained``, ``llm_unknown_label``,
-    ``traces_iteration_capped``, and the nested ``tool_calls_by_name``.
+    ``llm_malformed_step``, ``traces_iteration_capped``, and the nested
+    ``tool_calls_by_name``. The last three of the abstention causes are counted apart
+    from ``llm_abstained``, so a caller can record *why* a trace came back empty.
     """
     records: List[TraceRecord] = []
     manifest = render_tool_manifest(tools)
@@ -341,7 +343,10 @@ async def trace_reference(
 
         tool_call = step.tool_call
         if tool_call is None:
-            _bump(counters, "llm_abstained")
+            # R24: counted apart from an abstention. The model did not look and decline --
+            # it returned a step the contract has no reading for, and the caller records
+            # that cause rather than hiding it behind ``llm_abstained``.
+            _bump(counters, "llm_malformed_step")
             return _abstain("step named neither a tool nor a finish"), records, iterations
 
         name = tool_call.tool_name.strip()

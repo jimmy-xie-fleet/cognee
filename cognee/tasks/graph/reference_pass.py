@@ -70,6 +70,12 @@ NOTE_LLM_ABSTAINED = "llm_abstained"
 NOTE_LLM_BELOW_THRESHOLD = "llm_below_threshold"
 # The agent used every step it had without deciding.
 NOTE_LLM_ITERATION_CAP = "llm_iteration_cap"
+# The answer named the very statement that was asking: nothing responds to itself.
+NOTE_LLM_SELF_REFERENCE = "llm_self_reference"
+# R24: the two causes that used to be filed as abstentions. The agent finished on a label
+# this trace never issued, or returned a step naming neither a tool call nor a finish.
+NOTE_LLM_UNKNOWN_LABEL = "llm_unknown_label"
+NOTE_LLM_MALFORMED_STEP = "llm_malformed_step"
 # Summary-level notes: the pass ran out of calls, or gave up after repeated gateway
 # failures. Neither writes a per-reference record -- the reference never got its trace,
 # so the next pass has to be free to try it again.
@@ -82,6 +88,9 @@ NOTE_LLM_ESTIMATE_ONLY = "llm_estimate_only"
 # This resolution came out of the unstated denial/admission inference (decision D2), not
 # out of a reference the document made.
 NOTE_UNSTATED = "unstated"
+# Summary-level note: a ``force`` re-check of a reference whose field holds a live id came
+# back without an answer, so the answer already in the field (and its audit blob) stands.
+NOTE_FORCE_KEPT_PRIOR = "force_kept_prior"
 
 
 # What the write phase may put back on the node. ``_PATCHED_STRATEGIES`` is only the
@@ -165,6 +174,9 @@ class _Pending:
     seed: List[Candidate] = field(default_factory=list)
     registry: Optional[LabelRegistry] = None
     unstated: bool = False
+    # The field already holds the id of a node still in the graph, and only ``force``
+    # re-opened it. A re-check that comes back empty must not unseat that answer.
+    field_holds_live_id: bool = False
 
 
 @dataclass
@@ -183,6 +195,11 @@ class _TraceAnswer:
     node_id: Optional[str]
     targets: Tuple[str, ...]
     capped: bool
+    # Why this trace came back without a node, when the cause was something more specific
+    # than "the agent looked and declined" (R24). ``None`` means a plain abstention.
+    negative_note: Optional[str] = None
+    # The step cap this trace ran under, kept so a capped record can say what stopped it.
+    max_iter: int = 0
 
 
 def _count(counter: Dict[str, int], key: Optional[str]) -> None:
@@ -211,11 +228,34 @@ def _default_patch_mode(strategy: str) -> str:
     return PATCH_FULL if strategy in _PATCHED_STRATEGIES else PATCH_NONE
 
 
-def _prior_attempt(props: dict, field_name: str) -> Optional[dict]:
+def _outgrew_its_cap(record: dict, max_iter: Optional[int]) -> bool:
+    """Whether a stored record was capped below the step budget this pass runs with.
+
+    R22: a trace that ran out of steps is the one negative outcome a *bigger* per-reference
+    budget can change, so the record stores the cap it was held to and stops counting as a
+    prior attempt once that cap is raised. A record from before the cap was stored has no
+    ``max_iter``; it keeps counting as an attempt, because nothing says it would fare any
+    better (``force`` re-opens it either way).
+    """
+    if max_iter is None or NOTE_LLM_ITERATION_CAP not in (record.get("notes") or ()):
+        return False
+    try:
+        stored = int(record["max_iter"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return stored < int(max_iter)
+
+
+def _prior_attempt(
+    props: dict, field_name: str, *, max_iter: Optional[int] = None
+) -> Optional[dict]:
     """A previous traced attempt stored on the node, whatever the backend shaped it as.
 
     Ladybug stores node properties as one JSON blob and Neo4j stores a dict property as a
     JSON string, so a reader has to accept both.
+
+    ``max_iter`` is this pass's per-reference step cap: a record that gave up at a
+    *smaller* cap is not a prior attempt any more (R22).
     """
     raw = props.get(f"{field_name}_resolution")
     if isinstance(raw, str):
@@ -225,7 +265,9 @@ def _prior_attempt(props: dict, field_name: str) -> Optional[dict]:
             return None
     if not isinstance(raw, dict):
         return None
-    return raw if raw.get("strategy") in _TRACED_STRATEGIES else None
+    if raw.get("strategy") not in _TRACED_STRATEGIES:
+        return None
+    return None if _outgrew_its_cap(raw, max_iter) else raw
 
 
 def _finalize(outcome: _Outcome, entry_notes: Tuple[str, ...], stale: bool) -> _Outcome:
@@ -415,8 +457,16 @@ async def _build_answer(
     view: GraphView,
     texts: DocumentTextCache,
     counters: Dict[str, Any],
+    negative_note: Optional[str] = None,
+    max_iter: int = 0,
 ) -> _TraceAnswer:
-    """Resolve a finish off its own registry, while that registry still means something."""
+    """Resolve a finish off its own registry, while that registry still means something.
+
+    ``negative_note`` is the cause the tracer reported for a trace that came back without
+    a label (R24); it travels on the answer so the record names the cause rather than
+    filing every empty trace as an abstention. The cache stores the answer, so a second
+    reference answered from it records the same cause.
+    """
     node_id = entry.registry.resolve(finish.candidate_label)
     targets: Tuple[str, ...] = ()
     if node_id is not None and node_id in view.chunks:
@@ -424,6 +474,7 @@ async def _build_answer(
     if node_id is not None and node_id not in view.node_ids:
         # The label resolved to something the view no longer holds.
         _bump(counters, "llm_unknown_label")
+        negative_note = NOTE_LLM_UNKNOWN_LABEL
         node_id = None
 
     return _TraceAnswer(
@@ -433,6 +484,8 @@ async def _build_answer(
         node_id=node_id,
         targets=targets,
         capped=capped,
+        negative_note=negative_note,
+        max_iter=max_iter,
     )
 
 
@@ -461,6 +514,7 @@ def _unstated_pending(
     force: bool,
     touched: Optional[Tuple[Set[str], Set[str]]],
     counters: Dict[str, Any],
+    max_iter: Optional[int] = None,
 ) -> List[_Pending]:
     """The statements worth asking about although they reference nothing (decision D2).
 
@@ -495,7 +549,7 @@ def _unstated_pending(
         hint = _unstated_hint(proposition)
         fingerprint = reference_fingerprint(hint, UNSTATED_FIELD)
         if not force:
-            prior = _prior_attempt(props, UNSTATED_FIELD)
+            prior = _prior_attempt(props, UNSTATED_FIELD, max_iter=max_iter)
             if (
                 prior is not None
                 and prior.get("strategy") == STRATEGY_LLM_INFERRED
@@ -564,6 +618,10 @@ def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> _Outco
     Written ``resolution_only``: the reference the extraction recorded stays exactly as
     the document made it, and the fingerprint means the next pass spends nothing
     reconsidering an unchanged reference.
+
+    A record that hit the step cap also stores the cap it was held to, because that is
+    the one negative outcome a *bigger* budget can change (R22): raising
+    ``tracer_max_iter`` retries it, leaving it where it is does not.
     """
     return _Outcome(
         "unresolved",
@@ -579,6 +637,7 @@ def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> _Outco
             patch_mode=PATCH_RESOLUTION_ONLY,
             iterations=answer.iterations,
             trace=answer.trace,
+            max_iter=answer.max_iter if note == NOTE_LLM_ITERATION_CAP else None,
         ),
     )
 
@@ -593,8 +652,23 @@ def _answer_to_outcome(
 ) -> _Outcome:
     """Map a trace's answer onto a ``Resolution``, by what the picked label turned out to be."""
     if answer.node_id is None:
-        note = NOTE_LLM_ITERATION_CAP if answer.capped else NOTE_LLM_ABSTAINED
+        if answer.capped:
+            note = NOTE_LLM_ITERATION_CAP
+        else:
+            note = answer.negative_note or NOTE_LLM_ABSTAINED
         return _negative_record(entry, answer, note)
+
+    if answer.node_id == entry.assertion_id:
+        # Nothing responds to itself. A fresh trace can be shown its own statement by
+        # ``read_chunk``/``locate_paragraph`` (they list every assertion in the span), and
+        # the in-pass cache is keyed on a fingerprint that deliberately excludes the
+        # asking assertion (R21), so a twin's answer can come back naming this one.
+        logger.debug(
+            "Trace for %s.%s named the asking statement itself.",
+            entry.assertion_id,
+            entry.field_name,
+        )
+        return _negative_record(entry, answer, NOTE_LLM_SELF_REFERENCE)
 
     if answer.finish.confidence < threshold:
         _bump(counters, "llm_below_threshold")
@@ -786,7 +860,8 @@ async def _trace_pending(
             _bump(counters, "llm_cached")
             try:
                 outcome = record(
-                    entry, _edge_precheck_outcome(entry, cached, view, entry_threshold, counters)
+                    entry,
+                    _edge_precheck_outcome(entry, cached, view, entry_threshold, counters, summary),
                 )
                 _count_inference(counters, entry, outcome)
             except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
@@ -809,6 +884,8 @@ async def _trace_pending(
             counters.get("llm_budget_exhausted", 0),
             counters.get("traces_iteration_capped", 0),
             counters.get("llm_calls", 0),
+            counters.get("llm_unknown_label", 0),
+            counters.get("llm_malformed_step", 0),
         )
         _bump(counters, "traces_started")
         try:
@@ -842,6 +919,13 @@ async def _trace_pending(
         failed = counters.get("llm_failed", 0) > before[0]
         exhausted = counters.get("llm_budget_exhausted", 0) > before[1]
         capped = counters.get("traces_iteration_capped", 0) > before[2]
+        # The counters the tracer bumped are the only report of *why* an empty trace was
+        # empty; read them as a delta here, before ``_build_answer`` bumps its own.
+        negative_note = None
+        if counters.get("llm_unknown_label", 0) > before[4]:
+            negative_note = NOTE_LLM_UNKNOWN_LABEL
+        elif counters.get("llm_malformed_step", 0) > before[5]:
+            negative_note = NOTE_LLM_MALFORMED_STEP
         if entry.unstated:
             # ``trace_reference`` counts every successful call in ``llm_calls``; the
             # split between stated and inferred spend is the caller's to keep.
@@ -878,10 +962,13 @@ async def _trace_pending(
                 view=view,
                 texts=texts,
                 counters=counters,
+                negative_note=negative_note,
+                max_iter=max_iter,
             )
             cache[cache_key] = answer
             outcome = record(
-                entry, _edge_precheck_outcome(entry, answer, view, entry_threshold, counters)
+                entry,
+                _edge_precheck_outcome(entry, answer, view, entry_threshold, counters, summary),
             )
             _count_inference(counters, entry, outcome)
         except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
@@ -903,17 +990,41 @@ async def _trace_pending(
         )
 
 
+def _keep_prior_on_force(entry: _Pending, outcome: _Outcome, summary: Dict[str, Any]) -> _Outcome:
+    """Leave a forced re-check's live answer alone when the re-check came back empty.
+
+    ``force`` re-opens a reference whose field already holds a node id, and the trace it
+    pays for may abstain, run out of steps or land below the threshold. Recording that as
+    a negative would replace a positive audit blob with an abstention while the field --
+    and its edge -- still hold the earlier answer, leaving the node contradicting itself.
+    So the earlier answer stands, and the pass says so once in its notes.
+    """
+    if not entry.field_holds_live_id or outcome.kind != "unresolved":
+        return outcome
+
+    if NOTE_FORCE_KEPT_PRIOR not in summary["notes"]:
+        summary["notes"].append(NOTE_FORCE_KEPT_PRIOR)
+    logger.debug(
+        "Forced re-check of %s.%s came back empty; keeping the answer already in the field.",
+        entry.assertion_id,
+        entry.field_name,
+    )
+    return _Outcome("already_resolved", stale=outcome.stale)
+
+
 def _edge_precheck_outcome(
     entry: _Pending,
     answer: _TraceAnswer,
     view: GraphView,
     threshold: float,
     counters: Dict[str, Any],
+    summary: Dict[str, Any],
 ) -> _Outcome:
+    """One trace answer, mapped and then filtered by what the graph already holds."""
     outcome = _answer_to_outcome(entry, answer, view, threshold=threshold, counters=counters)
     if outcome.kind == "resolved":
         outcome = _edge_precheck(outcome, entry.props, view)
-    return outcome
+    return _keep_prior_on_force(entry, outcome, summary)
 
 
 def _document_name(view: GraphView, document_id: Optional[str]) -> Optional[str]:
