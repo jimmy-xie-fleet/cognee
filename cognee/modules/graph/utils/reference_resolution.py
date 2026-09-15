@@ -144,9 +144,25 @@ MONTHS = {
     "dec": 12,
 }
 
-_MONTH_NAME_BY_NUMBER = {
-    number: name for name, number in MONTHS.items() if len(name) > 3 and name != "sept"
-}
+# How a document body writes a month. Listed rather than filtered out of MONTHS: "may" is
+# a full month name three letters long, so any rule that tells names from abbreviations by
+# length drops May and with it every May date a tiebreak could turn on.
+_FULL_MONTH_NAMES = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+
+_MONTH_NAME_BY_NUMBER = {MONTHS[name]: name for name in _FULL_MONTH_NAMES}
 
 NUMBER_WORDS = {
     "one": 1,

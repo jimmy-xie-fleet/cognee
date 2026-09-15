@@ -23,6 +23,7 @@ from cognee.modules.graph.utils.reference_resolution import (
     DateHint,
     DocumentProfile,
     Resolution,
+    _date_renderings,
     anchor_chunk_index,
     build_node_patch,
     build_reference_edge,
@@ -421,6 +422,30 @@ def test_lexical_tiebreak_rejects_a_tie():
     reference = parse_reference("marcus t. whitfields july 15, 2026 rebuttal appraisal")
     body = "Rebuttal Appraisal by Marcus T. Whitfields, July 15, 2026.\n" + _PADDING
     assert lexical_tiebreak(reference, {"a": body, "b": body}) is None
+
+
+def test_lexical_tiebreak_decides_on_a_may_date():
+    # Every month has to render: the date is often the only term that separates two
+    # documents by the same author, and a month that renders nothing loses the tiebreak.
+    reference = parse_reference("marcus whitfields may 4, 2026 appraisal")
+    texts = {
+        "undated": "Appraisal prepared by Marcus Whitfields.\n" + _PADDING,
+        "dated": "Appraisal prepared by Marcus Whitfields, May 4, 2026.\n" + _PADDING,
+    }
+    assert lexical_tiebreak(reference, texts) == ("dated", pytest.approx(1.0))
+
+
+def test_date_renderings_cover_every_month():
+    assert _date_renderings(DateHint(2026, 5, 4)) == (
+        "may 4, 2026",
+        "may 4 2026",
+        "2026-05-04",
+        "5/4/2026",
+    )
+    assert all(_date_renderings(DateHint(2026, month, 1)) for month in range(1, 13))
+    # A year-less date still renders, a year-only one deliberately does not.
+    assert _date_renderings(DateHint(None, 5, 4)) == ("may 4",)
+    assert _date_renderings(DateHint(2026, None, None)) == ()
 
 
 def test_lexical_tiebreak_without_distinctive_terms():
