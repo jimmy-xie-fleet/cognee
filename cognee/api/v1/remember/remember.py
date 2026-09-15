@@ -703,9 +703,9 @@ async def remember(
         session_id: Optional session ID. When set, stores data in the
             session cache instead of the permanent graph. The extraction
             options (``graph_model``, ``custom_prompt``, ``config``,
-            ``chunk_size``) are rejected with it: the session is bridged
-            into the graph by ``improve()``, which cognifies with the
-            default extraction.
+            ``chunk_size``, ``enrichment_tasks``) are rejected with it: the
+            session is bridged into the graph by ``improve()``, which
+            cognifies with the default extraction.
         chunk_size: Max tokens per chunk. Auto-calculated when *None*.
         chunker: Text chunking strategy. Defaults to *TextChunker*.
         custom_prompt: Custom prompt for entity extraction.
