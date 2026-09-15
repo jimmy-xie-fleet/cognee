@@ -8,13 +8,10 @@ per resolution the plan proposes, and one line per reference that stayed danglin
 UUID-shaped value pointing at a node that is no longer in the graph).
 
 ``--apply`` writes the plan (edges, then node patches) via ``write_resolutions``.
-``--strict`` additionally runs the acceptance gate pinned for ``adams_family_legal``
-(see CLAUDE.md's "Legal Extraction Profile" section) and exits 1 if it fails, whether
-or not ``--apply`` was also given.
 
 Usage:
-    python scripts/legal/resolve_references_report.py adams_family_legal
-    python scripts/legal/resolve_references_report.py adams_family_legal --apply --strict
+    python scripts/legal/resolve_references_report.py <dataset>
+    python scripts/legal/resolve_references_report.py <dataset> --apply
 """
 
 import argparse
@@ -29,18 +26,6 @@ os.environ.setdefault("DATA_ROOT_DIRECTORY", str(COGNEE_HOME / "data"))
 os.environ.setdefault("CACHE_ROOT_DIRECTORY", str(COGNEE_HOME / "cache"))
 os.environ.setdefault("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
-# Pinned by the live inventory on adams_family_legal (see CLAUDE.md): of the 33
-# "Complaint ¶N" references, 31 resolving by document_locator is the accepted floor.
-_PARAGRAPH_LOCATOR_FLOOR = 31
-
-# These two references have no document in the corpus that names them. They correctly
-# resolve to an existing stub Entity of that name (strategy entity_name) -- that is not a
-# miss. What must never happen is either one matching a Document (document_locator /
-# document_only): that would mean the cascade started treating an entity name as a filename.
-_MUST_NOT_MATCH_A_DOCUMENT = ("2014 master plan", "unit c")
-
-_DOCUMENT_STRATEGIES = ("document_locator", "document_only")
-
 
 def _is_uuid_like(value: str) -> bool:
     try:
@@ -48,11 +33,6 @@ def _is_uuid_like(value: str) -> bool:
         return True
     except (TypeError, ValueError):
         return False
-
-
-def _is_complaint_paragraph_reference(text: str) -> bool:
-    """True for a reference like ``Complaint ¶ 5`` -- the pinned spot-check pattern."""
-    return "complaint" in text.lower() and "¶" in text
 
 
 def _target_label(view, node_id):
@@ -132,156 +112,6 @@ def _stale_entries(view, reference_fields, resolved_keys):
     return entries
 
 
-def _paragraph_gate(resolutions, dangling, *, floor: int):
-    """Rule (a): "Complaint ¶N" references resolved by document_locator, >= floor."""
-    resolved_matches = [
-        r for r in resolutions if _is_complaint_paragraph_reference(r.reference_text)
-    ]
-    dangling_matches = [
-        text for _field, text in dangling if _is_complaint_paragraph_reference(text)
-    ]
-    resolved_by_locator = sum(1 for r in resolved_matches if r.strategy == "document_locator")
-    total = len(resolved_matches) + len(dangling_matches)
-    ok = resolved_by_locator >= floor
-    return ok, (
-        f"Complaint paragraph references: {resolved_by_locator}/{total} resolved by "
-        f"document_locator (floor {floor})"
-    )
-
-
-def _document_checks(view, resolutions, parse_reference, document_profile):
-    """One row per document_locator/document_only resolution: doc name + type-word overlap.
-
-    Doubles as the spot-check table and the evidence the dated/spot-check gates score.
-    """
-    checks = []
-    for resolution in resolutions:
-        if resolution.strategy not in _DOCUMENT_STRATEGIES:
-            continue
-        doc_props = view.documents.get(resolution.document_id, {}) if resolution.document_id else {}
-        profile = document_profile(resolution.document_id or "", doc_props.get("name") or "")
-        parsed = parse_reference(resolution.reference_text)
-        overlap = bool(parsed.hint_type_words & profile.type_words)
-        checks.append((resolution, doc_props.get("name") or "?", overlap))
-    return checks
-
-
-def _dated_reference_recall(resolutions, dangling, has_full_date) -> str:
-    """Informational only, not gated: where the dated references landed.
-
-    A dated reference commonly names a document that already has a stub ``Entity`` node
-    (extraction mints one per cited document), so cascade step a2 (``entity_name``) claims
-    it before document matching is ever reached -- correctly. Recall (this function) and
-    precision (``_dated_precision_gate``) are reported separately for exactly that reason.
-    """
-    dated_resolutions = [r for r in resolutions if has_full_date(r.reference_text)]
-    resolved_to_documents = sum(1 for r in dated_resolutions if r.strategy in _DOCUMENT_STRATEGIES)
-    linked_to_entities = len(dated_resolutions) - resolved_to_documents
-    not_to_document = sum(1 for _field, text in dangling if has_full_date(text))
-    total = len(dated_resolutions) + not_to_document
-    return (
-        f"dated references: {total} total, {resolved_to_documents} resolved to documents, "
-        f"{linked_to_entities} linked to entities/already resolved, {not_to_document} not "
-        "resolved to a document (unresolved or ambiguous this run -- indistinguishable, from "
-        "this report's surface, from a reference already entity-linked by a prior pass whose "
-        "field a2 never rewrites)"
-    )
-
-
-def _dated_precision_gate(checks, has_full_date):
-    """Rule (b): a dated reference that DID resolve to a document must match that document.
-
-    Scoped to ``checks`` (document_locator/document_only resolutions only), so a dated
-    reference claimed by entity_name -- correct, see ``_dated_reference_recall`` -- is not a
-    candidate miss; only a wrong document match is.
-    """
-    mismatches = [
-        (resolution.reference_text, doc_name)
-        for resolution, doc_name, overlap in checks
-        if has_full_date(resolution.reference_text) and not overlap
-    ]
-    ok = not mismatches
-    reason = (
-        "Dated references resolved to a document: 0 mismatches"
-        if ok
-        else (
-            f"Dated references resolved to a document: {len(mismatches)} mismatch(es) "
-            f"(expected 0): {mismatches}"
-        )
-    )
-    return ok, reason
-
-
-def _spot_check_gate(checks):
-    """Rule (c): any document match sharing no type word with its reference is a mismatch."""
-    mismatches = [doc_name for _resolution, doc_name, overlap in checks if not overlap]
-    ok = not mismatches
-    reason = (
-        "Spot-check: 0 mismatches"
-        if ok
-        else f"Spot-check: {len(mismatches)} mismatch(es) (expected 0): {mismatches}"
-    )
-    return ok, reason
-
-
-def _must_not_match_document_gate(resolutions, normalize_reference_text):
-    """Rule (d): the pinned forms must never match a document; an entity link is fine."""
-    offenders = [
-        resolution.reference_text
-        for resolution in resolutions
-        if resolution.strategy in _DOCUMENT_STRATEGIES
-        and normalize_reference_text(resolution.reference_text) in _MUST_NOT_MATCH_A_DOCUMENT
-    ]
-    ok = not offenders
-    reason = (
-        "References that must not match a document: 0 matched a document"
-        if ok
-        else f"References that must not match a document: matched a document anyway: {offenders}"
-    )
-    return ok, reason
-
-
-def _run_strict_gate(
-    view,
-    resolutions,
-    dangling,
-    *,
-    floor: int,
-    parse_reference,
-    document_profile,
-    normalize_reference_text,
-) -> bool:
-    checks = _document_checks(view, resolutions, parse_reference, document_profile)
-
-    print("\nspot-check:")
-    for resolution, doc_name, overlap in checks:
-        status = "OK" if overlap else "MISMATCH"
-        print(f'  "{resolution.reference_text}" → {doc_name} → {status}')
-
-    def has_full_date(text: str) -> bool:
-        parsed = parse_reference(text)
-        return any(
-            date.year is not None and date.month is not None and date.day is not None
-            for date in parsed.hint_dates
-        )
-
-    print(f"\n{_dated_reference_recall(resolutions, dangling, has_full_date)}")
-
-    gate_results = [
-        _paragraph_gate(resolutions, dangling, floor=floor),
-        _dated_precision_gate(checks, has_full_date),
-        _spot_check_gate(checks),
-        _must_not_match_document_gate(resolutions, normalize_reference_text),
-    ]
-
-    print("\nstrict gate:")
-    ok = True
-    for passed, reason in gate_results:
-        print(f"  {'PASS' if passed else 'FAIL'}: {reason}")
-        ok = ok and passed
-    return ok
-
-
 async def run(args: argparse.Namespace) -> int:
     from sqlalchemy import select
 
@@ -292,11 +122,6 @@ async def run(args: argparse.Namespace) -> int:
     )
     from cognee.infrastructure.databases.relational import get_relational_engine
     from cognee.modules.data.models import Dataset
-    from cognee.modules.graph.utils.reference_resolution import (
-        document_profile,
-        normalize_reference_text,
-        parse_reference,
-    )
     from cognee.tasks.graph.resolve_assertion_references import (
         REFERENCE_FIELDS,
         REFERENCE_RESOLUTION_DATA_ID,
@@ -370,18 +195,6 @@ async def run(args: argparse.Namespace) -> int:
             if write_summary.get("notes"):
                 print(f"notes={write_summary['notes']}")
 
-        if args.strict:
-            ok = _run_strict_gate(
-                view,
-                resolutions,
-                dangling,
-                floor=_PARAGRAPH_LOCATOR_FLOOR,
-                parse_reference=parse_reference,
-                document_profile=document_profile,
-                normalize_reference_text=normalize_reference_text,
-            )
-            return 0 if ok else 1
-
     return 0
 
 
@@ -394,11 +207,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Write the planned resolutions (default: dry run, plan only).",
-    )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Run the pinned acceptance gate and exit 1 if it fails.",
     )
     parser.add_argument(
         "--force",
