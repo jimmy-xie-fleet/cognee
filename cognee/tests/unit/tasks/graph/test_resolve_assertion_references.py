@@ -1,12 +1,27 @@
-"""Unit tests for the deterministic assertion-reference resolver.
+"""Unit tests for the agentic assertion-reference resolver pass.
 
 Everything here runs against a stateful ``FakeGraph``: no graph backend, no vector
-backend, no LLM, no filesystem. The fake applies what the task writes (``add_edges``
-upserts on the triple, ``update_node`` merges into the node blob), so a second pass
-reads back the first pass's writes and idempotency is a real assertion rather than a
-mock's call count.
+backend, no LLM, no network, no filesystem. The fake applies what the task writes
+(``add_edges`` upserts on the triple, ``update_node`` merges into the node blob), so a
+second pass reads back the first pass's writes and idempotency is a real assertion rather
+than a mock's call count.
+
+Two seams carry everything the pass cannot do for itself:
+
+* ``cognee.tasks.graph.reference_retrieval.get_vector_engine_async`` -> a
+  ``FakeVectorEngine`` with scripted ``ScoredResult``s, so the seed shortlist is exactly
+  what a test says it is.
+* ``cognee.tasks.graph.reference_tracer.LLMGateway.acreate_structured_output`` -> a
+  scripted list of ``TracerStep``s, so a whole trace (tool call, tool call, finish) is
+  written out in the test that depends on it.
+
+A scripted step may be a callable taking the rendered user prompt. That is how a test
+names a node: labels (``A1``, ``P2``, ``D1``) are issued per trace by the registry, so a
+test says "finish on the passage whose line reads ..." and the fake reads the label the
+registry actually issued out of the prompt.
 """
 
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -15,16 +30,22 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from cognee.modules.graph.utils.reference_resolution import (
-    STRATEGY_DOCUMENT_LOCATOR,
-    STRATEGY_DOCUMENT_ONLY,
     STRATEGY_ENTITY_NAME,
     STRATEGY_EXISTING_ID,
-    STRATEGY_PROSE_LOOKUP,
+    STRATEGY_LLM_TRACE,
+    ReferenceHint,
+    reference_fingerprint,
 )
 from cognee.modules.pipelines.models import PipelineContext
 from cognee.modules.pipelines.tasks.task import Task
+from cognee.tasks.graph.reference_tracer import TracerFinish, TracerStep, TracerToolCall
 from cognee.tasks.graph.resolve_assertion_references import (
     DOCUMENT_NODE_TYPES,
+    NOTE_LLM_ABSTAINED,
+    NOTE_LLM_BELOW_THRESHOLD,
+    NOTE_LLM_BUDGET_EXHAUSTED,
+    NOTE_LLM_CIRCUIT_BROKEN,
+    NOTE_LLM_ITERATION_CAP,
     REFERENCE_FIELDS,
     REFERENCE_RESOLUTION_DATA_ID,
     _touched_ids,
@@ -32,8 +53,12 @@ from cognee.tasks.graph.resolve_assertion_references import (
     detect_dangling_references,
     resolve_assertion_references,
 )
+from cognee.tests.unit.tasks.graph._reference_fakes import FakeVectorEngine, scored
 
 MODULE = "cognee.tasks.graph.resolve_assertion_references"
+RETRIEVAL = "cognee.tasks.graph.reference_retrieval"
+TRACER = "cognee.tasks.graph.reference_tracer"
+GATEWAY = f"{TRACER}.LLMGateway.acreate_structured_output"
 
 
 def _nid(label: str) -> str:
@@ -50,6 +75,7 @@ DOC_STIPULATION = _nid("doc-stipulation")
 COMPLAINT_CHUNK_0 = _nid("complaint-chunk-0")
 COMPLAINT_CHUNK_1 = _nid("complaint-chunk-1")
 ANSWER_CHUNK_0 = _nid("answer-chunk-0")
+STIPULATION_CHUNK_0 = _nid("stipulation-chunk-0")
 
 A_1 = _nid("assertion-owns")
 A_2 = _nid("assertion-acquired")
@@ -58,7 +84,12 @@ A_DENIAL = _nid("assertion-denial")
 A_ATTRIBUTED = _nid("assertion-attributed")
 A_RESOLVED = _nid("assertion-already-resolved")
 A_STIPULATION = _nid("assertion-stipulation")
+A_BOUNDARY = _nid("assertion-boundary")
 ENTITY_FESTER = _nid("entity-norman-fester")
+
+COMPLAINT_NAME = "Verified_Complaint_Adams_v_Clifton"
+ANSWER_NAME = "Answer_Clifton"
+STIPULATION_NAME = "Stipulation_Adams"
 
 COMPLAINT_LOCATION = "file://complaint.txt"
 ANSWER_LOCATION = "file://answer.txt"
@@ -73,16 +104,50 @@ COMPLAINT_CHUNK_1_TEXT = (
 COMPLAINT_TEXT = COMPLAINT_CHUNK_0_TEXT + COMPLAINT_CHUNK_1_TEXT
 ANSWER_CHUNK_0_TEXT = "ANSWER\n\n1. Defendant denies the allegations of paragraph 5.\n"
 ANSWER_TEXT = ANSWER_CHUNK_0_TEXT
+STIPULATION_CHUNK_0_TEXT = "STIPULATION\n\nThe parties stipulated to the boundary.\n"
+STIPULATION_TEXT = STIPULATION_CHUNK_0_TEXT
 
 CHUNK_1_LABEL = "Clifton owns 10 Main Street, acquired in 1998. 6. Roof replaced in 2019."
 
 DEFAULT_TEXTS = {
     COMPLAINT_LOCATION: COMPLAINT_TEXT,
     ANSWER_LOCATION: ANSWER_TEXT,
-    STIPULATION_LOCATION: "STIPULATION\n\nThe parties stipulate.\n",
+    STIPULATION_LOCATION: STIPULATION_TEXT,
 }
 
 PROVENANCE_KWARGS = {"source_ref_key": "dataset:data", "pipeline_run_id": "run-1"}
+
+# The structured references extraction writes (decision D6): a plain dict, never parsed
+# with a regex. ``basis="positional"`` is what keeps the denial off the entity-name step.
+DENIAL_REF = {
+    "document_hint": "the Complaint",
+    "locator_kind": "paragraph",
+    "locator_value": "5",
+    "basis": "positional",
+}
+ATTRIBUTED_REF = {"document_hint": "norman fester", "basis": "cited"}
+STIPULATION_REF = {"document_hint": "the Adams stipulation", "basis": "described"}
+
+DENIAL_REFERENCE_TEXT = "the Complaint paragraph 5"
+STIPULATION_REFERENCE_TEXT = "the Adams stipulation"
+
+DENIAL_FINGERPRINT = reference_fingerprint(
+    ReferenceHint(
+        document_hint="the Complaint",
+        locator_kind="paragraph",
+        locator_value="5",
+        basis="positional",
+    ),
+    "responds_to",
+)
+
+# Markers a scripted step names a node by. Each one appears on exactly one labelled line
+# of the rendered prompt, so the fake can read back the label the registry issued.
+MARK_COMPLAINT_DOCUMENT = f'Document "{COMPLAINT_NAME}"'
+MARK_STIPULATION_DOCUMENT = f'Document "{STIPULATION_NAME}"'
+MARK_COMPLAINT_PASSAGE_1 = f'Passage in "{COMPLAINT_NAME}" (chunk 1)'
+MARK_STIPULATION_PASSAGE = f'Passage in "{STIPULATION_NAME}" (chunk 0)'
+MARK_ALLEGATION = '"Clifton owns 10 Main Street"'
 
 
 def _document(node_id, name, location):
@@ -114,9 +179,9 @@ def _assertion(node_id, name, **props):
 def _base_graph():
     """Complaint + Answer + Stipulation, with one reference of every resolvable shape."""
     nodes = [
-        _document(DOC_COMPLAINT, "Verified_Complaint_Adams_v_Clifton", COMPLAINT_LOCATION),
-        _document(DOC_ANSWER, "Answer_Clifton", ANSWER_LOCATION),
-        _document(DOC_STIPULATION, "Stipulation_Adams", STIPULATION_LOCATION),
+        _document(DOC_COMPLAINT, COMPLAINT_NAME, COMPLAINT_LOCATION),
+        _document(DOC_ANSWER, ANSWER_NAME, ANSWER_LOCATION),
+        _document(DOC_STIPULATION, STIPULATION_NAME, STIPULATION_LOCATION),
         _assertion(
             A_1,
             "Clifton owns 10 Main Street",
@@ -136,18 +201,25 @@ def _base_graph():
             source_quote="Roof replaced in 2019",
         ),
         _assertion(
+            A_BOUNDARY,
+            "The parties stipulated to the boundary",
+            source_chunk_id=STIPULATION_CHUNK_0,
+            source_quote="The parties stipulated to the boundary",
+        ),
+        _assertion(
             A_DENIAL,
             "Clifton owns 10 Main Street",
             statement_type="denial",
             polarity="negative",
             source_chunk_id=ANSWER_CHUNK_0,
-            responds_to="Complaint ¶5",
+            source_quote="Defendant denies the allegations of paragraph 5.",
+            responds_to_ref=dict(DENIAL_REF),
         ),
         _assertion(
             A_ATTRIBUTED,
             "The valuation is unsupported",
             source_chunk_id=ANSWER_CHUNK_0,
-            attributed_to="norman fester",
+            attributed_to_ref=dict(ATTRIBUTED_REF),
         ),
         _assertion(
             A_RESOLVED,
@@ -158,9 +230,9 @@ def _base_graph():
         ),
         _assertion(
             A_STIPULATION,
-            "The parties stipulated to the boundary",
+            "The boundary was agreed",
             source_chunk_id=ANSWER_CHUNK_0,
-            responds_to="Stipulation Adams",
+            responds_to_ref=dict(STIPULATION_REF),
         ),
         (ENTITY_FESTER, {"id": ENTITY_FESTER, "type": "Entity", "name": "Norman Fester"}),
     ]
@@ -169,10 +241,52 @@ def _base_graph():
         _chunk(COMPLAINT_CHUNK_0, COMPLAINT_CHUNK_0_TEXT, 0, DOC_COMPLAINT),
         _chunk(COMPLAINT_CHUNK_1, COMPLAINT_CHUNK_1_TEXT, 1, DOC_COMPLAINT),
         _chunk(ANSWER_CHUNK_0, ANSWER_CHUNK_0_TEXT, 0, DOC_ANSWER),
+        _chunk(STIPULATION_CHUNK_0, STIPULATION_CHUNK_0_TEXT, 0, DOC_STIPULATION),
     ):
         nodes.append(node)
         edges.append(edge)
     return FakeGraph(nodes, edges)
+
+
+def _vector_results():
+    """The scripted seed: two allegations, the complaint's chunks, three documents."""
+    return {
+        "Assertion_name": [
+            scored(A_1, 0.10, "Clifton owns 10 Main Street", source_chunk_id=COMPLAINT_CHUNK_1),
+            scored(
+                A_2, 0.22, "The property was acquired in 1998", source_chunk_id=COMPLAINT_CHUNK_1
+            ),
+            scored(
+                A_BOUNDARY,
+                0.30,
+                "The parties stipulated to the boundary",
+                source_chunk_id=STIPULATION_CHUNK_0,
+            ),
+        ],
+        "DocumentChunk_text": [
+            scored(
+                COMPLAINT_CHUNK_1,
+                0.18,
+                COMPLAINT_CHUNK_1_TEXT,
+                document_id=DOC_COMPLAINT,
+                document_name=COMPLAINT_NAME,
+                chunk_index=1,
+            ),
+            scored(
+                STIPULATION_CHUNK_0,
+                0.34,
+                STIPULATION_CHUNK_0_TEXT,
+                document_id=DOC_STIPULATION,
+                document_name=STIPULATION_NAME,
+                chunk_index=0,
+            ),
+        ],
+        "TextDocument_name": [
+            scored(DOC_COMPLAINT, 0.12, COMPLAINT_NAME),
+            scored(DOC_STIPULATION, 0.26, STIPULATION_NAME),
+            scored(DOC_ANSWER, 0.40, ANSWER_NAME),
+        ],
+    }
 
 
 class FakeGraph:
@@ -228,9 +342,80 @@ class FakeGraph:
         ]
 
 
+# --------------------------------------------------------------------------- #
+# scripting a trace
+# --------------------------------------------------------------------------- #
+def _label_for(prompt: str, marker: str) -> str:
+    """The label of the one rendered line carrying ``marker``."""
+    for line in prompt.splitlines():
+        if line.startswith("[") and "]" in line and marker in line:
+            return line[1 : line.index("]")]
+    raise AssertionError(f"no labelled line matching {marker!r} in:\n{prompt}")
+
+
+def finish_on(marker, confidence=0.9, reason="the answer restates the allegation"):
+    """Finish on whichever label the registry gave the node ``marker`` names."""
+
+    def _step(prompt):
+        return TracerStep(
+            finish=TracerFinish(
+                candidate_label=_label_for(prompt, marker), confidence=confidence, reason=reason
+            )
+        )
+
+    return _step
+
+
+def abstain(reason="nothing in this set is the referent"):
+    return TracerStep(finish=TracerFinish(candidate_label=None, confidence=0.0, reason=reason))
+
+
+def call_tool(name, **arguments):
+    return TracerStep(tool_call=TracerToolCall(tool_name=name, arguments=arguments))
+
+
+def locate(document_marker, kind="paragraph", value="5"):
+    """A ``locate_paragraph`` call naming the document by its rendered line."""
+
+    def _step(prompt):
+        return TracerStep(
+            tool_call=TracerToolCall(
+                tool_name="locate_paragraph",
+                arguments={
+                    "document": _label_for(prompt, document_marker),
+                    "kind": kind,
+                    "value": value,
+                },
+            )
+        )
+
+    return _step
+
+
+DENIAL_TRACE = [locate(MARK_COMPLAINT_DOCUMENT), finish_on(MARK_COMPLAINT_PASSAGE_1)]
+
+
+class FakeTracerLLM:
+    """A scripted ``acreate_structured_output``: no LLM, no network."""
+
+    def __init__(self, steps=(), default=None):
+        self.steps = list(steps)
+        self.default = default if default is not None else abstain()
+        self.prompts = []
+        self.await_count = 0
+
+    async def __call__(self, *, text_input, system_prompt, response_model):
+        self.prompts.append(text_input)
+        self.await_count += 1
+        step = self.steps.pop(0) if self.steps else self.default
+        if isinstance(step, BaseException):
+            raise step
+        return step(text_input) if callable(step) else step
+
+
 @contextmanager
-def _patched(graph, texts=None, *, locations=None):
-    """Patch every I/O seam the task reaches through."""
+def _patched(graph, texts=None, *, locations=None, steps=(), default=None, vector_results=None):
+    """Patch every I/O seam the pass reaches through."""
     texts = DEFAULT_TEXTS if texts is None else texts
 
     async def _read(location):
@@ -238,6 +423,9 @@ def _patched(graph, texts=None, *, locations=None):
         if isinstance(value, Exception):
             raise value
         return value
+
+    engine = FakeVectorEngine(_vector_results() if vector_results is None else dict(vector_results))
+    llm = FakeTracerLLM(steps, default=default)
 
     with (
         patch(f"{MODULE}.get_graph_engine", new=AsyncMock(return_value=graph)),
@@ -254,18 +442,43 @@ def _patched(graph, texts=None, *, locations=None):
             "cognee.tasks.graph.reference_graph_view._read_processed_text",
             new=AsyncMock(side_effect=_read),
         ) as read_mock,
+        patch(
+            f"{RETRIEVAL}.get_vector_engine_async", new=AsyncMock(return_value=engine)
+        ) as engine_mock,
+        patch(GATEWAY, new=llm),
     ):
         yield SimpleNamespace(
             index_graph_edges=index_mock,
             graph_provenance_write_kwargs=provenance_mock,
             read_processed_text=read_mock,
+            vector_engine=engine,
+            vector_engine_factory=engine_mock,
+            llm=llm,
         )
 
 
-async def _run(graph, texts=None, *, locations=None, ctx=None, dry_run=False, **detect_kwargs):
-    """Run the two-phase pass and return ``(payload, summary, patch mocks)``."""
+async def _run(
+    graph,
+    texts=None,
+    *,
+    locations=None,
+    ctx=None,
+    dry_run=False,
+    steps=(),
+    default=None,
+    vector_results=None,
+    **detect_kwargs,
+):
+    """Run the two-phase pass and return ``(payload, summary, mocks)``."""
     data = detect_kwargs.pop("data", None)
-    with _patched(graph, texts, locations=locations) as mocks:
+    with _patched(
+        graph,
+        texts,
+        locations=locations,
+        steps=steps,
+        default=default,
+        vector_results=vector_results,
+    ) as mocks:
         payload = await detect_dangling_references(data, ctx=ctx, **detect_kwargs)
         summary = await apply_reference_resolutions(payload, dry_run=dry_run, ctx=ctx)
     return payload, summary, mocks
@@ -279,12 +492,17 @@ def _by_target(edges):
     return {edge[1]: edge for edge in edges}
 
 
+def _resolution_blob(graph, assertion_id, field_name="responds_to"):
+    return dict(graph.update_node_calls)[assertion_id][f"{field_name}_resolution"]
+
+
 # --------------------------------------------------------------------------- #
 # constants
 # --------------------------------------------------------------------------- #
 def test_reference_fields_never_include_the_identity_field():
     assert REFERENCE_FIELDS == ("responds_to", "attributed_to")
     assert "asserted_by" not in REFERENCE_FIELDS
+    assert not any(field.endswith("_ref") for field in REFERENCE_FIELDS)
     assert REFERENCE_RESOLUTION_DATA_ID == uuid5(NAMESPACE_URL, "cognee:reference-resolution")
     assert DOCUMENT_NODE_TYPES == (
         "TextDocument",
@@ -296,12 +514,12 @@ def test_reference_fields_never_include_the_identity_field():
 
 
 # --------------------------------------------------------------------------- #
-# the worked example: Answer denial -> Complaint ¶5 -> two allegations
+# the worked example: Answer denial -> locate_paragraph -> the anchor passage
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_locator_reference_links_both_allegations_and_the_anchor_chunk():
+async def test_a_traced_passage_links_the_quoted_allegations_and_the_anchor_chunk():
     graph = _base_graph()
-    _, summary, mocks = await _run(graph)
+    _, summary, mocks = await _run(graph, steps=list(DENIAL_TRACE))
 
     denial_edges = _by_target(graph.edges_of(A_DENIAL, "responds_to"))
     assert set(denial_edges) == {A_1, A_2, COMPLAINT_CHUNK_1}
@@ -312,9 +530,9 @@ async def test_locator_reference_links_both_allegations_and_the_anchor_chunk():
     assert allegation_props["relationship_name"] == "responds_to"
     assert allegation_props["source_node_id"] == A_DENIAL
     assert allegation_props["target_node_id"] == A_1
-    assert allegation_props["reference_text"] == "Complaint ¶5"
-    assert allegation_props["resolution_strategy"] == STRATEGY_DOCUMENT_LOCATOR
-    assert allegation_props["resolution_confidence"] == pytest.approx(0.90)
+    assert allegation_props["reference_text"] == DENIAL_REFERENCE_TEXT
+    assert allegation_props["resolution_strategy"] == STRATEGY_LLM_TRACE
+    assert allegation_props["resolution_confidence"] == pytest.approx(0.9)
     assert allegation_props["resolved_target_type"] == "Assertion"
     assert allegation_props["resolved_by"] == "reference_resolver"
     # The stance travels with the edge: a denial must not read as the fact it denies.
@@ -336,38 +554,124 @@ async def test_locator_reference_links_both_allegations_and_the_anchor_chunk():
     assert A_DENIAL in patches
     patch_values = patches[A_DENIAL]
     assert patch_values["responds_to"] == COMPLAINT_CHUNK_1
-    assert patch_values["responds_to_text"] == "Complaint ¶5"
+    assert patch_values["responds_to_text"] == DENIAL_REFERENCE_TEXT
     resolution = patch_values["responds_to_resolution"]
-    assert resolution["strategy"] == STRATEGY_DOCUMENT_LOCATOR
-    assert resolution["confidence"] == pytest.approx(0.90)
+    assert resolution["strategy"] == STRATEGY_LLM_TRACE
+    assert resolution["confidence"] == pytest.approx(0.9)
     assert resolution["target_ids"] == [A_1, A_2]
     assert resolution["anchor_id"] == COMPLAINT_CHUNK_1
     assert resolution["document_id"] == DOC_COMPLAINT
     assert resolution["notes"] == []
+    assert resolution["fingerprint"] == DENIAL_FINGERPRINT
+    assert resolution["reason"] == "the answer restates the allegation"
 
     assert summary["scanned"] == 4
-    assert summary["resolved"] == 3
+    assert summary["resolved"] == 2
     assert summary["already_resolved"] == 1
-    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 1
+    assert summary["resolved_by_strategy"][STRATEGY_LLM_TRACE] == 1
     assert summary["anchor_types"]["DocumentChunk"] == 1
     assert summary["failed"] == 0
     assert summary["dry_run"] is False
     assert summary["notes"] == []
 
+    # Two references reached the tracer; the denial spent two calls, the stipulation one.
+    assert summary["traces_started"] == 2
+    assert summary["llm_calls"] == 3
+    assert mocks.llm.await_count == 3
+    assert summary["tool_calls_by_name"] == {"locate_paragraph": 1}
+
     # Edges are written in one batch, carrying exactly the provenance kwargs.
     assert len(graph.add_edges_calls) == 1
     written, kwargs = graph.add_edges_calls[0]
     assert kwargs == PROVENANCE_KWARGS
-    assert len(written) == 5
-    assert summary["edges_written"] == 5
-    assert summary["nodes_patched"] == 2
-    mocks.index_graph_edges.assert_awaited_once_with(written)
+    assert summary["edges_written"] == len(written) == 4
     assert (
         mocks.graph_provenance_write_kwargs.await_args.kwargs["fallback_data_id"]
         == REFERENCE_RESOLUTION_DATA_ID
     )
 
 
+@pytest.mark.asyncio
+async def test_a_trace_that_picks_an_assertion_links_only_that_assertion():
+    graph = _base_graph()
+    await _run(graph, steps=[finish_on(MARK_ALLEGATION, confidence=0.95)])
+
+    edges = graph.edges_of(A_DENIAL, "responds_to")
+    assert [edge[1] for edge in edges] == [A_1]
+    assert _props(edges[0])["resolved_target_type"] == "Assertion"
+    patch_values = dict(graph.update_node_calls)[A_DENIAL]
+    assert patch_values["responds_to"] == A_1
+    assert patch_values["responds_to_resolution"]["target_ids"] == [A_1]
+    assert patch_values["responds_to_resolution"]["document_id"] == DOC_COMPLAINT
+
+
+@pytest.mark.asyncio
+async def test_a_trace_that_picks_a_document_anchors_on_the_document_node():
+    graph = _base_graph()
+    # The denial abstains; the stipulation reference picks the whole document.
+    await _run(
+        graph,
+        steps=[abstain(), finish_on(MARK_STIPULATION_DOCUMENT, confidence=0.7)],
+    )
+
+    edges = graph.edges_of(A_STIPULATION, "responds_to")
+    assert [edge[1] for edge in edges] == [DOC_STIPULATION]
+    props = _props(edges[0])
+    assert props["resolution_strategy"] == STRATEGY_LLM_TRACE
+    assert props["resolved_target_type"] == "TextDocument"
+    assert props["resolution_confidence"] == pytest.approx(0.7)
+
+    patch_values = dict(graph.update_node_calls)[A_STIPULATION]
+    assert patch_values["responds_to"] == DOC_STIPULATION
+    assert patch_values["responds_to_text"] == STIPULATION_REFERENCE_TEXT
+    assert patch_values["responds_to_resolution"]["document_id"] == DOC_STIPULATION
+
+
+@pytest.mark.asyncio
+async def test_opaque_document_names_do_not_change_the_answer():
+    """Filename independence: the agent works from content, never from a file stem."""
+    graph = _base_graph()
+    graph.nodes[DOC_COMPLAINT]["name"] = "Document3"
+    graph.nodes[DOC_STIPULATION]["name"] = "SKM_C55826082316050"
+    vector_results = _vector_results()
+    vector_results["TextDocument_name"] = [
+        scored(DOC_COMPLAINT, 0.12, "Document3"),
+        scored(DOC_STIPULATION, 0.26, "SKM_C55826082316050"),
+        scored(DOC_ANSWER, 0.40, ANSWER_NAME),
+    ]
+    vector_results["DocumentChunk_text"] = [
+        scored(
+            COMPLAINT_CHUNK_1,
+            0.18,
+            COMPLAINT_CHUNK_1_TEXT,
+            document_id=DOC_COMPLAINT,
+            document_name="Document3",
+            chunk_index=1,
+        ),
+    ]
+
+    _, summary, _ = await _run(
+        graph,
+        vector_results=vector_results,
+        steps=[
+            locate('Document "Document3"'),
+            finish_on('Passage in "Document3" (chunk 1)'),
+            finish_on('Document "SKM_C55826082316050"', confidence=0.65),
+        ],
+    )
+
+    assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {
+        A_1,
+        A_2,
+        COMPLAINT_CHUNK_1,
+    }
+    assert [edge[1] for edge in graph.edges_of(A_STIPULATION, "responds_to")] == [DOC_STIPULATION]
+    assert summary["resolved_by_strategy"][STRATEGY_LLM_TRACE] == 2
+
+
+# --------------------------------------------------------------------------- #
+# the steps before the tracer
+# --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_entity_name_reference_emits_an_edge_and_leaves_the_field_alone():
     graph = _base_graph()
@@ -381,55 +685,32 @@ async def test_entity_name_reference_emits_an_edge_and_leaves_the_field_alone():
     assert props["resolved_target_type"] == "Entity"
     assert props["reference_text"] == "norman fester"
 
-    # The ingest contract keeps the name in the field: entity_name never patches a node.
+    # The ingest contract keeps the field as it was: entity_name never patches a node.
     assert A_ATTRIBUTED not in dict(graph.update_node_calls)
-    assert graph.nodes[A_ATTRIBUTED]["attributed_to"] == "norman fester"
+    assert graph.nodes[A_ATTRIBUTED]["attributed_to_ref"] == ATTRIBUTED_REF
 
 
 @pytest.mark.asyncio
-async def test_document_only_reference_anchors_on_the_document_node():
+async def test_a_positional_hint_never_reaches_the_entity_name_step():
+    """ "the Complaint ¶5" must not be linked to a ``Complaint`` stub entity."""
     graph = _base_graph()
-    _, summary, _ = await _run(graph)
-
-    edges = graph.edges_of(A_STIPULATION, "responds_to")
-    assert [edge[1] for edge in edges] == [DOC_STIPULATION]
-    props = _props(edges[0])
-    assert props["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
-    assert props["resolved_target_type"] == "TextDocument"
-    assert props["resolution_confidence"] == pytest.approx(0.90)
-
-    patch_values = dict(graph.update_node_calls)[A_STIPULATION]
-    assert patch_values["responds_to"] == DOC_STIPULATION
-    assert patch_values["responds_to_text"] == "Stipulation Adams"
-    assert summary["anchor_types"]["TextDocument"] == 1
-
-
-@pytest.mark.asyncio
-async def test_document_level_locator_resolves_to_the_whole_document():
-    """ "Resolution No. 2026-118" names a document, not a place inside one."""
-    graph = _base_graph()
-    document_id = _nid("doc-resolution")
-    graph.nodes[document_id] = {
-        "id": document_id,
-        "type": "TextDocument",
-        "name": "Resolution_2026-118",
-        "raw_data_location": "file://resolution.txt",
+    complaint_entity = _nid("entity-the-complaint")
+    graph.nodes[complaint_entity] = {
+        "id": complaint_entity,
+        "type": "Entity",
+        "name": "the Complaint",
     }
-    graph.nodes[A_STIPULATION]["responds_to"] = "Resolution No. 2026-118"
 
-    _, summary, _ = await _run(graph)
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
 
-    edges = graph.edges_of(A_STIPULATION, "responds_to")
-    assert [edge[1] for edge in edges] == [document_id]
-    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
-    assert _props(edges[0])["resolution_confidence"] == pytest.approx(1.0)
-    assert summary["unresolved"] == 0
+    assert complaint_entity not in _by_target(graph.edges_of(A_DENIAL, "responds_to"))
+    assert summary["resolved_by_strategy"].get(STRATEGY_ENTITY_NAME) == 1  # only the attribution
 
 
 @pytest.mark.asyncio
 async def test_already_resolved_uuid_is_counted_and_writes_nothing():
     graph = _base_graph()
-    _, summary, _ = await _run(graph)
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
 
     assert summary["already_resolved"] == 1
     assert graph.edges_of(A_RESOLVED, "responds_to") == []
@@ -440,7 +721,7 @@ async def test_existing_uuid_without_an_edge_emits_the_edge_only():
     graph = _base_graph()
     graph.edges = [edge for edge in graph.edges if edge[0] != A_RESOLVED]
 
-    _, summary, _ = await _run(graph)
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
 
     edges = graph.edges_of(A_RESOLVED, "responds_to")
     assert [edge[1] for edge in edges] == [A_1]
@@ -460,19 +741,18 @@ async def test_stale_uuid_without_preserved_text_stays_unresolved_but_is_counted
     del graph.nodes[A_RESOLVED]["responds_to_text"]
     graph.edges = [edge for edge in graph.edges if edge[0] != A_RESOLVED]
 
-    _, summary, _ = await _run(graph)
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
 
     assert graph.edges_of(A_RESOLVED, "responds_to") == []
-    assert summary["unresolved"] == 1
     # Nothing to re-resolve from, but the dark reference is still reported.
     assert summary["stale_ids"] == 1
 
 
 @pytest.mark.asyncio
-async def test_stale_uuid_re_resolves_from_the_preserved_text_without_force():
+async def test_stale_uuid_re_resolves_from_the_preserved_reference_without_force():
     """An amended pleading is re-chunked: the id the field holds is no longer a node."""
     graph = _base_graph()
-    await _run(graph)
+    await _run(graph, steps=list(DENIAL_TRACE))
     assert graph.nodes[A_DENIAL]["responds_to"] == COMPLAINT_CHUNK_1
 
     rechunked = _nid("complaint-chunk-1-rechunked")
@@ -484,15 +764,364 @@ async def test_stale_uuid_re_resolves_from_the_preserved_text_without_force():
     graph.add_edges_calls.clear()
     graph.update_node_calls.clear()
 
-    _, summary, _ = await _run(graph)
+    vector_results = _vector_results()
+    vector_results["Assertion_name"] = [
+        scored(A_1, 0.10, "Clifton owns 10 Main Street", source_chunk_id=rechunked),
+        scored(A_2, 0.22, "The property was acquired in 1998", source_chunk_id=rechunked),
+    ]
+    vector_results["DocumentChunk_text"] = [
+        scored(
+            rechunked,
+            0.18,
+            COMPLAINT_CHUNK_1_TEXT,
+            document_id=DOC_COMPLAINT,
+            document_name=COMPLAINT_NAME,
+            chunk_index=1,
+        ),
+    ]
+
+    _, summary, _ = await _run(graph, vector_results=vector_results, steps=list(DENIAL_TRACE))
 
     assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {A_1, A_2, rechunked}
     patch_values = dict(graph.update_node_calls)[A_DENIAL]
     assert patch_values["responds_to"] == rechunked
-    assert patch_values["responds_to_text"] == "Complaint ¶5"
+    assert patch_values["responds_to_text"] == DENIAL_REFERENCE_TEXT
     assert patch_values["responds_to_resolution"]["notes"] == ["stale_id"]
     assert summary["stale_ids"] == 1
-    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_structured_only_reference_is_never_skipped():
+    """Regression: the planner used to skip any assertion whose field was blank."""
+    graph = _base_graph()
+    for assertion_id in (A_DENIAL, A_STIPULATION, A_ATTRIBUTED):
+        for field_name in REFERENCE_FIELDS:
+            assert not graph.nodes[assertion_id].get(field_name)
+
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
+
+    assert summary["scanned"] == 4
+    assert graph.edges_of(A_DENIAL, "responds_to")
+    assert graph.edges_of(A_ATTRIBUTED, "attributed_to")
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_entity_name_resolves_nothing_and_never_traces():
+    graph = _base_graph()
+    twin = _nid("entity-norman-fester-twin")
+    graph.nodes[twin] = {"id": twin, "type": "Entity", "name": "NORMAN FESTER"}
+
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
+
+    assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
+    assert summary["ambiguous"] == 1
+    # The denial and the stipulation traced; the ambiguous attribution did not.
+    assert summary["traces_started"] == 2
+
+
+@pytest.mark.asyncio
+async def test_assertion_names_are_not_entity_name_targets():
+    """Assertions subclass Entity in the model but must never be entity_name targets."""
+    graph = _base_graph()
+    graph.nodes[A_ATTRIBUTED]["attributed_to_ref"] = {
+        "document_hint": "Clifton owns 10 Main Street",
+        "basis": "cited",
+    }
+
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE), default=abstain())
+
+    assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
+    assert STRATEGY_ENTITY_NAME not in summary["resolved_by_strategy"]
+
+
+# --------------------------------------------------------------------------- #
+# the ingest tail: no LLM, no document reads
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_the_tail_never_calls_the_llm_and_never_reads_a_document():
+    graph = _base_graph()
+    _, summary, mocks = await _run(graph, scope="touched", data=None, allow_llm=False)
+
+    assert mocks.llm.await_count == 0
+    mocks.read_processed_text.assert_not_awaited()
+    mocks.vector_engine_factory.assert_not_awaited()
+    assert mocks.vector_engine.batch_search_calls == []
+    assert summary["llm_calls"] == 0
+    assert summary["traces_started"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_tail_still_resolves_ids_and_entity_names():
+    graph = _base_graph()
+    _, summary, mocks = await _run(graph, allow_llm=False)
+
+    assert [edge[1] for edge in graph.edges_of(A_ATTRIBUTED, "attributed_to")] == [ENTITY_FESTER]
+    assert summary["resolved_by_strategy"] == {STRATEGY_ENTITY_NAME: 1}
+    # Nothing is written for a reference the tail cannot answer: the pass retries it.
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    assert A_DENIAL not in dict(graph.update_node_calls)
+    assert summary["unresolved"] == 2
+    assert mocks.llm.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_allow_llm_defaults_to_the_scope():
+    graph = _base_graph()
+    _, touched_summary, touched_mocks = await _run(graph, scope="touched", data=None)
+    assert touched_mocks.llm.await_count == 0
+    assert touched_summary["traces_started"] == 0
+
+    graph = _base_graph()
+    _, all_summary, all_mocks = await _run(graph, steps=list(DENIAL_TRACE))
+    assert all_mocks.llm.await_count > 0
+    assert all_summary["traces_started"] == 2
+
+
+@pytest.mark.asyncio
+async def test_the_task_default_tail_wiring_is_llm_free():
+    task = Task(resolve_assertion_references, scope="touched", allow_llm=False)
+    assert task.default_params["kwargs"] == {"scope": "touched", "allow_llm": False}
+
+
+# --------------------------------------------------------------------------- #
+# abstain / threshold / cap / budget records
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_an_abstention_writes_a_resolution_only_record_and_never_nulls_the_field():
+    graph = _base_graph()
+    _, summary, _ = await _run(graph, steps=[abstain("no candidate is the referent")])
+
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    patch_values = dict(graph.update_node_calls)[A_DENIAL]
+    assert set(patch_values) == {"responds_to_resolution"}
+    assert "responds_to" not in patch_values
+    blob = patch_values["responds_to_resolution"]
+    assert blob["strategy"] == STRATEGY_LLM_TRACE
+    assert blob["anchor_id"] is None
+    assert blob["notes"] == [NOTE_LLM_ABSTAINED]
+    assert blob["reason"] == "no candidate is the referent"
+    assert blob["fingerprint"] == DENIAL_FINGERPRINT
+    # The reference the extraction recorded is untouched.
+    assert graph.nodes[A_DENIAL]["responds_to_ref"] == DENIAL_REF
+    assert graph.nodes[A_DENIAL].get("responds_to") is None
+    assert summary["llm_abstained"] >= 1
+    assert summary["unresolved"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_finish_below_the_threshold_is_recorded_but_never_linked():
+    graph = _base_graph()
+    _, summary, _ = await _run(
+        graph,
+        steps=[finish_on(MARK_ALLEGATION, confidence=0.4, reason="it might be this one")],
+        llm_confidence_threshold=0.6,
+    )
+
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    blob = _resolution_blob(graph, A_DENIAL)
+    assert blob["notes"] == [NOTE_LLM_BELOW_THRESHOLD]
+    assert blob["confidence"] == pytest.approx(0.4)
+    assert blob["anchor_id"] is None
+    assert summary["llm_below_threshold"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_iteration_cap_is_recorded_without_an_extra_call():
+    graph = _base_graph()
+    _, summary, mocks = await _run(
+        graph,
+        steps=[
+            locate(MARK_COMPLAINT_DOCUMENT),
+            locate(MARK_COMPLAINT_DOCUMENT, value="6"),
+        ],
+        default=call_tool("list_documents"),
+        tracer_max_iter=2,
+    )
+
+    blob = _resolution_blob(graph, A_DENIAL)
+    assert blob["notes"] == [NOTE_LLM_ITERATION_CAP]
+    assert blob["iterations"] == 2
+    assert summary["traces_iteration_capped"] == 2
+    # Two references x two steps each, and never a "just answer now" third call.
+    assert mocks.llm.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_the_stored_trace_records_every_tool_step():
+    graph = _base_graph()
+    await _run(graph, steps=list(DENIAL_TRACE))
+
+    blob = _resolution_blob(graph, A_DENIAL)
+    assert blob["iterations"] == 2
+    assert len(blob["trace"]) == 1
+    record = blob["trace"][0]
+    assert record["tool"] == "locate_paragraph"
+    assert record["ok"] is True
+    assert json.loads(record["args"])["kind"] == "paragraph"
+    assert len(record["args"]) <= 300
+    assert len(record["result_preview"]) <= 300
+
+
+# --------------------------------------------------------------------------- #
+# budget, ordering, caching, circuit breaker
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_zero_budget_seeds_without_spending_anything():
+    graph = _base_graph()
+    _, summary, mocks = await _run(graph, llm_max_calls=0)
+
+    assert mocks.llm.await_count == 0
+    assert summary["llm_calls"] == 0
+    assert summary["llm_budget"] == 0
+    assert summary["llm_budget_exhausted"] is True
+    # The seed still ran, so the would-be trace count is the estimate for a real budget.
+    assert summary["traces_started"] == 2
+    assert mocks.vector_engine.batch_search_calls
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    assert A_DENIAL not in dict(graph.update_node_calls)
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_budget_leaves_the_rest_for_the_next_pass(caplog):
+    graph = _base_graph()
+    with caplog.at_level("WARNING"):
+        _, summary, mocks = await _run(graph, steps=[abstain()], llm_max_calls=1, default=abstain())
+
+    assert mocks.llm.await_count == 1
+    assert summary["llm_budget_exhausted"] is True
+    assert NOTE_LLM_BUDGET_EXHAUSTED in summary["notes"]
+    # Nothing at all is written for the reference that never got its trace.
+    assert A_STIPULATION not in dict(graph.update_node_calls)
+    assert any("budget" in record.message.lower() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_denials_are_traced_before_allegations_when_the_budget_is_short():
+    graph = _base_graph()
+    # Budget of two: the denial's two-step trace consumes it, the stipulation gets none.
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE), llm_max_calls=2)
+
+    assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {
+        A_1,
+        A_2,
+        COMPLAINT_CHUNK_1,
+    }
+    assert graph.edges_of(A_STIPULATION, "responds_to") == []
+    assert summary["llm_budget"] == 2
+    assert summary["llm_calls"] == 2
+    assert summary["llm_budget_exhausted"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_identical_reference_with_an_identical_seed_is_answered_from_the_cache():
+    graph = _base_graph()
+    twin = _nid("assertion-denial-twin")
+    # Two denials making the same reference. Their propositions are dropped so neither is
+    # a lexical hit in the other's seed -- with different seeds they are different cache
+    # keys by construction, which is the point of keying on the candidate set.
+    graph.nodes[A_DENIAL].pop("name")
+    graph.nodes[twin] = dict(graph.nodes[A_DENIAL], id=twin)
+
+    _, summary, mocks = await _run(
+        graph, steps=[finish_on(MARK_ALLEGATION, confidence=0.91)], default=abstain()
+    )
+
+    assert summary["llm_cached"] == 1
+    # Both denials resolved, but only one of them was traced.
+    assert [edge[1] for edge in graph.edges_of(A_DENIAL, "responds_to")] == [A_1]
+    assert [edge[1] for edge in graph.edges_of(twin, "responds_to")] == [A_1]
+    assert summary["traces_started"] == 2  # the traced denial and the stipulation
+    assert mocks.llm.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_three_consecutive_failed_calls_break_the_circuit(caplog):
+    graph = _base_graph()
+    for index in range(4):
+        graph.nodes[_nid(f"denial-{index}")] = dict(
+            graph.nodes[A_DENIAL],
+            id=_nid(f"denial-{index}"),
+            name=f"claim {index}",
+            source_quote=f"quote {index}",
+        )
+
+    with caplog.at_level("WARNING"):
+        _, summary, mocks = await _run(
+            graph, default=RuntimeError("the gateway is down"), llm_max_calls=50
+        )
+
+    assert mocks.llm.await_count == 3
+    assert summary["llm_failed"] == 3
+    assert NOTE_LLM_CIRCUIT_BROKEN in summary["notes"]
+    assert any("circuit" in record.message.lower() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_no_documents_in_the_view_skips_the_tracer_entirely():
+    graph = _base_graph()
+    for document_id in (DOC_COMPLAINT, DOC_ANSWER, DOC_STIPULATION):
+        del graph.nodes[document_id]
+
+    _, summary, mocks = await _run(graph)
+
+    assert mocks.llm.await_count == 0
+    assert summary["llm_skipped_empty_graph"] == 2
+    assert summary["unresolved"] == 2
+    # The cheap steps still answer what they can.
+    assert [edge[1] for edge in graph.edges_of(A_ATTRIBUTED, "attributed_to")] == [ENTITY_FESTER]
+
+
+# --------------------------------------------------------------------------- #
+# the attempt guard
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_recorded_attempt_with_the_same_fingerprint_is_not_retried():
+    graph = _base_graph()
+    _, first, _ = await _run(graph, steps=[abstain()], default=abstain())
+    assert first["llm_abstained"] >= 1
+    graph.add_edges_calls.clear()
+    graph.update_node_calls.clear()
+
+    _, summary, mocks = await _run(graph)
+
+    assert mocks.llm.await_count == 0
+    assert summary["traces_started"] == 0
+    # The resolved id, the entity-name edge that already exists, and the two records.
+    assert summary["already_resolved"] == 4
+
+
+@pytest.mark.asyncio
+async def test_force_bypasses_the_attempt_guard():
+    graph = _base_graph()
+    await _run(graph, steps=[abstain()], default=abstain())
+    graph.add_edges_calls.clear()
+    graph.update_node_calls.clear()
+
+    _, summary, mocks = await _run(graph, steps=list(DENIAL_TRACE), force=True)
+
+    # The denial's two steps, then one abstention each for the stipulation and for the
+    # already-resolved reference force re-opened.
+    assert mocks.llm.await_count == 4
+    assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {
+        A_1,
+        A_2,
+        COMPLAINT_CHUNK_1,
+    }
+    assert summary["resolved_by_strategy"][STRATEGY_LLM_TRACE] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_changed_reference_is_reconsidered_without_force():
+    graph = _base_graph()
+    await _run(graph, steps=[abstain()], default=abstain())
+    graph.nodes[A_DENIAL]["responds_to_ref"] = dict(DENIAL_REF, locator_value="6")
+    graph.add_edges_calls.clear()
+    graph.update_node_calls.clear()
+
+    _, summary, mocks = await _run(graph, steps=[finish_on(MARK_ALLEGATION)], default=abstain())
+
+    assert mocks.llm.await_count >= 1
+    assert [edge[1] for edge in graph.edges_of(A_DENIAL, "responds_to")] == [A_1]
 
 
 # --------------------------------------------------------------------------- #
@@ -501,11 +1130,11 @@ async def test_stale_uuid_re_resolves_from_the_preserved_text_without_force():
 @pytest.mark.asyncio
 async def test_second_pass_writes_nothing():
     graph = _base_graph()
-    await _run(graph)
+    await _run(graph, steps=list(DENIAL_TRACE), default=finish_on(MARK_STIPULATION_PASSAGE))
     graph.add_edges_calls.clear()
     graph.update_node_calls.clear()
 
-    _, summary, _ = await _run(graph)
+    _, summary, mocks = await _run(graph)
 
     assert graph.add_edges_calls == []
     assert graph.update_node_calls == []
@@ -513,222 +1142,58 @@ async def test_second_pass_writes_nothing():
     assert summary["nodes_patched"] == 0
     assert summary["resolved"] == 0
     assert summary["already_resolved"] == 4
-
-
-@pytest.mark.asyncio
-async def test_force_re_resolves_from_the_stored_reference_text():
-    graph = _base_graph()
-    await _run(graph)
-    graph.add_edges_calls.clear()
-    graph.update_node_calls.clear()
-
-    _, summary, _ = await _run(graph, force=True)
-
-    # The already-resolved reference is re-read from its stored "Complaint ¶4" and now
-    # anchors on that paragraph's chunk instead of the single assertion it held.
-    assert dict(graph.update_node_calls)[A_RESOLVED]["responds_to"] == COMPLAINT_CHUNK_0
-    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 1
-    # The denial re-resolves to the same answer, so the edge pre-check stops force from
-    # re-writing edges whose properties (a tuned feedback_weight) would be reset.
-    assert graph.edges_of(A_DENIAL, "responds_to") == []
-    assert A_DENIAL not in dict(graph.update_node_calls)
-    assert summary["already_resolved"] == 3
+    assert mocks.llm.await_count == 0
 
 
 @pytest.mark.asyncio
 async def test_dry_run_plans_without_writing():
     graph = _base_graph()
-    payload, summary, mocks = await _run(graph, dry_run=True)
+    payload, summary, mocks = await _run(graph, steps=list(DENIAL_TRACE), dry_run=True)
 
     assert graph.add_edges_calls == []
     assert graph.update_node_calls == []
     assert summary["dry_run"] is True
     assert summary["edges_written"] == 0
     assert summary["nodes_patched"] == 0
-    assert summary["resolved"] == 3
-    assert len(payload["plan"]) == 3
+    assert summary["resolved"] == 2
+    # Traces still ran, so the plan shows what the agent would have linked.
+    assert mocks.llm.await_count == 3
+    assert any(resolution.strategy == STRATEGY_LLM_TRACE for resolution in payload["plan"])
     mocks.index_graph_edges.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------- #
-# fallbacks
+# write-phase behaviour
 # --------------------------------------------------------------------------- #
-@pytest.mark.asyncio
-async def test_non_tiling_chunks_fall_back_to_a_chunk_scan(caplog):
-    """An overlapping chunker breaks chunk_offsets; the marker is scanned per chunk."""
-    graph = _base_graph()
-    overlap_0 = "COMPLAINT\n\n4. A lease.\n\n5. Clifton owns 10 Main Street, acquired in 1998.\n"
-    overlap_1 = "5. Clifton owns 10 Main Street, acquired in 1998.\n\n6. Roof replaced in 2019.\n"
-    graph.nodes[COMPLAINT_CHUNK_0]["text"] = overlap_0
-    graph.nodes[COMPLAINT_CHUNK_1]["text"] = overlap_1
-    graph.nodes[A_1]["source_chunk_id"] = COMPLAINT_CHUNK_0
-    graph.nodes[A_2]["source_chunk_id"] = COMPLAINT_CHUNK_0
-
-    with caplog.at_level("WARNING"):
-        _, summary, _ = await _run(graph)
-
-    edges = _by_target(graph.edges_of(A_DENIAL, "responds_to"))
-    assert set(edges) == {A_1, A_2, COMPLAINT_CHUNK_0}
-    assert _props(edges[A_1])["resolution_confidence"] == pytest.approx(0.80)
-    resolution = dict(graph.update_node_calls)[A_DENIAL]["responds_to_resolution"]
-    assert resolution["notes"] == ["chunk_scan_fallback"]
-    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 1
-    assert any(
-        "do not tile" in record.message or "tile" in record.message for record in caplog.records
-    )
-
-
-@pytest.mark.asyncio
-async def test_missing_document_location_falls_back_to_a_chunk_scan():
-    graph = _base_graph()
-    del graph.nodes[DOC_COMPLAINT]["raw_data_location"]
-
-    _, summary, mocks = await _run(graph)
-
-    edges = _by_target(graph.edges_of(A_DENIAL, "responds_to"))
-    # Only chunk 0 carries the "5." marker, and it holds no quoted assertion.
-    assert set(edges) == {COMPLAINT_CHUNK_0}
-    assert _props(edges[COMPLAINT_CHUNK_0])["resolution_confidence"] == pytest.approx(0.65)
-    assert summary["resolved_by_strategy"][STRATEGY_DOCUMENT_LOCATOR] == 1
-    mocks.read_processed_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_raw_location_fallback_reads_the_relational_row():
-    graph = _base_graph()
-    del graph.nodes[DOC_COMPLAINT]["raw_data_location"]
-
-    _, summary, _ = await _run(
-        graph, locations={DOC_COMPLAINT: COMPLAINT_LOCATION}, dataset_id=DATASET_ID
-    )
-
-    assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {
-        A_1,
-        A_2,
-        COMPLAINT_CHUNK_1,
-    }
-    assert summary["failed"] == 0
-
-
-@pytest.mark.asyncio
-async def test_reference_to_an_absent_document_stays_unresolved():
-    graph = _base_graph()
-    graph.nodes[A_DENIAL]["responds_to"] = "Subpoena ¶3"
-
-    _, summary, _ = await _run(graph)
-
-    assert graph.edges_of(A_DENIAL, "responds_to") == []
-    assert A_DENIAL not in dict(graph.update_node_calls)
-    assert summary["unresolved"] == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "error",
-    [
-        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
-        FileNotFoundError("the stored file moved"),
-    ],
-    ids=["binary-document", "missing-file"],
-)
-async def test_unreadable_text_degrades_to_the_chunk_scan(error):
-    """A PDF or a moved file still names a matched document: use its stored chunks."""
-    graph = _base_graph()
-    texts = dict(DEFAULT_TEXTS)
-    texts[COMPLAINT_LOCATION] = error
-
-    _, summary, mocks = await _run(graph, texts)
-
-    edges = _by_target(graph.edges_of(A_DENIAL, "responds_to"))
-    assert set(edges) == {COMPLAINT_CHUNK_0}
-    assert _props(edges[COMPLAINT_CHUNK_0])["resolution_strategy"] == STRATEGY_DOCUMENT_LOCATOR
-    assert _props(edges[COMPLAINT_CHUNK_0])["resolution_confidence"] == pytest.approx(0.65)
-    assert summary["failed"] == 0
-    # The doomed open is cached: one attempt per document, not one per reference.
-    assert mocks.read_processed_text.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_unexpected_read_error_fails_only_its_own_reference():
-    """An error the reader was not expected to raise still counts as a failure."""
-    graph = _base_graph()
-    texts = dict(DEFAULT_TEXTS)
-    texts[COMPLAINT_LOCATION] = RuntimeError("reader exploded")
-
-    _, summary, _ = await _run(graph, texts)
-
-    assert summary["failed"] == 1
-    assert graph.edges_of(A_DENIAL, "responds_to") == []
-    # The other references in the same pass still resolve.
-    assert graph.edges_of(A_ATTRIBUTED, "attributed_to")
-    assert graph.edges_of(A_STIPULATION, "responds_to")
-
-
-@pytest.mark.asyncio
-async def test_missing_locator_falls_back_to_the_document():
-    """The document is established even when its text does not mark the paragraph."""
-    graph = _base_graph()
-    graph.nodes[A_DENIAL]["responds_to"] = "Complaint ¶99"
-
-    _, summary, _ = await _run(graph)
-
-    edges = graph.edges_of(A_DENIAL, "responds_to")
-    assert [edge[1] for edge in edges] == [DOC_COMPLAINT]
-    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
-    assert _props(edges[0])["resolution_confidence"] == pytest.approx(0.60)
-
-    resolution = dict(graph.update_node_calls)[A_DENIAL]["responds_to_resolution"]
-    assert resolution["notes"] == ["locator_not_found"]
-    assert resolution["anchor_id"] == DOC_COMPLAINT
-    assert summary["unresolved"] == 0
-
-
-@pytest.mark.asyncio
-async def test_missing_locator_in_the_chunk_scan_falls_back_to_the_document():
-    graph = _base_graph()
-    del graph.nodes[DOC_COMPLAINT]["raw_data_location"]
-    graph.nodes[A_DENIAL]["responds_to"] = "Complaint ¶99"
-
-    _, summary, _ = await _run(graph)
-
-    edges = graph.edges_of(A_DENIAL, "responds_to")
-    assert [edge[1] for edge in edges] == [DOC_COMPLAINT]
-    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
-    resolution = dict(graph.update_node_calls)[A_DENIAL]["responds_to_resolution"]
-    assert resolution["notes"] == ["locator_not_found"]
-    assert summary["unresolved"] == 0
-
-
 @pytest.mark.asyncio
 async def test_node_patches_are_skipped_when_the_adapter_cannot_patch():
     graph = _base_graph()
     graph.update_node_supported = False
 
-    _, summary, _ = await _run(graph)
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
 
-    assert summary["edges_written"] == 5
+    assert summary["edges_written"] == 4
     assert summary["nodes_patched"] == 0
     assert summary["notes"] == ["node_patch_unsupported"]
 
 
 @pytest.mark.asyncio
 async def test_a_second_pass_rewrites_nothing_when_the_adapter_cannot_patch():
-    """Without update_node the field keeps its text, so only the edge pre-check can stop
-    a second pass from re-emitting (and resetting the properties of) the same edges."""
+    """Without update_node the field keeps its reference, so only the edge pre-check can
+    stop a second pass from re-emitting (and resetting the properties of) the same edges."""
     graph = _base_graph()
     graph.update_node_supported = False
 
-    _, first, _ = await _run(graph)
-    assert first["edges_written"] == 5
+    _, first, _ = await _run(graph, steps=list(DENIAL_TRACE))
+    assert first["edges_written"] == 4
     graph.add_edges_calls.clear()
 
-    _, summary, mocks = await _run(graph)
+    _, summary, mocks = await _run(graph, steps=list(DENIAL_TRACE))
 
     assert graph.add_edges_calls == []
     assert summary["edges_written"] == 0
     assert summary["nodes_patched"] == 0
     assert summary["resolved"] == 0
-    assert summary["already_resolved"] == 4
     mocks.index_graph_edges.assert_not_awaited()
 
 
@@ -736,14 +1201,14 @@ async def test_a_second_pass_rewrites_nothing_when_the_adapter_cannot_patch():
 async def test_edge_indexing_failure_still_patches_and_is_noted(caplog):
     graph = _base_graph()
 
-    with _patched(graph) as mocks:
+    with _patched(graph, steps=list(DENIAL_TRACE)) as mocks:
         mocks.index_graph_edges.side_effect = RuntimeError("embedding provider is down")
         with caplog.at_level("WARNING"):
             payload = await detect_dangling_references(None)
             summary = await apply_reference_resolutions(payload)
 
-    assert summary["edges_written"] == 5
-    assert summary["nodes_patched"] == 2
+    assert summary["edges_written"] == 4
+    assert summary["nodes_patched"] >= 1
     assert "edge_index_failed" in summary["notes"]
     assert any("index" in record.message.lower() for record in caplog.records)
 
@@ -760,37 +1225,55 @@ async def test_graph_view_falls_back_when_filtering_is_unsupported():
     graph.get_filtered_graph_data = _unsupported
     graph.get_graph_data = AsyncMock(return_value=(nodes, edges))
 
-    _, summary, _ = await _run(graph)
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
 
     graph.get_graph_data.assert_awaited()
-    assert summary["resolved"] == 3
+    assert summary["resolved"] == 2
 
 
 # --------------------------------------------------------------------------- #
-# entity lookup
+# error handling
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_ambiguous_entity_name_resolves_nothing():
+async def test_one_bad_reference_fails_only_itself():
     graph = _base_graph()
-    twin = _nid("entity-norman-fester-twin")
-    graph.nodes[twin] = {"id": twin, "type": "Entity", "name": "NORMAN FESTER"}
 
-    _, summary, _ = await _run(graph)
+    def _explode(*args, **kwargs):
+        raise RuntimeError("seed retrieval exploded")
 
-    assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
-    assert summary["ambiguous"] == 1
+    with _patched(graph, steps=[finish_on(MARK_STIPULATION_PASSAGE)]) as mocks:
+        with patch(f"{MODULE}.search_candidates", side_effect=_explode):
+            payload = await detect_dangling_references(None)
+            summary = await apply_reference_resolutions(payload)
+
+    assert summary["failed"] == 2
+    assert graph.edges_of(A_DENIAL, "responds_to") == []
+    # The reference the entity-name step answered still resolves.
+    assert graph.edges_of(A_ATTRIBUTED, "attributed_to")
+    assert mocks.llm.await_count == 0
 
 
 @pytest.mark.asyncio
-async def test_assertion_names_are_not_entity_name_targets():
-    """Assertions subclass Entity in the model but must never be entity_name targets."""
+async def test_a_missing_system_prompt_aborts_the_pass():
+    """A missing prompt is a deployment bug, not 300 silent abstentions (R11)."""
     graph = _base_graph()
-    graph.nodes[A_ATTRIBUTED]["attributed_to"] = "Clifton owns 10 Main Street"
 
-    _, summary, _ = await _run(graph)
+    with _patched(graph) as mocks:
+        with patch(f"{TRACER}.read_query_prompt", return_value=None):
+            with pytest.raises(FileNotFoundError):
+                await detect_dangling_references(None)
 
-    assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
-    assert summary["unresolved"] == 1
+    assert mocks.llm.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_blank_system_prompt_aborts_the_pass():
+    graph = _base_graph()
+
+    with _patched(graph):
+        with patch(f"{TRACER}.read_query_prompt", return_value="   "):
+            with pytest.raises(ValueError):
+                await detect_dangling_references(None)
 
 
 # --------------------------------------------------------------------------- #
@@ -823,7 +1306,9 @@ async def test_touched_scope_keeps_incoming_references_to_the_ingested_document(
         )
     ]
 
-    _, summary, _ = await _run(graph, scope="touched", data=touched)
+    _, summary, _ = await _run(
+        graph, scope="touched", allow_llm=True, data=touched, steps=list(DENIAL_TRACE)
+    )
 
     # The Answer's denial points at the freshly ingested Complaint -> resolved.
     assert set(_by_target(graph.edges_of(A_DENIAL, "responds_to"))) == {
@@ -836,118 +1321,6 @@ async def test_touched_scope_keeps_incoming_references_to_the_ingested_document(
     assert graph.edges_of(A_ATTRIBUTED, "attributed_to") == []
     assert summary["resolved"] == 1
     assert summary["scanned"] == 1
-
-
-# --------------------------------------------------------------------------- #
-# prose lookup (opt-in)
-# --------------------------------------------------------------------------- #
-DOC_APPRAISAL = _nid("doc-appraisal")
-APPRAISAL_CHUNKS = [_nid(f"appraisal-chunk-{index}") for index in range(3)]
-A_PROSE = _nid("assertion-prose")
-APPRAISAL_LOCATION = "file://appraisal.txt"
-APPRAISAL_CHUNK_TEXTS = [
-    "Comparable sales on Main Street were reviewed.\n",
-    "The culvert easement crossing the northern boundary reduces the culvert easement value.\n",
-    "The roof and siding were replaced in 2019.\n",
-]
-
-
-def _prose_graph():
-    nodes = [
-        _document(DOC_APPRAISAL, "Whitfield_Rebuttal_Appraisal", APPRAISAL_LOCATION),
-        _document(DOC_ANSWER, "Answer_Clifton", ANSWER_LOCATION),
-        _assertion(
-            A_PROSE,
-            "The easement reduces the value",
-            source_chunk_id=ANSWER_CHUNK_0,
-            attributed_to="Whitfield rebuttal appraisal discussion of the culvert easement",
-        ),
-    ]
-    edges = []
-    for index, text in enumerate(APPRAISAL_CHUNK_TEXTS):
-        node, edge = _chunk(APPRAISAL_CHUNKS[index], text, index, DOC_APPRAISAL)
-        nodes.append(node)
-        edges.append(edge)
-    node, edge = _chunk(ANSWER_CHUNK_0, ANSWER_CHUNK_0_TEXT, 0, DOC_ANSWER)
-    nodes.append(node)
-    edges.append(edge)
-    return FakeGraph(nodes, edges)
-
-
-@pytest.mark.asyncio
-async def test_prose_lookup_is_off_by_default():
-    graph = _prose_graph()
-    texts = {APPRAISAL_LOCATION: "".join(APPRAISAL_CHUNK_TEXTS), ANSWER_LOCATION: ANSWER_TEXT}
-
-    _, summary, _ = await _run(graph, texts)
-
-    edges = graph.edges_of(A_PROSE, "attributed_to")
-    assert [edge[1] for edge in edges] == [DOC_APPRAISAL]
-    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
-    assert summary["resolved_by_strategy"] == {STRATEGY_DOCUMENT_ONLY: 1}
-
-
-@pytest.mark.asyncio
-async def test_prose_lookup_anchors_on_the_best_scoring_chunk():
-    graph = _prose_graph()
-    texts = {APPRAISAL_LOCATION: "".join(APPRAISAL_CHUNK_TEXTS), ANSWER_LOCATION: ANSWER_TEXT}
-
-    _, summary, _ = await _run(graph, texts, enable_prose_lookup=True)
-
-    edges = graph.edges_of(A_PROSE, "attributed_to")
-    assert [edge[1] for edge in edges] == [APPRAISAL_CHUNKS[1]]
-    assert _props(edges[0])["resolution_strategy"] == STRATEGY_PROSE_LOOKUP
-    assert _props(edges[0])["resolution_confidence"] == pytest.approx(0.60)
-    patch_values = dict(graph.update_node_calls)[A_PROSE]
-    assert patch_values["attributed_to"] == APPRAISAL_CHUNKS[1]
-    assert summary["resolved_by_strategy"] == {STRATEGY_PROSE_LOOKUP: 1}
-
-
-@pytest.mark.asyncio
-async def test_prose_lookup_never_costs_a_resolution_the_floor_would_accept():
-    """Prose lookup is a fixed 0.60, so a higher floor must fall back, not give up."""
-    graph = _prose_graph()
-    texts = {APPRAISAL_LOCATION: "".join(APPRAISAL_CHUNK_TEXTS), ANSWER_LOCATION: ANSWER_TEXT}
-
-    _, summary, _ = await _run(graph, texts, enable_prose_lookup=True, confidence_floor=0.70)
-
-    edges = graph.edges_of(A_PROSE, "attributed_to")
-    assert [edge[1] for edge in edges] == [DOC_APPRAISAL]
-    assert _props(edges[0])["resolution_strategy"] == STRATEGY_DOCUMENT_ONLY
-    assert _props(edges[0])["resolution_confidence"] == pytest.approx(0.72)
-    assert summary["unresolved"] == 0
-
-
-@pytest.mark.asyncio
-async def test_prose_lookup_without_a_clear_winner_falls_back_to_the_document():
-    graph = _prose_graph()
-    # Every chunk now carries the query's distinctive tokens: no clear winner.
-    for chunk_id in APPRAISAL_CHUNKS:
-        graph.nodes[chunk_id]["text"] = "The culvert easement is discussed at length.\n"
-    texts = {
-        APPRAISAL_LOCATION: "".join(graph.nodes[chunk_id]["text"] for chunk_id in APPRAISAL_CHUNKS),
-        ANSWER_LOCATION: ANSWER_TEXT,
-    }
-
-    _, summary, _ = await _run(graph, texts, enable_prose_lookup=True)
-
-    edges = graph.edges_of(A_PROSE, "attributed_to")
-    assert [edge[1] for edge in edges] == [DOC_APPRAISAL]
-    assert summary["resolved_by_strategy"] == {STRATEGY_DOCUMENT_ONLY: 1}
-
-
-# --------------------------------------------------------------------------- #
-# confidence floor
-# --------------------------------------------------------------------------- #
-@pytest.mark.asyncio
-async def test_confidence_floor_rejects_weaker_resolutions():
-    graph = _base_graph()
-
-    _, summary, _ = await _run(graph, confidence_floor=0.95)
-
-    # Only the 1.0 entity-name resolution clears a 0.95 floor.
-    assert summary["resolved_by_strategy"] == {STRATEGY_ENTITY_NAME: 1}
-    assert summary["unresolved"] == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -964,7 +1337,7 @@ async def test_task_returns_its_input_and_writes_edges():
     graph = _base_graph()
     items = [SimpleNamespace(made_from=SimpleNamespace(id=COMPLAINT_CHUNK_1))]
 
-    with _patched(graph):
+    with _patched(graph, steps=list(DENIAL_TRACE)):
         result = await resolve_assertion_references(items)
 
     assert result is items
@@ -988,7 +1361,7 @@ async def test_all_scope_runs_at_most_once_per_pipeline_run():
     graph = _base_graph()
     ctx = PipelineContext(dataset=SimpleNamespace(id=DATASET_ID), pipeline_run_id="run-1")
 
-    with _patched(graph):
+    with _patched(graph, steps=list(DENIAL_TRACE)):
         await resolve_assertion_references("batch-1", ctx=ctx)
         await resolve_assertion_references("batch-2", ctx=ctx)
 
@@ -1008,7 +1381,7 @@ async def test_a_failed_pass_does_not_memoize_itself():
 
     assert "reference_resolution_ran" not in ctx.extras
 
-    with _patched(graph):
+    with _patched(graph, steps=list(DENIAL_TRACE)):
         await resolve_assertion_references("batch-2", ctx=ctx)
 
     assert ctx.extras["reference_resolution_ran"] is True
@@ -1035,11 +1408,11 @@ async def test_touched_scope_is_never_memoized():
 @pytest.mark.asyncio
 async def test_apply_tolerates_a_list_wrapped_payload():
     graph = _base_graph()
-    with _patched(graph):
+    with _patched(graph, steps=list(DENIAL_TRACE)):
         payload = await detect_dangling_references(None)
         summary = await apply_reference_resolutions([payload])
 
-    assert summary["edges_written"] == 5
+    assert summary["edges_written"] == 4
 
 
 @pytest.mark.asyncio
@@ -1060,7 +1433,42 @@ async def test_apply_lets_write_failures_surface():
         raise RuntimeError("write failed")
 
     graph.add_edges = _boom
-    with _patched(graph):
+    with _patched(graph, steps=list(DENIAL_TRACE)):
         payload = await detect_dangling_references(None)
         with pytest.raises(RuntimeError, match="write failed"):
             await apply_reference_resolutions(payload)
+
+
+# --------------------------------------------------------------------------- #
+# summary shape
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_the_summary_reports_every_budget_counter():
+    graph = _base_graph()
+    _, summary, _ = await _run(graph, steps=list(DENIAL_TRACE))
+
+    for key in (
+        "llm_calls",
+        "llm_calls_stated",
+        "llm_calls_inferred",
+        "llm_budget",
+        "traces_started",
+        "traces_finished",
+        "traces_iteration_capped",
+        "llm_skipped_empty_graph",
+        "llm_cached",
+        "llm_abstained",
+        "llm_below_threshold",
+        "llm_unknown_label",
+        "llm_failed",
+        "llm_tokens_in",
+        "llm_tokens_out",
+        "inferred_scanned",
+        "inferred_resolved",
+    ):
+        assert isinstance(summary[key], int), key
+    assert isinstance(summary["llm_budget_exhausted"], bool)
+    assert isinstance(summary["tool_calls_by_name"], dict)
+    assert summary["llm_calls_stated"] == summary["llm_calls"]
+    assert summary["llm_calls_inferred"] == 0
+    assert summary["traces_finished"] == 2

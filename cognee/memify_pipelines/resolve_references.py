@@ -1,10 +1,15 @@
 """Memify pipeline that resolves dangling assertion references across a whole dataset.
 
-The ingest tail (``resolve_assertion_references`` with ``scope="touched"``) can only see
-the documents already in the graph when a document is cognified, so a pair ingested
-concurrently leaves both references dangling. This pipeline is the sweep that closes them:
-one detect (extraction) phase plans every resolution in the graph, one apply (enrichment)
-phase writes the edges and node patches.
+The ingest tail (``resolve_assertion_references`` with ``scope="touched"``,
+``allow_llm=False``) answers only what it can answer for free: a field that already holds
+an id, and a reference that names one entity. Everything else -- including every forward
+reference, where the document being pointed at was not in the graph yet -- is left
+dangling for this pipeline. It is the sweep that closes them: one detect (extraction)
+phase seeds and traces every remaining reference, one apply (enrichment) phase writes the
+edges and node patches.
+
+This is where the LLM budget is spent (decision D1), so the pipeline is also where it is
+set: ``llm_max_calls`` caps the whole run and ``tracer_max_iter`` caps one reference.
 """
 
 from typing import Optional
@@ -18,7 +23,6 @@ from cognee.modules.users.methods import get_default_user
 from cognee.modules.users.models import User
 from cognee.shared.logging_utils import get_logger
 from cognee.tasks.graph.resolve_assertion_references import (
-    DEFAULT_CONFIDENCE_FLOOR,
     apply_reference_resolutions,
     detect_dangling_references,
 )
@@ -26,11 +30,30 @@ from cognee.tasks.graph.resolve_assertion_references import (
 logger = get_logger("resolve_references_pipeline")
 
 
+def _require_threshold(name: str, value: Optional[float]) -> None:
+    """A confidence threshold is a probability: ``(0, 1]``, and never a bool."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+        raise CogneeValidationError(message=f"{name} must be in the range (0, 1]", log=False)
+
+
+def _require_count(name: str, value: Optional[int], *, minimum: int) -> None:
+    """A call or step count is a plain int at or above ``minimum`` (``True`` is not one)."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise CogneeValidationError(message=f"{name} must be an integer >= {minimum}", log=False)
+
+
 async def resolve_references_pipeline(
     force: bool = False,
     dry_run: bool = False,
-    confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
-    enable_prose_lookup: bool = False,
+    llm_max_calls: Optional[int] = None,
+    tracer_max_iter: Optional[int] = None,
+    llm_confidence_threshold: Optional[float] = None,
+    infer_unstated: Optional[bool] = None,
+    infer_confidence_threshold: Optional[float] = None,
     user: Optional[User] = None,
     dataset: str = DEFAULT_DATASET_NAME,
     run_in_background: bool = False,
@@ -39,10 +62,20 @@ async def resolve_references_pipeline(
 
     Args:
         force: Re-resolve references a previous pass already answered, reading the
-            original wording back out of ``<field>_text``.
-        dry_run: Plan and log the resolutions without writing anything.
-        confidence_floor: Resolutions scoring below this are left dangling.
-        enable_prose_lookup: Opt into the BM25 chunk lookup for locator-less references.
+            structured reference (or the ``<field>_text``) it preserved.
+        dry_run: Plan and log the resolutions without writing anything. Traces still run,
+            so the plan shows what the agent would have linked.
+        llm_max_calls: Calls this run may spend across every reference it traces.
+            ``None`` takes ``REFERENCE_LLM_MAX_CALLS``; ``0`` seeds without spending.
+        tracer_max_iter: Steps one reference's trace may take. ``None`` takes
+            ``REFERENCE_TRACER_MAX_ITER``.
+        llm_confidence_threshold: Below this the agent's answer is recorded but never
+            linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
+        infer_unstated: Opt into inferring unstated denial/allegation links (decision
+            D2). Accepted and forwarded now; the inference pass itself lands with the
+            ``llm_inferred`` strategy, so today the option changes nothing.
+        infer_confidence_threshold: The higher bar an inferred link is held to. Same
+            status as ``infer_unstated``.
         user: Acting user; the default user is used when omitted.
         dataset: Dataset name (or id) whose graph to resolve.
         run_in_background: Forwarded to ``memify``.
@@ -50,14 +83,10 @@ async def resolve_references_pipeline(
     Returns:
         The ``memify`` pipeline result.
     """
-    if (
-        isinstance(confidence_floor, bool)
-        or not isinstance(confidence_floor, (int, float))
-        or not 0 < confidence_floor <= 1
-    ):
-        raise CogneeValidationError(
-            message="confidence_floor must be in the range (0, 1]", log=False
-        )
+    _require_count("llm_max_calls", llm_max_calls, minimum=0)
+    _require_count("tracer_max_iter", tracer_max_iter, minimum=1)
+    _require_threshold("llm_confidence_threshold", llm_confidence_threshold)
+    _require_threshold("infer_confidence_threshold", infer_confidence_threshold)
 
     if user is None:
         user = await get_default_user()
@@ -74,9 +103,13 @@ async def resolve_references_pipeline(
         Task(
             detect_dangling_references,
             scope="all",
+            allow_llm=True,
             force=force,
-            confidence_floor=confidence_floor,
-            enable_prose_lookup=enable_prose_lookup,
+            llm_max_calls=llm_max_calls,
+            tracer_max_iter=tracer_max_iter,
+            llm_confidence_threshold=llm_confidence_threshold,
+            infer_unstated=infer_unstated,
+            infer_confidence_threshold=infer_confidence_threshold,
         )
     ]
     enrichment_tasks = [Task(apply_reference_resolutions, dry_run=dry_run)]
@@ -95,9 +128,9 @@ async def resolve_references_pipeline(
     )
 
     logger.info(
-        "resolve_references pipeline finished (dataset=%s, dry_run=%s, floor=%.2f).",
+        "resolve_references pipeline finished (dataset=%s, dry_run=%s, llm_max_calls=%s).",
         target.id,
         dry_run,
-        confidence_floor,
+        "config default" if llm_max_calls is None else llm_max_calls,
     )
     return result

@@ -49,7 +49,11 @@ async def _run(**kwargs):
 @pytest.mark.asyncio
 async def test_pipeline_wires_both_phases_against_the_target_dataset():
     result, memify_mock, authorized_mock, user = await _run(
-        dataset="adams_family_legal", confidence_floor=0.75, enable_prose_lookup=True, force=True
+        dataset="adams_family_legal",
+        llm_max_calls=40,
+        tracer_max_iter=3,
+        llm_confidence_threshold=0.75,
+        force=True,
     )
 
     assert result == {"status": "ok"}
@@ -69,9 +73,24 @@ async def test_pipeline_wires_both_phases_against_the_target_dataset():
     detect_options = extraction_task.default_params["kwargs"]
     assert detect_options["scope"] == "all"
     assert detect_options["force"] is True
-    assert detect_options["confidence_floor"] == 0.75
-    assert detect_options["enable_prose_lookup"] is True
+    assert detect_options["llm_max_calls"] == 40
+    assert detect_options["tracer_max_iter"] == 3
+    assert detect_options["llm_confidence_threshold"] == 0.75
+    # The sweep is the pass, so the tracer runs here whatever the tail does.
+    assert detect_options["allow_llm"] is True
+    assert "confidence_floor" not in detect_options
+    assert "enable_prose_lookup" not in detect_options
     assert enrichment_task.default_params["kwargs"] == {"dry_run": False}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_defaults_the_budget_to_the_config():
+    _, memify_mock, _, _ = await _run()
+
+    detect_options = memify_mock.call_args.kwargs["extraction_tasks"][0].default_params["kwargs"]
+    assert detect_options["llm_max_calls"] is None
+    assert detect_options["tracer_max_iter"] is None
+    assert detect_options["llm_confidence_threshold"] is None
 
 
 @pytest.mark.asyncio
@@ -93,10 +112,41 @@ async def test_pipeline_does_not_enter_the_database_context():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad_floor", [0, -0.1, 1.5, "0.6", None, True])
-async def test_pipeline_rejects_invalid_confidence_floor(bad_floor):
+@pytest.mark.parametrize("bad_threshold", [0, -0.1, 1.5, "0.6", True])
+async def test_pipeline_rejects_an_invalid_confidence_threshold(bad_threshold):
     with pytest.raises(CogneeValidationError):
-        await resolve_references_pipeline(confidence_floor=bad_floor)
+        await resolve_references_pipeline(llm_confidence_threshold=bad_threshold)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_threshold", [0, -0.1, 1.5, "0.6", True])
+async def test_pipeline_rejects_an_invalid_infer_threshold(bad_threshold):
+    with pytest.raises(CogneeValidationError):
+        await resolve_references_pipeline(infer_confidence_threshold=bad_threshold)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_budget", [-1, 1.5, "10", True])
+async def test_pipeline_rejects_an_invalid_call_budget(bad_budget):
+    with pytest.raises(CogneeValidationError):
+        await resolve_references_pipeline(llm_max_calls=bad_budget)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_iterations", [0, -1, 1.5, "4", True])
+async def test_pipeline_rejects_an_invalid_iteration_cap(bad_iterations):
+    with pytest.raises(CogneeValidationError):
+        await resolve_references_pipeline(tracer_max_iter=bad_iterations)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_forwards_the_unstated_inference_options():
+    """Accepted and forwarded now; the pass itself lands in the unstated-inference task."""
+    _, memify_mock, _, _ = await _run(infer_unstated=True, infer_confidence_threshold=0.8)
+
+    detect_options = memify_mock.call_args.kwargs["extraction_tasks"][0].default_params["kwargs"]
+    assert detect_options["infer_unstated"] is True
+    assert detect_options["infer_confidence_threshold"] == 0.8
 
 
 @pytest.mark.asyncio

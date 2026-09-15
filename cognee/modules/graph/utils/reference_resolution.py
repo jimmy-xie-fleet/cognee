@@ -1,16 +1,23 @@
 """Deterministic helpers for resolving the free-text references an assertion carries.
 
-An extracted ``Assertion`` stores its reference the way the document wrote it --
-``responds_to="Complaint ¶5"``, ``attributed_to="Whitfield rebuttal appraisal"`` -- and no
-graph edge can follow a string. The helpers here turn that string into the pieces a
-resolver needs: a parsed reference, a score against every candidate document's name, the
-character span a locator points at inside a document, and the write shapes for the edge and
-the node patch that record the answer.
+An extracted ``Assertion`` records its reference as a structured hint
+(``responds_to_ref={"document_hint": "the Complaint", "locator_kind": "paragraph", ...}``)
+or, on older data, as the string the document wrote -- and no graph edge can follow
+either. The helpers here are what the resolver composes around that: reading the hint,
+rendering and fingerprinting it, turning a known ``(kind, value)`` pair into a locator,
+finding the character span that locator points at inside a document, and the write shapes
+for the edge and the node patch that record the answer.
+
+Deliberately **not** here (decision D5): any parsing of, or scoring against, the
+reference's own free text. Guessing which document "the Whitfield rebuttal appraisal"
+names is the agentic tracer's job, and no regex in this module ever runs over reference
+text -- the marker patterns below run over *document* text, with a number the extraction
+LLM or the agent supplied.
 
 Everything in this module is pure: no I/O, no database, no LLM, no clock, no randomness.
 The task that reads documents and writes edges composes these helpers; keeping the rules
-here is what makes the scoring, the span selection and the write shapes testable without a
-graph engine.
+here is what makes the span selection and the write shapes testable without a graph
+engine.
 """
 
 import hashlib
@@ -22,7 +29,6 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # The one normalizer identity and quote verification already use, so a reference, a span of
 # document text and a stored source quote are all folded exactly the same way.
 from cognee.modules.engine.models.Assertion import _normalize
-from cognee.modules.retrieval.utils.stop_words import DEFAULT_STOP_WORDS
 
 # --------------------------------------------------------------------------------------
 # Constants
@@ -32,140 +38,29 @@ from cognee.modules.retrieval.utils.stop_words import DEFAULT_STOP_WORDS
 # a consumer can tell an id that was already in the field from one this resolver derived.
 STRATEGY_EXISTING_ID = "existing_id"
 STRATEGY_ENTITY_NAME = "entity_name"
+# The agentic tracer's two answers: a reference the document actually made
+# (``llm_trace``) and a denial/admission link the document only implied
+# (``llm_inferred``, opt-in). Both are written by the resolver pass, never by the tail.
+STRATEGY_LLM_TRACE = "llm_trace"
+STRATEGY_LLM_INFERRED = "llm_inferred"
+
+# The deterministic name-scoring cascade this resolver used to run. Nothing produces
+# these any more (decision D5 deleted the parsing/scoring half), but edges and
+# ``<field>_resolution`` blobs written by earlier passes still carry them, so the names
+# stay readable and a consumer can tell a legacy answer from a traced one.
 STRATEGY_DOCUMENT_LOCATOR = "document_locator"
 STRATEGY_DOCUMENT_ONLY = "document_only"
 STRATEGY_PROSE_LOOKUP = "prose_lookup"
+LEGACY_STRATEGIES = frozenset(
+    {STRATEGY_DOCUMENT_LOCATOR, STRATEGY_DOCUMENT_ONLY, STRATEGY_PROSE_LOOKUP}
+)
 
 RESOLVED_BY = "reference_resolver"
 
-DEFAULT_MATCH_FLOOR = 0.6
-DEFAULT_MATCH_MARGIN = 0.15
 DEFAULT_MAX_SPAN = 4000
 
-# Every floor and margin comparison carries this tolerance: 0.60 assembled by float
-# addition is not always the 0.6 literal, and a reference must not fail its own floor over
-# the order the terms were summed in.
-_TOLERANCE = 1e-9
-
-# Scoring weights (see ``score_document`` for the formula they assemble).
-_TYPE_WORD_WEIGHT = 0.60
-_OTHER_TOKEN_WEIGHT = 0.30
-_IDENTIFIER_WEIGHT = 0.60
-_OWN_DOCUMENT_PENALTY = 0.30
-_EXACT_DATE_TERM = 0.40
-_DAY_MONTH_DATE_TERM = 0.30
-_YEAR_ONLY_DATE_TERM = 0.10
-_DATE_MISMATCH_TERM = -0.40
-
-_LEXICAL_FLOOR = 0.5
-_LEXICAL_EARLY_FRACTION = 0.2
-_LEXICAL_EARLY_BONUS = 0.5
-_MINIMUM_DISTINCTIVE_TOKEN_LENGTH = 4
-
-# Words that name a kind of document rather than a particular one. A reference and a
-# document name that share one are about the same kind of paper; the words are worthless
-# for telling two papers of that kind apart, so they never count as shared name tokens.
-DOCUMENT_TYPE_WORDS = frozenset(
-    {
-        "addendum",
-        "affidavit",
-        "agenda",
-        "agreement",
-        "amendment",
-        "answer",
-        "appendix",
-        "appraisal",
-        "assessment",
-        "attachment",
-        "brief",
-        "complaint",
-        "contract",
-        "declaration",
-        "deposition",
-        "email",
-        "exhibit",
-        "invoice",
-        "ledger",
-        "lease",
-        "letter",
-        "memo",
-        "memorandum",
-        "minutes",
-        "motion",
-        "notice",
-        "opinion",
-        "order",
-        "ordinance",
-        "petition",
-        "plan",
-        "policy",
-        "report",
-        "resolution",
-        "schedule",
-        "statement",
-        "stipulation",
-        "subpoena",
-        "summons",
-        "testimony",
-        "transcript",
-    }
-)
-
-# The generic prose that glues a reference together ("of the", "dated", "no.") plus the
-# case-caption abbreviations ("v", "vs", "re") no document is told apart by.
-REFERENCE_STOP_WORDS = frozenset(
-    DEFAULT_STOP_WORDS | {"of", "the", "dated", "no", "v", "vs", "re", "to", "in", "and"}
-)
-
-# Month names and the abbreviations legal documents actually use. No new dependency:
-# dateutil is not in the tree and a reference only ever carries these shapes.
-MONTHS = {
-    "january": 1,
-    "jan": 1,
-    "february": 2,
-    "feb": 2,
-    "march": 3,
-    "mar": 3,
-    "april": 4,
-    "apr": 4,
-    "may": 5,
-    "june": 6,
-    "jun": 6,
-    "july": 7,
-    "jul": 7,
-    "august": 8,
-    "aug": 8,
-    "september": 9,
-    "sept": 9,
-    "sep": 9,
-    "october": 10,
-    "oct": 10,
-    "november": 11,
-    "nov": 11,
-    "december": 12,
-    "dec": 12,
-}
-
-# How a document body writes a month. Listed rather than filtered out of MONTHS: "may" is
-# a full month name three letters long, so any rule that tells names from abbreviations by
-# length drops May and with it every May date a tiebreak could turn on.
-_FULL_MONTH_NAMES = (
-    "january",
-    "february",
-    "march",
-    "april",
-    "may",
-    "june",
-    "july",
-    "august",
-    "september",
-    "october",
-    "november",
-    "december",
-)
-
-_MONTH_NAME_BY_NUMBER = {MONTHS[name]: name for name in _FULL_MONTH_NAMES}
-
+# A locator number written out as a word ("Count Three"), so a marker can be matched
+# whichever way the two documents spelled it.
 NUMBER_WORDS = {
     "one": 1,
     "two": 2,
@@ -221,15 +116,6 @@ _DERIVED_EDGE_VERBS = {
 
 
 @dataclass(frozen=True)
-class DateHint:
-    """A date as written, with the parts the text actually stated."""
-
-    year: Optional[int] = None
-    month: Optional[int] = None
-    day: Optional[int] = None
-
-
-@dataclass(frozen=True)
 class Locator:
     """A position inside a document: ``number`` as written, ``ordinal`` when derivable."""
 
@@ -257,43 +143,20 @@ class LocatorPattern:
 
 
 @dataclass(frozen=True)
-class ParsedReference:
-    """Everything a reference string says, split into the parts matching uses."""
-
-    raw: str
-    normalized: str
-    hint: str
-    hint_type_words: frozenset = frozenset()
-    hint_other_tokens: frozenset = frozenset()
-    hint_dates: Tuple[DateHint, ...] = ()
-    hint_identifiers: frozenset = frozenset()
-    locator: Optional[Locator] = None
-
-
-@dataclass(frozen=True)
-class DocumentProfile:
-    """A candidate document's name, split the same way a reference's hint is."""
-
-    document_id: str
-    name: str
-    type_words: frozenset = frozenset()
-    other_tokens: frozenset = frozenset()
-    dates: Tuple[DateHint, ...] = ()
-    identifiers: frozenset = frozenset()
-
-
-@dataclass(frozen=True)
-class DocumentMatch:
-    """The document a reference names, and the candidates it was not separated from."""
-
-    document_id: str
-    score: float
-    ambiguous_with: Tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class Resolution:
-    """What one reference on one assertion resolved to, and how."""
+    """What one reference on one assertion resolved to, and how.
+
+    The last five fields carry the agentic tracer's answer. ``patch_mode`` decides what
+    the write phase may put back on the node: ``"full"`` points the field at the anchor
+    (the shape every resolved reference has always written), ``"resolution_only"`` writes
+    only the ``<field>_resolution`` audit blob (an abstention must never overwrite a field
+    the extraction left as the document wrote it), and ``"none"`` patches nothing at all
+    (``existing_id`` already holds an id; ``entity_name`` must keep its name).
+
+    ``trace`` is a tuple of plain dicts rather than tracer objects on purpose: this module
+    is pure and knows nothing about the task layer's ``TraceRecord``. It makes a
+    ``Resolution`` unhashable, which is fine -- nothing puts one in a set.
+    """
 
     assertion_id: str
     field: str
@@ -306,6 +169,11 @@ class Resolution:
     target_type: Optional[str] = None
     document_id: Optional[str] = None
     notes: Tuple[str, ...] = ()
+    reason: Optional[str] = None
+    fingerprint: Optional[str] = None
+    patch_mode: str = "full"
+    iterations: int = 0
+    trace: Tuple[Dict[str, Any], ...] = ()
 
 
 # --------------------------------------------------------------------------------------
@@ -378,9 +246,6 @@ _PATTERN_BY_KIND = {pattern.kind: pattern for pattern in LOCATOR_PATTERNS}
 # --------------------------------------------------------------------------------------
 
 _WHITESPACE_RE = re.compile(r"\s+")
-_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9']+")
-_POSSESSIVE_RE = re.compile(r"'s?$")
-_EXTENSION_RE = re.compile(r"\.[A-Za-z]{2,5}$")
 _LINE_RE = re.compile(r"^[^\n]*$", re.M)
 
 
@@ -397,111 +262,9 @@ def normalize_reference_text(value: Optional[str]) -> str:
     return _normalize(value)
 
 
-def _tokens(text: str) -> List[str]:
-    """Name tokens of already normalized text, with possessives stripped."""
-    tokens = []
-    for raw_token in _TOKEN_SPLIT_RE.split(text):
-        token = _POSSESSIVE_RE.sub("", raw_token).replace("'", "")
-        if token:
-            tokens.append(token)
-    return tokens
-
-
-def _mask(text: str, spans: Iterable[Tuple[int, int]]) -> str:
-    """Blank out spans, keeping every other character at its offset."""
-    characters = list(text)
-    for start, end in spans:
-        for index in range(start, min(end, len(characters))):
-            characters[index] = " "
-    return "".join(characters)
-
-
 # --------------------------------------------------------------------------------------
-# Dates and numerals
+# Numerals
 # --------------------------------------------------------------------------------------
-
-_MONTH_ALTERNATION = "|".join(sorted(MONTHS, key=len, reverse=True))
-_DATE_SEPARATOR = r"[\s,._-]+"
-
-_ISO_DATE_RE = re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b")
-_SLASH_DATE_RE = re.compile(r"\b(?P<month>\d{1,2})/(?P<day>\d{1,2})/(?P<year>\d{2,4})\b")
-_MONTH_NAME_DATE_RE = re.compile(
-    rf"\b(?P<month>{_MONTH_ALTERNATION})\.?{_DATE_SEPARATOR}(?P<day>\d{{1,2}})(?:st|nd|rd|th)?"
-    rf"(?:{_DATE_SEPARATOR}(?P<year>\d{{4}}))?\b",
-    re.IGNORECASE,
-)
-_BARE_YEAR_RE = re.compile(r"\b(?P<year>1[89]\d{2}|20\d{2})\b")
-
-# A document or resolution number ("2026-118", "24-cv-0117"), which is never a date. The
-# lookahead keeps an ISO date out: its parts would otherwise read as an identifier.
-_IDENTIFIER_RE = re.compile(r"\b(?!\d{4}-\d{2}-\d{2}\b)\d{2,4}-[a-z0-9]+(?:-[a-z0-9]+)*\b", re.I)
-
-
-def _expand_two_digit_year(year: int) -> int:
-    if year >= 100:
-        return year
-    return 2000 + year if year < 70 else 1900 + year
-
-
-def _date_hint(month: Optional[int], day: Optional[int], year: Optional[int]) -> Optional[DateHint]:
-    """A hint for the parts given, or None when the numbers cannot be a date."""
-    if month is not None and not 1 <= month <= 12:
-        return None
-    if day is not None and not 1 <= day <= 31:
-        return None
-    return DateHint(year=year, month=month, day=day)
-
-
-def _overlaps(spans: Sequence[Tuple[int, int]], start: int, end: int) -> bool:
-    return any(start < taken_end and taken_start < end for taken_start, taken_end in spans)
-
-
-def _date_matches(text: str) -> List[Tuple[DateHint, int, int]]:
-    """Every date in the text as (hint, start, end), in reading order, without overlaps.
-
-    Forms are tried most specific first, and an identifier-shaped number is masked before
-    bare years are looked for: "Resolution No. 2026-118" states no year.
-    """
-    matches: List[Tuple[DateHint, int, int]] = []
-    taken: List[Tuple[int, int]] = []
-
-    for pattern in (_ISO_DATE_RE, _SLASH_DATE_RE, _MONTH_NAME_DATE_RE):
-        for match in pattern.finditer(text):
-            if _overlaps(taken, match.start(), match.end()):
-                continue
-
-            groups = match.groupdict()
-            month_text = groups.get("month") or ""
-            month = MONTHS.get(month_text.casefold(), None)
-            if month is None and month_text.isdigit():
-                month = int(month_text)
-
-            year_text = groups.get("year")
-            hint = _date_hint(
-                month,
-                int(groups["day"]) if groups.get("day") else None,
-                _expand_two_digit_year(int(year_text)) if year_text else None,
-            )
-            if hint is None:
-                continue
-
-            matches.append((hint, match.start(), match.end()))
-            taken.append(match.span())
-
-    masked = _mask(text, taken)
-    masked = _mask(masked, [match.span() for match in _IDENTIFIER_RE.finditer(masked)])
-    for match in _BARE_YEAR_RE.finditer(masked):
-        matches.append((DateHint(year=int(match.group("year"))), match.start(), match.end()))
-
-    return sorted(matches, key=lambda match: match[1])
-
-
-def parse_dates(text: Optional[str]) -> Tuple[DateHint, ...]:
-    """Every date a string states, in reading order. Never raises."""
-    if not isinstance(text, str) or not text:
-        return ()
-
-    return tuple(hint for hint, _, _ in _date_matches(text.replace("_", " ")))
 
 
 def roman_to_int(value: Optional[str]) -> Optional[int]:
@@ -569,323 +332,6 @@ def _ordinal_for_kind(kind: str, number: str) -> Optional[int]:
     if len(folded) == 1 and folded.isalpha():
         return ord(folded) - ord("a") + 1
     return None
-
-
-# --------------------------------------------------------------------------------------
-# Parsing references and document names
-# --------------------------------------------------------------------------------------
-
-
-def _extract_hints(text: str, *, mask_bare_years: bool):
-    """Split naming text into (type words, other tokens, dates, identifiers).
-
-    Dates and identifiers are taken out before the rest is tokenized, so a name never
-    leaves "september", "22" and "2026" behind as three tokens to match on.
-
-    A bare year is masked for a document name but kept as a token for a reference: it is
-    the reference's own denominator, and "the 2014 master plan" says the year is part of
-    how the reader named the document, while the document's own name already contributes
-    it as a date.
-    """
-    prepared = text.replace("_", " ")
-
-    matches = _date_matches(prepared)
-    dates = tuple(hint for hint, _, _ in matches)
-    if mask_bare_years:
-        date_spans = [(start, end) for _, start, end in matches]
-    else:
-        date_spans = [(start, end) for hint, start, end in matches if hint.month is not None]
-
-    masked = _mask(prepared, date_spans)
-    identifier_matches = list(_IDENTIFIER_RE.finditer(masked))
-    identifiers = frozenset(match.group().casefold() for match in identifier_matches)
-    masked = _mask(masked, [match.span() for match in identifier_matches])
-
-    tokens = _tokens(masked)
-    type_words = frozenset(token for token in tokens if token in DOCUMENT_TYPE_WORDS)
-    other_tokens = frozenset(
-        token
-        for token in tokens
-        if token not in DOCUMENT_TYPE_WORDS and token not in REFERENCE_STOP_WORDS
-    )
-    return type_words, other_tokens, dates, identifiers
-
-
-def _find_locator(normalized: str):
-    """The earliest locator the reference states, as (pattern, match)."""
-    best = None
-    for table_index, pattern in enumerate(LOCATOR_PATTERNS):
-        for reference_pattern in pattern.reference:
-            match = reference_pattern.search(normalized)
-            if match is None:
-                continue
-
-            key = (match.start(), table_index)
-            if best is None or key < best[0]:
-                best = (key, pattern, match)
-    if best is None:
-        return None, None
-    return best[1], best[2]
-
-
-def parse_reference(text: Optional[str]) -> ParsedReference:
-    """Split a reference string into the locator it points at and the document it names.
-
-    Never raises: a string stating neither ("unit c") parses into a hint with no locator,
-    which resolves to nothing rather than to an error.
-    """
-    raw = text if isinstance(text, str) else ""
-    normalized = normalize_reference_text(raw)
-    if not normalized:
-        return ParsedReference(raw=raw, normalized="", hint="")
-
-    pattern, match = _find_locator(normalized)
-    locator = None
-    hint = normalized
-    if match is not None:
-        locator = Locator(
-            kind=pattern.kind,
-            number=match.group(1).strip(),
-            ordinal=_ordinal_for_kind(pattern.kind, match.group(1)),
-        )
-        if not pattern.document_level:
-            # The locator points inside a document, so it says nothing about which
-            # document; a document level locator IS the document's number and stays.
-            hint = f"{normalized[: match.start()]} {normalized[match.end() :]}"
-
-    hint = _WHITESPACE_RE.sub(" ", hint).strip()
-    type_words, other_tokens, dates, identifiers = _extract_hints(hint, mask_bare_years=False)
-    return ParsedReference(
-        raw=raw,
-        normalized=normalized,
-        hint=hint,
-        hint_type_words=type_words,
-        hint_other_tokens=other_tokens,
-        hint_dates=dates,
-        hint_identifiers=identifiers,
-        locator=locator,
-    )
-
-
-def document_profile(document_id: str, name: str) -> DocumentProfile:
-    """Split a document's name into the parts a reference is scored against.
-
-    ``name`` is the stored document name, which is a file stem more often than a title
-    ("Deposition_Hartwell_September_22_2026"); a trailing file extension is dropped.
-    """
-    stem = _EXTENSION_RE.sub("", name if isinstance(name, str) else "")
-    type_words, other_tokens, dates, identifiers = _extract_hints(
-        normalize_reference_text(stem), mask_bare_years=True
-    )
-    return DocumentProfile(
-        document_id=document_id,
-        name=name,
-        type_words=type_words,
-        other_tokens=other_tokens,
-        dates=dates,
-        identifiers=identifiers,
-    )
-
-
-# --------------------------------------------------------------------------------------
-# Matching a reference to a document
-# --------------------------------------------------------------------------------------
-
-
-def _date_pair_term(reference_date: DateHint, document_date: DateHint) -> float:
-    """How much one pair of dates argues for or against the same document."""
-    if reference_date.year is None or document_date.year is None:
-        # Nothing to contradict: a year-less reference matching the day and month is a
-        # good sign, anything else is simply no signal.
-        if (
-            reference_date.month is not None
-            and reference_date.month == document_date.month
-            and reference_date.day is not None
-            and reference_date.day == document_date.day
-        ):
-            return _DAY_MONTH_DATE_TERM
-        return 0.0
-
-    if reference_date.year != document_date.year:
-        return _DATE_MISMATCH_TERM
-
-    for reference_part, document_part in (
-        (reference_date.month, document_date.month),
-        (reference_date.day, document_date.day),
-    ):
-        if reference_part is None or document_part is None:
-            # One side only ever stated the year, and the years agree.
-            return _YEAR_ONLY_DATE_TERM
-        if reference_part != document_part:
-            # Both sides state a full date and they are different days: two documents of
-            # the same kind from the same year are told apart exactly here.
-            return _DATE_MISMATCH_TERM
-
-    return _EXACT_DATE_TERM
-
-
-def _date_term(reference_dates: Sequence[DateHint], document_dates: Sequence[DateHint]) -> float:
-    if not reference_dates or not document_dates:
-        return 0.0
-
-    return max(
-        _date_pair_term(reference_date, document_date)
-        for reference_date in reference_dates
-        for document_date in document_dates
-    )
-
-
-def score_document(
-    reference: ParsedReference,
-    profile: DocumentProfile,
-    *,
-    own_document_id: Optional[str] = None,
-) -> float:
-    """How strongly a reference names one document, in [0, 1].
-
-    0.60 for agreeing on the kind of document, up to 0.30 for the share of the
-    reference's own distinctive tokens the name carries, 0.60 for a shared identifier,
-    the date term, and -0.30 when the candidate is the document the assertion itself came
-    from -- a reference in a document almost never points back at that same document.
-    """
-    score = 0.0
-    if reference.hint_type_words & profile.type_words:
-        score += _TYPE_WORD_WEIGHT
-
-    shared_tokens = len(reference.hint_other_tokens & profile.other_tokens)
-    score += _OTHER_TOKEN_WEIGHT * shared_tokens / max(1, len(reference.hint_other_tokens))
-
-    if reference.hint_identifiers & profile.identifiers:
-        score += _IDENTIFIER_WEIGHT
-
-    score += _date_term(reference.hint_dates, profile.dates)
-
-    if own_document_id is not None and profile.document_id == own_document_id:
-        score -= _OWN_DOCUMENT_PENALTY
-
-    return max(0.0, min(1.0, score))
-
-
-def match_document(
-    reference: ParsedReference,
-    profiles: Iterable[DocumentProfile],
-    *,
-    own_document_id: Optional[str],
-    floor: float = DEFAULT_MATCH_FLOOR,
-    margin: float = DEFAULT_MATCH_MARGIN,
-) -> Optional[DocumentMatch]:
-    """The document a reference names, or None when nothing scores high enough.
-
-    A match whose ``ambiguous_with`` is not empty was not separated from those candidates
-    by ``margin``; the caller decides between them with ``lexical_tiebreak`` over their
-    text. Only candidates inside the margin are listed -- the rest are already decided,
-    and the caller would otherwise read their documents for nothing.
-    """
-    scored = [
-        (profile.document_id, score_document(reference, profile, own_document_id=own_document_id))
-        for profile in profiles
-    ]
-    candidates = sorted(
-        (candidate for candidate in scored if candidate[1] >= floor - _TOLERANCE),
-        key=lambda candidate: (-candidate[1], candidate[0]),
-    )
-    if not candidates:
-        return None
-
-    document_id, score = candidates[0]
-    ambiguous_with = tuple(
-        other_id
-        for other_id, other_score in candidates[1:]
-        if score - other_score < margin - _TOLERANCE
-    )
-    return DocumentMatch(document_id=document_id, score=score, ambiguous_with=ambiguous_with)
-
-
-def _date_renderings(date: DateHint) -> Tuple[str, ...]:
-    """The ways a document's body writes a date the reference stated.
-
-    A year-only hint renders nothing: the year is already one of the reference's tokens,
-    and scoring it twice would let a single number carry a tiebreak.
-    """
-    if date.month is None or date.day is None:
-        return ()
-
-    month_name = _MONTH_NAME_BY_NUMBER.get(date.month)
-    if month_name is None:
-        return ()
-
-    if date.year is None:
-        return (f"{month_name} {date.day}",)
-
-    return (
-        f"{month_name} {date.day}, {date.year}",
-        f"{month_name} {date.day} {date.year}",
-        f"{date.year}-{date.month:02d}-{date.day:02d}",
-        f"{date.month}/{date.day}/{date.year}",
-    )
-
-
-def _lexical_terms(reference: ParsedReference) -> Tuple[Tuple[str, ...], ...]:
-    """One entry per distinctive thing the reference says, with its surface forms."""
-    terms = [
-        (token,)
-        for token in sorted(reference.hint_other_tokens)
-        if len(token) >= _MINIMUM_DISTINCTIVE_TOKEN_LENGTH
-    ]
-    for date in reference.hint_dates:
-        renderings = _date_renderings(date)
-        if renderings:
-            terms.append(renderings)
-    return tuple(terms)
-
-
-def _lexical_score(terms: Sequence[Tuple[str, ...]], text: str) -> float:
-    folded = normalize_reference_text(text)
-    if not folded or not terms:
-        return 0.0
-
-    early_limit = max(1, int(len(folded) * _LEXICAL_EARLY_FRACTION))
-    found = 0.0
-    for surfaces in terms:
-        positions = [position for position in (folded.find(s) for s in surfaces) if position >= 0]
-        if not positions:
-            continue
-
-        found += 1.0
-        if min(positions) < early_limit:
-            # Documents name themselves at the top, so an early hit is worth more than a
-            # passing mention halfway down a deposition.
-            found += _LEXICAL_EARLY_BONUS
-
-    return found / ((1.0 + _LEXICAL_EARLY_BONUS) * len(terms))
-
-
-def lexical_tiebreak(
-    reference: ParsedReference,
-    texts_by_document_id: Mapping[str, str],
-) -> Optional[Tuple[str, float]]:
-    """Decide between candidate documents on their text, or None when it cannot.
-
-    Returns ``(document_id, score)`` only for a winner that both clears the floor and is
-    strictly ahead of the runner up; a tie stays unresolved rather than guessing.
-    """
-    terms = _lexical_terms(reference)
-    if not terms or not texts_by_document_id:
-        return None
-
-    scored = sorted(
-        (
-            (document_id, _lexical_score(terms, text))
-            for document_id, text in texts_by_document_id.items()
-        ),
-        key=lambda candidate: (-candidate[1], candidate[0]),
-    )
-    document_id, score = scored[0]
-    runner_up = scored[1][1] if len(scored) > 1 else 0.0
-    if score < _LEXICAL_FLOOR - _TOLERANCE or score - runner_up <= _TOLERANCE:
-        return None
-
-    return document_id, score
 
 
 # --------------------------------------------------------------------------------------
@@ -1159,42 +605,56 @@ def build_reference_edge(
     source_props: Mapping[str, Any],
     target_label: Optional[str],
     target_type: str,
+    extra_properties: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[str, str, str, Dict[str, Any]]:
     """One ``(source, target, relationship, properties)`` edge for a resolved reference.
 
     The raw shape ``add_edges`` takes: the caller still runs it through
     ``ensure_default_edge_properties``, which fills the storage defaults and leaves the
     stance-preserving ``edge_text`` set here alone.
+
+    ``extra_properties`` is merged **last**, so a caller can both add properties (an
+    inferred link's ``inferred``/``feedback_weight`` marks) and deliberately override one
+    of the shape's own.
     """
-    return (
-        resolution.assertion_id,
-        target_id,
-        resolution.field,
-        {
-            "relationship_name": resolution.field,
-            "source_node_id": resolution.assertion_id,
-            "target_node_id": target_id,
-            "reference_text": resolution.reference_text,
-            "resolution_strategy": resolution.strategy,
-            "resolution_confidence": resolution.confidence,
-            "resolved_target_type": target_type,
-            "resolved_by": RESOLVED_BY,
-            "edge_text": stance_edge_text(source_props, resolution.field, target_label),
-        },
-    )
+    properties = {
+        "relationship_name": resolution.field,
+        "source_node_id": resolution.assertion_id,
+        "target_node_id": target_id,
+        "reference_text": resolution.reference_text,
+        "resolution_strategy": resolution.strategy,
+        "resolution_confidence": resolution.confidence,
+        "resolved_target_type": target_type,
+        "resolved_by": RESOLVED_BY,
+        "edge_text": stance_edge_text(source_props, resolution.field, target_label),
+    }
+    if extra_properties:
+        properties.update(extra_properties)
+
+    return (resolution.assertion_id, target_id, resolution.field, properties)
 
 
-def build_node_patch(resolution: Resolution, current_props: Mapping[str, Any]) -> Dict[str, Any]:
+def build_node_patch(
+    resolution: Resolution,
+    current_props: Mapping[str, Any],
+    *,
+    mode: str = "full",
+) -> Dict[str, Any]:
     """The properties to write back on the assertion the reference was read from.
 
-    The field itself becomes the anchor's id, so the graph can follow it, and the text it
-    used to hold moves to ``<field>_text`` -- but only if nothing is there yet, because a
-    re-resolution must not overwrite the original wording with its own idea of it.
+    In ``"full"`` mode the field itself becomes the anchor's id, so the graph can follow
+    it, and the text it used to hold moves to ``<field>_text`` -- but only if nothing is
+    there yet, because a re-resolution must not overwrite the original wording with its
+    own idea of it.
+
+    In ``"resolution_only"`` mode only the ``<field>_resolution`` blob is written. That is
+    what an abstention, a below-threshold answer and an inferred link all need: writing
+    the field would either null out wording the extraction recorded (``anchor_id`` is
+    ``None`` for every negative record) or make the graph claim the document stated a
+    reference it never wrote.
     """
     field = resolution.field
-    return {
-        field: resolution.anchor_id,
-        f"{field}_text": current_props.get(f"{field}_text") or resolution.reference_text,
+    audit = {
         f"{field}_resolution": {
             "strategy": resolution.strategy,
             "confidence": resolution.confidence,
@@ -1203,7 +663,19 @@ def build_node_patch(resolution: Resolution, current_props: Mapping[str, Any]) -
             "anchor_id": resolution.anchor_id,
             "document_id": resolution.document_id,
             "notes": list(resolution.notes),
-        },
+            "reason": resolution.reason,
+            "fingerprint": resolution.fingerprint,
+            "iterations": resolution.iterations,
+            "trace": [dict(record) for record in resolution.trace],
+        }
+    }
+    if mode == "resolution_only":
+        return audit
+
+    return {
+        field: resolution.anchor_id,
+        f"{field}_text": current_props.get(f"{field}_text") or resolution.reference_text,
+        **audit,
     }
 
 

@@ -145,13 +145,10 @@ async def run(args: argparse.Namespace) -> int:
         graph_engine = await get_graph_engine()
         view = await _load_graph_view(graph_engine)
         texts = DocumentTextCache(view, dataset_id=dataset.id)
-        resolutions, summary = await plan_resolutions(
-            view,
-            texts,
-            force=args.force,
-            confidence_floor=args.confidence_floor,
-            enable_prose_lookup=args.enable_prose_lookup,
-        )
+        # Budget arguments left at None so the CognifyConfig defaults apply
+        # (REFERENCE_LLM_MAX_CALLS / REFERENCE_TRACER_MAX_ITER /
+        # REFERENCE_LLM_CONFIDENCE_THRESHOLD).
+        resolutions, summary = await plan_resolutions(view, texts, force=args.force)
 
         print(f"dataset={args.dataset} id={dataset.id}")
         print(
@@ -212,17 +209,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-resolve references a previous pass already answered.",
-    )
-    parser.add_argument(
-        "--confidence-floor",
-        type=float,
-        default=0.6,
-        help="Resolutions below this confidence are left dangling (default: 0.6).",
-    )
-    parser.add_argument(
-        "--enable-prose-lookup",
-        action="store_true",
-        help="Opt into the BM25 chunk lookup for locator-less references.",
     )
     return parser
 

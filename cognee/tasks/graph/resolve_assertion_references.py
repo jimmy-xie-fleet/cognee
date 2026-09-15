@@ -1,11 +1,29 @@
-"""Turn the free-text references an ``Assertion`` carries into graph edges.
+"""Turn the references an ``Assertion`` carries into graph edges.
 
-Extraction stores a reference the way the document wrote it --
-``responds_to="Complaint ¶5"``, ``attributed_to="Whitfield rebuttal appraisal"`` -- and no
-graph edge can follow a string. This task reads the graph, reads the referenced documents,
-runs the deterministic cascade in
-:mod:`cognee.modules.graph.utils.reference_resolution` over every dangling reference, and
-writes the answer as edges (plus a node patch recording how it was reached).
+Extraction records a reference as a structured hint --
+``responds_to_ref={"document_hint": "the Complaint", "locator_kind": "paragraph",
+"locator_value": "5", "basis": "positional"}`` -- or, on older data, as the string the
+document wrote, and no graph edge can follow either. This task reads the graph, runs the
+cascade below over every dangling reference, and writes the answer as edges plus a node
+patch recording how it was reached.
+
+The cascade, per ``(assertion, field)``:
+
+1. ``existing_id`` -- the field already holds a node id (or a stale one to re-resolve).
+2. ``entity_name`` -- the reference names one ``Entity`` ("Norman Fester"). Gated: a hint
+   that points *inside* a document ("the Complaint ¶5") never reaches this step, so it
+   cannot be linked to a ``Complaint`` stub entity.
+3. the **attempt guard** -- a previous pass already traced this exact reference.
+4. the **seed** -- one vector + BM25 retrieval per reference, no LLM, producing a
+   labelled shortlist.
+5. the **agentic tracer** (decision D3) -- a bounded loop of ``TracerStep``s over five
+   read-only tools, ending in a finish naming one label, or an abstention.
+
+Steps 4 and 5 run **only** in the ``improve()``/memify pass (decision D1). The ingest tail
+runs with ``allow_llm=False`` and stops after step 2: a forward reference stays dangling,
+with nothing written, until the pass picks it up. Nothing here parses or scores the
+reference's own text (decision D5) -- deciding which document "the Whitfield rebuttal
+appraisal" names is the agent's job, not a regex's.
 
 Three entry points over one pass:
 
@@ -15,42 +33,39 @@ Three entry points over one pass:
 * :func:`detect_dangling_references` / :func:`apply_reference_resolutions` -- the two-phase
   memify pair behind the ``resolve_references`` pipeline. The apply phase deliberately does
   **not** swallow write failures: a memify run that could not write is a visible error.
-
-Matching is deterministic: no LLM, no vector search. The only reads are one filtered
-graph query per invocation and the stored text of the documents actually referenced,
-cached for the length of the pass. Writing is a normal edge write, so it embeds the new
-edge texts through ``index_graph_edges`` like every other edge cognee stores.
 """
 
-from dataclasses import dataclass, replace
+import json
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import NAMESPACE_URL, uuid5
 
 from cognee.infrastructure.databases.graph import get_graph_engine
 from cognee.infrastructure.databases.provenance.write_context import graph_provenance_write_kwargs
+from cognee.modules.cognify.config import get_cognify_config
 from cognee.modules.engine.utils.generate_node_name import generate_node_name
 from cognee.modules.graph.utils.prepare_edges_for_storage import ensure_default_edge_properties
+from cognee.modules.graph.utils.reference_candidates import (
+    Candidate,
+    LabelRegistry,
+    candidate_set_key,
+)
 from cognee.modules.graph.utils.reference_resolution import (
-    LOCATOR_PATTERNS,
-    STRATEGY_DOCUMENT_LOCATOR,
-    STRATEGY_DOCUMENT_ONLY,
     STRATEGY_ENTITY_NAME,
     STRATEGY_EXISTING_ID,
-    STRATEGY_PROSE_LOOKUP,
-    ParsedReference,
+    STRATEGY_LLM_INFERRED,
+    STRATEGY_LLM_TRACE,
+    ReferenceHint,
     Resolution,
-    anchor_chunk_index,
+    build_locator,
     build_node_patch,
     build_reference_edge,
-    chunks_overlapping,
-    document_profile,
-    find_locator_span,
-    lexical_tiebreak,
-    match_document,
-    parse_reference,
-    scan_chunks_for_marker,
+    parse_reference_hint,
+    reference_display_text,
+    reference_fingerprint,
     select_anchored_assertions,
 )
+from cognee.modules.operations.usage_accumulator import operation_usage_scope
 from cognee.modules.pipelines.tasks.task import task_summary
 from cognee.shared.logging_utils import get_logger
 from cognee.tasks.graph.reference_graph_view import (
@@ -66,6 +81,20 @@ from cognee.tasks.graph.reference_graph_view import (
     _read_processed_text,
     _text_of,
 )
+from cognee.tasks.graph.reference_retrieval import (
+    DOCUMENT_K,
+    SEED_LIMIT,
+    LexicalIndex,
+    search_candidates,
+)
+from cognee.tasks.graph.reference_tracer import (
+    TRACE_SYSTEM_PROMPT,
+    CallBudget,
+    TraceRecord,
+    TracerFinish,
+    trace_reference,
+)
+from cognee.tasks.graph.reference_tracer_tools import _locate, build_tracer_tools
 from cognee.tasks.storage.index_graph_edges import index_graph_edges
 
 logger = get_logger("resolve_assertion_references")
@@ -91,7 +120,9 @@ __all__ = [
 ]
 
 # The reference fields an assertion carries. ``asserted_by`` is deliberately absent: it is
-# an identity field, and rewriting it would give the assertion a new node id.
+# an identity field, and rewriting it would give the assertion a new node id. The
+# structured hint lives beside each of these as ``<field>_ref`` and is never itself a
+# reference field.
 REFERENCE_FIELDS = ("responds_to", "attributed_to")
 
 # Owner of record for edges written outside an ingestion, where no ``Data`` row is in
@@ -99,57 +130,67 @@ REFERENCE_FIELDS = ("responds_to", "attributed_to")
 # document's forget(); in memify this sentinel keeps the write attributable.
 REFERENCE_RESOLUTION_DATA_ID = uuid5(NAMESPACE_URL, "cognee:reference-resolution")
 
-DEFAULT_CONFIDENCE_FLOOR = 0.6
-
 # Notes a resolution carries out of the cascade, into ``<field>_resolution`` and the
 # write summary.
 # The field held an id no longer in the graph -- a forgotten or re-chunked target -- so
-# the reference was re-resolved from the ``<field>_text`` the resolver preserved.
+# the reference was re-resolved from the wording the resolver preserved.
 NOTE_STALE_ID = "stale_id"
 # Every edge this resolution would write is already in the graph; only the node patch is
 # still outstanding, so the write phase patches and skips the edge upsert.
 NOTE_EDGES_EXIST = "edges_exist"
 # ``add_edges`` succeeded but ``index_graph_edges`` did not.
 NOTE_EDGE_INDEX_FAILED = "edge_index_failed"
+# The agent looked and found nothing it would link.
+NOTE_LLM_ABSTAINED = "llm_abstained"
+# The agent named a candidate but was less sure than the configured threshold.
+NOTE_LLM_BELOW_THRESHOLD = "llm_below_threshold"
+# The agent used every step it had without deciding.
+NOTE_LLM_ITERATION_CAP = "llm_iteration_cap"
+# Summary-level notes: the pass ran out of calls, or gave up after repeated gateway
+# failures. Neither writes a per-reference record -- the reference never got its trace,
+# so the next pass has to be free to try it again.
+NOTE_LLM_BUDGET_EXHAUSTED = "llm_budget_exhausted"
+NOTE_LLM_CIRCUIT_BROKEN = "llm_circuit_broken"
+# Reserved for the unstated denial/allegation inference (decision D2, Task 10).
+NOTE_UNSTATED = "unstated"
 
-# A located paragraph whose quoted assertions were found is the strongest answer short of
-# an id; each fallback the span had to fall back on costs a tenth.
-_LOCATOR_CONFIDENCE = 0.90
-_LOCATOR_NOTE_PENALTY = 0.10
-_PENALIZED_NOTES = frozenset({"ambiguous_marker", "chunk_scan_fallback"})
-# No quote landed inside the span: the passage is right, the statement is a guess, so the
-# edge points at the chunk and says so. Flat, not penalized further -- below the floor it
-# would leave a matched paragraph unrecorded.
-_CHUNK_ONLY_CONFIDENCE = 0.65
-_PROSE_CONFIDENCE = 0.60
 _RESOLVED_ID_CONFIDENCE = 1.0
 
-# A lexical tiebreak decided between documents on their text, which is weaker evidence
-# than the name itself; it lifts the score without ever reaching certainty.
-_TIEBREAK_LEXICAL_WEIGHT = 0.2
-_TIEBREAK_MAX_CONFIDENCE = 0.95
+# What the write phase may put back on the node. ``_PATCHED_STRATEGIES`` is only the
+# default table: every resolution carries its own ``patch_mode``, and the negative records
+# (abstain, below threshold, iteration cap) override it to ``resolution_only`` so a field
+# the extraction left as the document wrote it is never nulled out.
+PATCH_NONE = "none"
+PATCH_FULL = "full"
+PATCH_RESOLUTION_ONLY = "resolution_only"
+_PATCHED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE})
 
-# Prose lookup only runs on a reference that reads like a description rather than a name,
-# and only accepts a chunk that is clearly ahead of the runner up.
-_PROSE_MINIMUM_TOKENS = 3
-_PROSE_TOP_K = 2
-_PROSE_MINIMUM_SCORE = 1.0
-_PROSE_MARGIN_RATIO = 1.5
+# The strategies whose stored ``<field>_resolution`` the attempt guard recognises.
+_TRACED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE, STRATEGY_LLM_INFERRED})
 
-# The strategies that move an id into the field. ``existing_id`` already has one there and
-# ``entity_name`` must keep the name (the ingest contract reads it back).
-_PATCHED_STRATEGIES = frozenset(
-    {STRATEGY_DOCUMENT_LOCATOR, STRATEGY_DOCUMENT_ONLY, STRATEGY_PROSE_LOOKUP}
-)
+# After this many consecutive traces whose only outcome was a failed gateway call, stop
+# starting new ones: the provider is down and the rest of the budget would be burnt on
+# the same error.
+CIRCUIT_BREAKER_FAILURES = 3
 
-# A "Resolution No. 2026-118" locator names a whole document rather than a place inside
-# one, so it marks nothing in any text and resolves document-wide.
-_DOCUMENT_LEVEL_LOCATOR_KINDS = frozenset(
-    pattern.kind for pattern in LOCATOR_PATTERNS if pattern.document_level
-)
+# The seed is two retrievals merged: the general shortlist, plus a handful of documents so
+# a document label exists at step 1 (the agent cannot name a document it has not been
+# shown, and an opaque filename never surfaces through the name channel alone).
+SEED_DOCUMENT_LIMIT = DOCUMENT_K
 
-# Floors assembled by float addition are not always the literal they are compared against.
-_TOLERANCE = 1e-9
+# How much of a tool call's arguments the stored trace keeps.
+TRACE_ARGS_MAX_CHARS = 300
+
+# Budget order (§5): the statements most likely to carry a real reference first, then the
+# references whose hint is most specific, then the strongest seed.
+_PRIORITY_STATEMENT_TYPES = frozenset({"denial", "admission"})
+_BASIS_ORDER = {"cited": 0, "positional": 1, "described": 2}
+_UNKNOWN_BASIS_ORDER = 3
+_LEGACY_BASIS_ORDER = 4
+
+# Locator kinds that name a place inside a document rather than the document itself; only
+# these can narrow a picked passage to the statements quoted in a located span.
+_NARROWING_TOOL = "locate_paragraph"
 
 
 @dataclass(frozen=True)
@@ -160,6 +201,43 @@ class _Outcome:
     resolution: Optional[Resolution] = None
     # The field held an id that is no longer a node, whatever the cascade made of it.
     stale: bool = False
+
+
+@dataclass
+class _Pending:
+    """A reference the cheap steps could not answer, waiting for a seed and a trace."""
+
+    assertion_id: str
+    field_name: str
+    props: dict
+    hint: ReferenceHint
+    reference_text: str
+    fingerprint: str
+    entry_notes: Tuple[str, ...]
+    stale: bool
+    own_chunk_touched: bool
+    own_document_id: Optional[str] = None
+    exclude_ids: Set[str] = field(default_factory=set)
+    seed: List[Candidate] = field(default_factory=list)
+    registry: Optional[LabelRegistry] = None
+
+
+@dataclass
+class _TraceAnswer:
+    """One trace's answer, already resolved off the registry that issued its labels.
+
+    Cached per ``(fingerprint, candidate set)``: the node id and the narrowed targets are
+    resolved here rather than stored as labels, because a second reference with the same
+    seed *set* gets its own registry, and a label only means something inside the trace
+    that issued it.
+    """
+
+    finish: TracerFinish
+    trace: Tuple[Dict[str, Any], ...]
+    iterations: int
+    node_id: Optional[str]
+    targets: Tuple[str, ...]
+    capped: bool
 
 
 def _item_value(item: Any, name: str) -> Any:
@@ -215,12 +293,43 @@ def _empty_summary() -> Dict[str, Any]:
         "nodes_patched": 0,
         "dry_run": False,
         "notes": [],
+        # What the pass spent, and on what.
+        "llm_calls": 0,
+        "llm_calls_stated": 0,
+        "llm_calls_inferred": 0,
+        "llm_budget": 0,
+        "llm_budget_exhausted": False,
+        "traces_started": 0,
+        "traces_finished": 0,
+        "traces_iteration_capped": 0,
+        "llm_skipped_empty_graph": 0,
+        "llm_cached": 0,
+        "llm_abstained": 0,
+        "llm_below_threshold": 0,
+        "llm_unknown_label": 0,
+        "llm_failed": 0,
+        "tool_calls_by_name": {},
+        "llm_tokens_in": 0,
+        "llm_tokens_out": 0,
+        # Decision D2's unstated-inference pass (Task 10); always reported, so a consumer
+        # never has to branch on whether the feature was compiled in.
+        "inferred_scanned": 0,
+        "inferred_resolved": 0,
     }
 
 
 def _count(counter: Dict[str, int], key: Optional[str]) -> None:
     if key:
         counter[key] = counter.get(key, 0) + 1
+
+
+def _bump(counters: Dict[str, Any], key: str, amount: int = 1) -> None:
+    counters[key] = counters.get(key, 0) + amount
+
+
+def _default_patch_mode(strategy: str) -> str:
+    """What a strategy patches unless the resolution says otherwise."""
+    return PATCH_FULL if strategy in _PATCHED_STRATEGIES else PATCH_NONE
 
 
 def _resolve_existing_id(
@@ -230,7 +339,7 @@ def _resolve_existing_id(
     reference_text: str,
     view: GraphView,
 ) -> _Outcome:
-    """Step a1: the field already holds an id -- make sure the edge exists.
+    """Step 1: the field already holds an id -- make sure the edge exists.
 
     ``reference_text`` is the wording the document used when a previous pass preserved
     it, so the edge quotes the reference rather than the id that replaced it.
@@ -257,8 +366,30 @@ def _resolve_existing_id(
             anchor_type=props.get("type"),
             target_ids=(value,),
             target_type=props.get("type"),
+            patch_mode=_default_patch_mode(STRATEGY_EXISTING_ID),
         ),
     )
+
+
+def _entity_name_text(hint: Optional[ReferenceHint], legacy_value: Optional[str]) -> Optional[str]:
+    """The text the entity-name step may look up, or None when this hint is not a name.
+
+    A reference that points inside a document is not a name: "the Complaint ¶5" names a
+    paragraph of a pleading, and linking it to a ``Complaint`` stub entity would be a
+    confident wrong answer. So a hint only reaches this step when it carries no locator
+    and was not made positionally. ``attributed_to`` hints ("Norman Fester") pass.
+    """
+    if legacy_value:
+        return legacy_value
+    if hint is None:
+        return None
+
+    locator_kind = (hint.locator_kind or "").strip().casefold()
+    if locator_kind and locator_kind != "none":
+        return None
+    if (hint.basis or "").strip().casefold() == "positional":
+        return None
+    return hint.document_hint or None
 
 
 def _resolve_entity_name(
@@ -267,7 +398,7 @@ def _resolve_entity_name(
     reference_text: str,
     view: GraphView,
 ) -> Optional[_Outcome]:
-    """Step a2: the reference names one entity. None means "not an entity name"."""
+    """Step 2: the reference names one entity. None means "not an entity name"."""
     entity_ids = view.entity_ids_by_name.get(generate_node_name(reference_text))
     if not entity_ids:
         return None
@@ -292,205 +423,32 @@ def _resolve_entity_name(
             field=field_name,
             reference_text=reference_text,
             strategy=STRATEGY_ENTITY_NAME,
-            # The field keeps the name: the ingest contract reads it back as written.
+            # The field keeps the reference: the ingest contract reads it back as written.
             confidence=_RESOLVED_ID_CONFIDENCE,
             anchor_id=entity_id,
             anchor_type="Entity",
             target_ids=(entity_id,),
             target_type="Entity",
+            patch_mode=_default_patch_mode(STRATEGY_ENTITY_NAME),
         ),
     )
 
 
-async def _match_reference_document(
-    reference: ParsedReference,
-    view: GraphView,
-    texts: DocumentTextCache,
-    profiles: Sequence[Any],
-    own_document_id: Optional[str],
-) -> Tuple[Optional[str], float, Tuple[str, ...], bool]:
-    """``(document id, confidence base, notes, ambiguous)`` for the named document."""
-    match = match_document(reference, profiles, own_document_id=own_document_id)
-    if match is None:
-        return None, 0.0, (), False
+def _prior_attempt(props: dict, field_name: str) -> Optional[dict]:
+    """A previous traced attempt stored on the node, whatever the backend shaped it as.
 
-    if not match.ambiguous_with:
-        return match.document_id, match.score, (), False
-
-    candidates = {}
-    for candidate_id in (match.document_id, *match.ambiguous_with):
-        text = await texts.text(candidate_id)
-        if text:
-            candidates[candidate_id] = text
-
-    tiebreak = lexical_tiebreak(reference, candidates)
-    if tiebreak is None:
-        return None, 0.0, (), True
-
-    document_id, lexical_score = tiebreak
-    score = min(_TIEBREAK_MAX_CONFIDENCE, match.score + _TIEBREAK_LEXICAL_WEIGHT * lexical_score)
-    return document_id, score, ("lexical_tiebreak",), False
-
-
-async def _locate_span(
-    reference: ParsedReference,
-    document_id: str,
-    view: GraphView,
-    texts: DocumentTextCache,
-) -> Optional[Tuple[str, List[dict], dict, Tuple[str, ...]]]:
-    """``(span text, overlapping chunks, anchor chunk, notes)`` for a locator."""
-    chunks = view.chunks_by_document.get(document_id) or []
-    if not chunks:
-        return None
-
-    offsets = await texts.offsets(document_id, chunks)
-    if offsets is not None:
-        text = await texts.text(document_id)
-        span = find_locator_span(text or "", reference.locator)
-        if span is None:
+    Ladybug stores node properties as one JSON blob and Neo4j stores a dict property as a
+    JSON string, so a reader has to accept both.
+    """
+    raw = props.get(f"{field_name}_resolution")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
             return None
-
-        start, end, notes = span
-        overlapping = [chunks[index] for index in chunks_overlapping(offsets, (start, end))]
-        anchor_index = anchor_chunk_index(offsets, (start, end))
-        anchor = chunks[anchor_index] if anchor_index is not None else None
-        if anchor is None:
-            return None
-        return text[start:end], overlapping, anchor, notes
-
-    # No usable offsets (no stored text, or chunks that do not tile it): find the marker
-    # inside one chunk instead. Markers split across a chunk boundary are missed.
-    scanned = scan_chunks_for_marker(
-        [chunk.get("text") or "" for chunk in chunks], reference.locator
-    )
-    if scanned is None:
+    if not isinstance(raw, dict):
         return None
-
-    index, (start, end) = scanned
-    anchor = chunks[index]
-    return (anchor.get("text") or "")[start:end], [anchor], anchor, ("chunk_scan_fallback",)
-
-
-def _resolve_document_locator(
-    assertion_id: str,
-    field_name: str,
-    reference_text: str,
-    document_id: str,
-    span_text: str,
-    overlapping: Sequence[dict],
-    anchor: dict,
-    notes: Tuple[str, ...],
-    view: GraphView,
-) -> _Outcome:
-    """Step b: a located paragraph, narrowed to the statements quoted inside it."""
-    chunk_ids = {str(chunk["id"]) for chunk in overlapping}
-    candidates = [
-        (candidate_id, props.get("source_quote"))
-        for candidate_id, props in view.assertions.items()
-        if candidate_id != assertion_id and str(props.get("source_chunk_id") or "") in chunk_ids
-    ]
-    hits = select_anchored_assertions(span_text, candidates)
-    anchor_id = str(anchor["id"])
-
-    if hits:
-        penalty = _LOCATOR_NOTE_PENALTY * len(set(notes) & _PENALIZED_NOTES)
-        return _Outcome(
-            "resolved",
-            Resolution(
-                assertion_id=assertion_id,
-                field=field_name,
-                reference_text=reference_text,
-                strategy=STRATEGY_DOCUMENT_LOCATOR,
-                confidence=_LOCATOR_CONFIDENCE - penalty,
-                # One quoted statement is the reference; several are a passage, so the
-                # field points at the chunk and the edges reach every statement.
-                anchor_id=hits[0] if len(hits) == 1 else anchor_id,
-                anchor_type="Assertion" if len(hits) == 1 else "DocumentChunk",
-                target_ids=tuple(hits),
-                target_type="Assertion",
-                document_id=document_id,
-                notes=notes,
-            ),
-        )
-
-    # Nothing quoted the located passage. Linking every assertion in the chunk would
-    # invent references; the chunk edge still lets a consumer reach the passage.
-    return _Outcome(
-        "resolved",
-        Resolution(
-            assertion_id=assertion_id,
-            field=field_name,
-            reference_text=reference_text,
-            strategy=STRATEGY_DOCUMENT_LOCATOR,
-            confidence=_CHUNK_ONLY_CONFIDENCE,
-            anchor_id=anchor_id,
-            anchor_type="DocumentChunk",
-            target_type="DocumentChunk",
-            document_id=document_id,
-            notes=notes,
-        ),
-    )
-
-
-async def _prose_chunk(reference_text: str, chunks: Sequence[dict]) -> Optional[str]:
-    """The one chunk a prose reference clearly describes, or None."""
-    from cognee.modules.retrieval.bm25_retriever import BM25ChunksRetriever
-
-    retriever = BM25ChunksRetriever(top_k=_PROSE_TOP_K, with_scores=True)
-    for chunk in chunks:
-        text = chunk.get("text")
-        if not text:
-            continue
-        tokens = retriever.tokenizer(text)
-        if tokens:
-            retriever.chunks[str(chunk["id"])] = tokens
-            retriever.payloads[str(chunk["id"])] = chunk
-    if not retriever.chunks:
-        return None
-
-    # Seeded straight from the view: the corpus is one document's chunks, so the parent's
-    # graph-wide initialize() would be both a wasted query and the wrong corpus.
-    retriever._initialized = True
-    retriever._build_corpus_stats()
-    retriever._stats_built = True
-
-    scored = await retriever.get_retrieved_objects(reference_text)
-    if not scored:
-        return None
-
-    top_payload, top_score = scored[0]
-    runner_up = scored[1][1] if len(scored) > 1 else 0.0
-    if top_score < _PROSE_MINIMUM_SCORE or top_score < _PROSE_MARGIN_RATIO * runner_up:
-        return None
-
-    return str(top_payload["id"])
-
-
-def _resolve_document_only(
-    assertion_id: str,
-    field_name: str,
-    reference_text: str,
-    document_id: str,
-    score: float,
-    notes: Tuple[str, ...],
-    view: GraphView,
-) -> _Outcome:
-    """Step c: the reference names a document and nothing inside it."""
-    return _Outcome(
-        "resolved",
-        Resolution(
-            assertion_id=assertion_id,
-            field=field_name,
-            reference_text=reference_text,
-            strategy=STRATEGY_DOCUMENT_ONLY,
-            confidence=score,
-            anchor_id=document_id,
-            anchor_type=view.documents.get(document_id, {}).get("type"),
-            target_type=view.documents.get(document_id, {}).get("type"),
-            document_id=document_id,
-            notes=notes,
-        ),
-    )
+    return raw if raw.get("strategy") in _TRACED_STRATEGIES else None
 
 
 def _finalize(outcome: _Outcome, entry_notes: Tuple[str, ...], stale: bool) -> _Outcome:
@@ -505,17 +463,17 @@ def _finalize(outcome: _Outcome, entry_notes: Tuple[str, ...], stale: bool) -> _
 
 
 def _edge_precheck(outcome: _Outcome, props: dict, view: GraphView) -> _Outcome:
-    """Drop a document-strategy resolution whose edges the graph already holds.
+    """Drop a patching resolution whose edges the graph already holds.
 
     Without this a backend that cannot patch nodes re-plans the same resolution on every
     pass, and ``add_edges`` (a MERGE that overwrites the stored properties) would reset a
     ``feedback_weight`` ``improve()`` had tuned. Two cases once every edge is present:
     the field holds the anchor id, so there is nothing left to do (``already_resolved``);
-    or it still holds its text, so the patch is the only outstanding half of the write
-    and the resolution goes out marked :data:`NOTE_EDGES_EXIST`.
+    or it still holds its reference, so the patch is the only outstanding half of the
+    write and the resolution goes out marked :data:`NOTE_EDGES_EXIST`.
     """
     resolution = outcome.resolution
-    if resolution is None or resolution.strategy not in _PATCHED_STRATEGIES:
+    if resolution is None or resolution.patch_mode == PATCH_NONE:
         return outcome
 
     targets = set(resolution.target_ids)
@@ -532,146 +490,402 @@ def _edge_precheck(outcome: _Outcome, props: dict, view: GraphView) -> _Outcome:
     return _Outcome("resolved", replace(resolution, notes=resolution.notes + (NOTE_EDGES_EXIST,)))
 
 
-async def _resolve_reference(
+def _cheap_cascade(
     assertion_id: str,
     field_name: str,
     props: dict,
     view: GraphView,
-    texts: DocumentTextCache,
-    profiles: Sequence[Any],
     *,
     force: bool,
-    confidence_floor: float,
-    enable_prose_lookup: bool,
-) -> _Outcome:
-    """Run the cascade for one ``(assertion, field)`` pair."""
+    own_chunk_touched: bool,
+) -> Tuple[Optional[_Outcome], Optional[_Pending]]:
+    """Steps 1-3 for one ``(assertion, field)``: no retrieval, no LLM, no document reads.
+
+    Returns ``(outcome, None)`` when the reference is answered (or there is nothing to
+    answer), or ``(None, pending)`` when it needs the seed and the tracer.
+    """
     value = _text_of(props.get(field_name))
-    reference_text = value
+    stored_text = _text_of(props.get(f"{field_name}_text"))
+    holds_id = _as_uuid(value) is not None
+
+    # The planner fix (§4): build the hint FIRST and only give up when there is neither a
+    # structured reference nor anything in the field. Reading the field alone silently
+    # skipped every reference extraction recorded structurally.
+    hint = parse_reference_hint(
+        props.get(f"{field_name}_ref"),
+        fallback_text=stored_text if holds_id else (value or stored_text),
+    )
+    if hint is None and not value:
+        return None, None
+
+    reference_text = reference_display_text(hint) or stored_text or value or ""
     entry_notes: Tuple[str, ...] = ()
     stale = False
 
-    if _as_uuid(value) is not None:
-        original = _text_of(props.get(f"{field_name}_text"))
+    if holds_id:
         # An id that is no longer a node -- the target was forgotten, or an amended
         # document was re-chunked under new ids -- has gone dark, so it re-resolves from
-        # the preserved wording without waiting for force. With no wording preserved
-        # there is nothing to re-resolve from, and the reference stays unresolved.
+        # the preserved reference without waiting for force. With nothing preserved there
+        # is nothing to re-resolve from, and the reference stays unresolved.
         stale = value not in view.node_ids
-        if original and (force or stale):
-            # Re-resolve from the wording the document used, not from the id a previous
-            # pass wrote into the field.
-            reference_text = original
+        if hint is not None and (force or stale):
             entry_notes = (NOTE_STALE_ID,) if stale else ()
         else:
-            return _finalize(
-                _resolve_existing_id(assertion_id, field_name, value, original or value, view),
-                entry_notes,
-                stale,
-            )
-
-    entity_outcome = _resolve_entity_name(assertion_id, field_name, reference_text, view)
-    if entity_outcome is not None:
-        return _finalize(entity_outcome, entry_notes, stale)
-
-    reference = parse_reference(reference_text)
-    own_document_id = view.document_by_chunk.get(str(props.get("source_chunk_id") or ""))
-    document_id, score, notes, ambiguous = await _match_reference_document(
-        reference, view, texts, profiles, own_document_id
-    )
-    if ambiguous:
-        return _finalize(_Outcome("ambiguous"), entry_notes, stale)
-    if document_id is None:
-        return _finalize(_Outcome("unresolved"), entry_notes, stale)
-
-    outcome = None
-    locator = reference.locator
-    if locator is not None and locator.kind not in _DOCUMENT_LEVEL_LOCATOR_KINDS:
-        located = await _locate_span(reference, document_id, view, texts)
-        if located is None:
-            # The document is established even though its text does not mark the place
-            # the reference names -- a renumbered pleading, an unreadable original. The
-            # document edge records what was established, the note records what was not,
-            # and <field>_text keeps the wording so force=True can try again later.
-            logger.debug(
-                "Locator %s not found in document %s for %s.%s.",
-                locator,
-                document_id,
-                assertion_id,
-                field_name,
-            )
-            notes = notes + ("locator_not_found",)
-        else:
-            span_text, overlapping, anchor, span_notes = located
-            outcome = _resolve_document_locator(
-                assertion_id,
-                field_name,
-                reference_text,
-                document_id,
-                span_text,
-                overlapping,
-                anchor,
-                notes + span_notes,
-                view,
-            )
-
-    # Prose lookup narrows a locator-less reference to one chunk, but only ever at a
-    # fixed 0.60. A floor above that rules the answer out before it is computed, so the
-    # opt-in can never cost a resolution the document match alone would have supplied.
-    if (
-        outcome is None
-        and enable_prose_lookup
-        and locator is None
-        and _PROSE_CONFIDENCE >= confidence_floor - _TOLERANCE
-        and len(reference.hint_other_tokens) >= _PROSE_MINIMUM_TOKENS
-    ):
-        chunk_id = await _prose_chunk(
-            reference_text, view.chunks_by_document.get(document_id) or []
-        )
-        if chunk_id is not None:
-            outcome = _Outcome(
-                "resolved",
-                Resolution(
-                    assertion_id=assertion_id,
-                    field=field_name,
-                    reference_text=reference_text,
-                    strategy=STRATEGY_PROSE_LOOKUP,
-                    confidence=_PROSE_CONFIDENCE,
-                    anchor_id=chunk_id,
-                    anchor_type="DocumentChunk",
-                    target_type="DocumentChunk",
-                    document_id=document_id,
-                    notes=notes,
+            return (
+                _finalize(
+                    _resolve_existing_id(
+                        assertion_id, field_name, value, stored_text or value, view
+                    ),
+                    entry_notes,
+                    stale,
                 ),
+                None,
             )
 
-    if outcome is None:
-        outcome = _resolve_document_only(
-            assertion_id, field_name, reference_text, document_id, score, notes, view
-        )
+    entity_text = _entity_name_text(hint, None if holds_id else value)
+    if entity_text:
+        entity_outcome = _resolve_entity_name(assertion_id, field_name, entity_text, view)
+        if entity_outcome is not None:
+            return _finalize(entity_outcome, entry_notes, stale), None
 
-    if (
-        outcome.resolution is not None
-        and outcome.resolution.confidence < confidence_floor - _TOLERANCE
-    ):
+    if hint is None:
+        return _finalize(_Outcome("unresolved"), entry_notes, stale), None
+
+    fingerprint = reference_fingerprint(hint, field_name)
+    # A stale id means the stored answer is dark, so a matching fingerprint must not stop
+    # the re-resolution -- the guard is for references that already had their chance.
+    if not force and not stale:
+        prior = _prior_attempt(props, field_name)
+        if prior is not None and prior.get("fingerprint") == fingerprint:
+            return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
+
+    return None, _Pending(
+        assertion_id=assertion_id,
+        field_name=field_name,
+        props=props,
+        hint=hint,
+        reference_text=reference_text,
+        fingerprint=fingerprint,
+        entry_notes=entry_notes,
+        stale=stale,
+        own_chunk_touched=own_chunk_touched,
+    )
+
+
+def _combine_seed(*candidate_lists: Sequence[Candidate]) -> List[Candidate]:
+    """Union several shortlists by node id, keeping the best score and the first label."""
+    best: Dict[str, Candidate] = {}
+    for candidates in candidate_lists:
+        for candidate in candidates:
+            current = best.get(candidate.node_id)
+            if current is None or candidate.score > current.score:
+                best[candidate.node_id] = candidate
+    return sorted(best.values(), key=lambda candidate: (-candidate.score, candidate.node_id))
+
+
+async def _seed_reference(entry: _Pending, view: GraphView, lexical: LexicalIndex, engine) -> None:
+    """Fill ``entry.seed``/``entry.registry``: one retrieval pair, no LLM (§6, R10).
+
+    Two calls on one registry: the general shortlist over the reference's wording *and*
+    the statement's own proposition, plus a documents-only shortlist over the wording, so
+    the agent has a document label to hand ``open_document``/``locate_paragraph`` on its
+    very first step.
+    """
+    registry = LabelRegistry()
+    own_chunk_id = str(entry.props.get("source_chunk_id") or "")
+    own_document_id = view.document_by_chunk.get(own_chunk_id)
+    exclude_ids = {entry.assertion_id}
+    if own_chunk_id:
+        exclude_ids.add(own_chunk_id)
+    # A denial realleging its own pleading's paragraphs is real, so the referring
+    # document is weighed down rather than filtered out; an attribution names whoever it
+    # names, so it is not weighed at all.
+    penalize_own_document = entry.field_name == "responds_to"
+
+    entry.registry = registry
+    entry.own_document_id = own_document_id
+    entry.exclude_ids = exclude_ids
+
+    proposition = _text_of(entry.props.get("name")) or ""
+    queries = [text for text in (entry.reference_text, proposition) if text]
+    if not queries:
+        return
+
+    scoped = {
+        "view": view,
+        "lexical": lexical,
+        "registry": registry,
+        "exclude_ids": exclude_ids,
+        "own_document_id": own_document_id,
+        "penalize_own_document": penalize_own_document,
+        "vector_engine": engine,
+    }
+    general = await search_candidates(queries=queries, kind="any", limit=SEED_LIMIT, **scoped)
+    documents = await search_candidates(
+        queries=queries[:1], kind="documents", limit=SEED_DOCUMENT_LIMIT, **scoped
+    )
+    entry.seed = _combine_seed(general, documents)
+
+
+def _order_key(entry: _Pending) -> tuple:
+    """Budget order (§5): denials and admissions, then the most specific hints, then seed."""
+    statement_type = (_text_of(entry.props.get("statement_type")) or "").strip().casefold()
+    priority = 0 if statement_type in _PRIORITY_STATEMENT_TYPES else 1
+
+    if entry.hint.legacy_text:
+        basis = _LEGACY_BASIS_ORDER
+    else:
+        basis = _BASIS_ORDER.get((entry.hint.basis or "").strip().casefold(), _UNKNOWN_BASIS_ORDER)
+
+    top_score = max((candidate.score for candidate in entry.seed), default=0.0)
+    return (priority, basis, -top_score, entry.assertion_id, entry.field_name)
+
+
+def _trace_dicts(records: Sequence[TraceRecord]) -> Tuple[Dict[str, Any], ...]:
+    """The stored, audit-sized form of a trace's tool steps."""
+    stored = []
+    for record in records:
+        try:
+            arguments = json.dumps(record.args, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:  # noqa: BLE001 - the args came off the wire; never fail a write
+            arguments = str(record.args)
+        stored.append(
+            {
+                "tool": record.tool,
+                "args": arguments[:TRACE_ARGS_MAX_CHARS],
+                "result_preview": record.result_preview,
+                "ok": record.ok,
+            }
+        )
+    return tuple(stored)
+
+
+async def _narrow_to_quoted_assertions(
+    entry: _Pending,
+    records: Sequence[TraceRecord],
+    chunk_id: str,
+    view: GraphView,
+    texts: DocumentTextCache,
+) -> Tuple[str, ...]:
+    """The statements the trace's own ``locate_paragraph`` listed for the picked passage.
+
+    The agent picked a passage after locating a numbered paragraph, so the answer is the
+    statements quoted *inside that span* -- today's narrowing, reached through the trace
+    rather than through a guess. The lookup is replayed from the arguments the trace
+    recorded (the document text is already cached), which is exactly the output the agent
+    saw; nothing else in the trace can widen it.
+    """
+    for record in reversed(list(records)):
+        if record.tool != _NARROWING_TOOL or not record.ok:
+            continue
+
+        document_id = entry.registry.resolve(record.args.get("document"))
+        if document_id is None or document_id not in view.documents:
+            continue
+        locator = build_locator(record.args.get("kind"), record.args.get("value"))
+        if locator is None:
+            continue
+
+        chunks = view.chunks_by_document.get(document_id) or []
+        located = await _locate(texts, document_id, chunks, locator)
+        if located is None:
+            continue
+
+        span_text, chunk_positions, _anchor_position, _notes = located
+        chunk_ids = {str(chunks[position].get("id")) for position in chunk_positions}
+        if chunk_id not in chunk_ids:
+            continue
+
+        return tuple(
+            select_anchored_assertions(
+                span_text,
+                [
+                    (candidate_id, props.get("source_quote"))
+                    for candidate_id, props in view.assertions.items()
+                    if candidate_id != entry.assertion_id
+                    and str(props.get("source_chunk_id") or "") in chunk_ids
+                ],
+            )
+        )
+    return ()
+
+
+async def _build_answer(
+    entry: _Pending,
+    finish: TracerFinish,
+    records: Sequence[TraceRecord],
+    iterations: int,
+    *,
+    capped: bool,
+    view: GraphView,
+    texts: DocumentTextCache,
+    counters: Dict[str, Any],
+) -> _TraceAnswer:
+    """Resolve a finish off its own registry, while that registry still means something."""
+    node_id = entry.registry.resolve(finish.candidate_label)
+    targets: Tuple[str, ...] = ()
+    if node_id is not None and node_id in view.chunks:
+        targets = await _narrow_to_quoted_assertions(entry, records, node_id, view, texts)
+    if node_id is not None and node_id not in view.node_ids:
+        # The label resolved to something the view no longer holds.
+        _bump(counters, "llm_unknown_label")
+        node_id = None
+
+    return _TraceAnswer(
+        finish=finish,
+        trace=_trace_dicts(records),
+        iterations=iterations,
+        node_id=node_id,
+        targets=targets,
+        capped=capped,
+    )
+
+
+def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> _Outcome:
+    """An answer worth remembering but never worth linking.
+
+    Written ``resolution_only``: the reference the extraction recorded stays exactly as
+    the document made it, and the fingerprint means the next pass spends nothing
+    reconsidering an unchanged reference.
+    """
+    return _Outcome(
+        "unresolved",
+        Resolution(
+            assertion_id=entry.assertion_id,
+            field=entry.field_name,
+            reference_text=entry.reference_text,
+            strategy=STRATEGY_LLM_TRACE,
+            confidence=answer.finish.confidence,
+            notes=(note,),
+            reason=answer.finish.reason or None,
+            fingerprint=entry.fingerprint,
+            patch_mode=PATCH_RESOLUTION_ONLY,
+            iterations=answer.iterations,
+            trace=answer.trace,
+        ),
+    )
+
+
+def _answer_to_outcome(
+    entry: _Pending,
+    answer: _TraceAnswer,
+    view: GraphView,
+    *,
+    threshold: float,
+    counters: Dict[str, Any],
+) -> _Outcome:
+    """Map a trace's answer onto a ``Resolution``, by what the picked label turned out to be."""
+    if answer.node_id is None:
+        note = NOTE_LLM_ITERATION_CAP if answer.capped else NOTE_LLM_ABSTAINED
+        return _negative_record(entry, answer, note)
+
+    if answer.finish.confidence < threshold:
+        _bump(counters, "llm_below_threshold")
         logger.debug(
-            "Resolution for %s.%s scored %.2f, below the %.2f floor.",
-            assertion_id,
-            field_name,
-            outcome.resolution.confidence,
-            confidence_floor,
+            "Trace for %s.%s scored %.2f, below the %.2f threshold.",
+            entry.assertion_id,
+            entry.field_name,
+            answer.finish.confidence,
+            threshold,
         )
-        return _finalize(_Outcome("unresolved"), entry_notes, stale)
+        return _negative_record(entry, answer, NOTE_LLM_BELOW_THRESHOLD)
 
-    return _finalize(_edge_precheck(outcome, props, view), entry_notes, stale)
+    node_id = answer.node_id
+    if node_id in view.assertions:
+        anchor_type = "Assertion"
+        target_ids: Tuple[str, ...] = (node_id,)
+        target_type = "Assertion"
+        document_id = view.document_by_chunk.get(
+            str(view.assertions[node_id].get("source_chunk_id") or "")
+        )
+    elif node_id in view.chunks:
+        anchor_type = "DocumentChunk"
+        # Keep the referring statement out of its own answer even when the cached trace
+        # was built for a different assertion.
+        target_ids = tuple(target for target in answer.targets if target != entry.assertion_id)
+        target_type = "Assertion" if target_ids else "DocumentChunk"
+        document_id = view.document_by_chunk.get(node_id)
+    else:
+        anchor_type = view.documents[node_id].get("type")
+        target_ids = ()
+        target_type = anchor_type
+        document_id = node_id
+
+    return _Outcome(
+        "resolved",
+        Resolution(
+            assertion_id=entry.assertion_id,
+            field=entry.field_name,
+            reference_text=entry.reference_text,
+            strategy=STRATEGY_LLM_TRACE,
+            confidence=answer.finish.confidence,
+            anchor_id=node_id,
+            anchor_type=anchor_type,
+            target_ids=target_ids,
+            target_type=target_type,
+            document_id=document_id,
+            reason=answer.finish.reason or None,
+            fingerprint=entry.fingerprint,
+            patch_mode=_default_patch_mode(STRATEGY_LLM_TRACE),
+            iterations=answer.iterations,
+            trace=answer.trace,
+        ),
+    )
+
+
+def _record_outcome(
+    summary: Dict[str, Any],
+    resolutions: List[Resolution],
+    outcome: _Outcome,
+    *,
+    touched: Optional[Tuple[Set[str], Set[str]]],
+    own_chunk_touched: bool,
+) -> None:
+    """Fold one outcome into the summary and the plan, honouring the touched scope."""
+    if not own_chunk_touched:
+        # Out of scope unless it points at a document this ingestion wrote.
+        resolution = outcome.resolution
+        if resolution is None or resolution.document_id not in touched[1]:
+            return
+
+    summary["scanned"] += 1
+    if outcome.stale:
+        summary["stale_ids"] += 1
+    if outcome.resolution is not None:
+        resolutions.append(outcome.resolution)
+    if outcome.kind == "resolved" and outcome.resolution is not None:
+        summary["resolved"] += 1
+        _count(summary["resolved_by_strategy"], outcome.resolution.strategy)
+        _count(summary["anchor_types"], outcome.resolution.anchor_type)
+    else:
+        summary[outcome.kind] += 1
+
+
+def _fold_counters(summary: Dict[str, Any], counters: Dict[str, Any]) -> None:
+    """Merge the tracer's counters into the summary, coercing the one flag it shares.
+
+    ``trace_reference`` bumps ``llm_budget_exhausted`` as a count (once per trace that
+    could not pay); the summary reports it as the pass-level flag it is, so it is true
+    exactly when at least one reference went untraced for want of a call -- not merely
+    when the last trace happened to spend the last slot.
+    """
+    for key, value in counters.items():
+        if key == "llm_budget_exhausted":
+            continue
+        summary[key] = value
+    summary["llm_budget_exhausted"] = bool(counters.get("llm_budget_exhausted"))
+    summary["llm_calls_stated"] = summary["llm_calls"] - summary["llm_calls_inferred"]
 
 
 async def plan_resolutions(
     view: GraphView,
     texts: DocumentTextCache,
     *,
+    allow_llm: bool = True,
     force: bool = False,
-    confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
-    enable_prose_lookup: bool = False,
+    llm_max_calls: Optional[int] = None,
+    tracer_max_iter: Optional[int] = None,
+    llm_confidence_threshold: Optional[float] = None,
     touched: Optional[Tuple[Set[str], Set[str]]] = None,
 ) -> Tuple[List[Resolution], Dict[str, Any]]:
     """Run the cascade over every dangling reference in the view.
@@ -679,61 +893,95 @@ async def plan_resolutions(
     ``touched`` restricts the pass to one ingestion: a reference is in scope when the
     assertion carrying it came from a touched chunk, or when it names a touched document
     (an earlier document pointing at the one just ingested).
+
+    ``allow_llm=False`` stops after the entity-name step -- the ingest tail's contract.
+    The three budget arguments default to the ``CognifyConfig`` values
+    (``REFERENCE_LLM_MAX_CALLS``, ``REFERENCE_TRACER_MAX_ITER``,
+    ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``).
     """
+    config = get_cognify_config()
+    max_calls = config.reference_llm_max_calls if llm_max_calls is None else int(llm_max_calls)
+    max_iter = config.reference_tracer_max_iter if tracer_max_iter is None else int(tracer_max_iter)
+    threshold = (
+        config.reference_llm_confidence_threshold
+        if llm_confidence_threshold is None
+        else float(llm_confidence_threshold)
+    )
+
     summary = _empty_summary()
+    summary["llm_budget"] = max_calls
     resolutions: List[Resolution] = []
-    profiles = [
-        document_profile(document_id, props.get("name") or "")
-        for document_id, props in view.documents.items()
-    ]
+    pending: List[_Pending] = []
+    counters: Dict[str, Any] = {}
+    budget = CallBudget(max_calls)
 
-    for assertion_id, props in view.assertions.items():
-        own_chunk_touched = touched is None or str(props.get("source_chunk_id") or "") in touched[0]
+    with operation_usage_scope() as usage:
+        for assertion_id, props in view.assertions.items():
+            own_chunk_touched = (
+                touched is None or str(props.get("source_chunk_id") or "") in (touched[0])
+            )
 
-        for field_name in REFERENCE_FIELDS:
-            if not _text_of(props.get(field_name)):
-                continue
-
-            try:
-                outcome = await _resolve_reference(
-                    assertion_id,
-                    field_name,
-                    props,
-                    view,
-                    texts,
-                    profiles,
-                    force=force,
-                    confidence_floor=confidence_floor,
-                    enable_prose_lookup=enable_prose_lookup,
-                )
-            except Exception as error:  # noqa: BLE001 - one bad reference must not stop the pass
-                logger.warning(
-                    "Could not resolve %s on assertion %s: %s", field_name, assertion_id, error
-                )
-                summary["scanned"] += 1
-                summary["failed"] += 1
-                continue
-
-            if not own_chunk_touched:
-                # Out of scope unless it points at a document this ingestion wrote.
-                resolution = outcome.resolution
-                if resolution is None or resolution.document_id not in touched[1]:
+            for field_name in REFERENCE_FIELDS:
+                try:
+                    outcome, entry = _cheap_cascade(
+                        assertion_id,
+                        field_name,
+                        props,
+                        view,
+                        force=force,
+                        own_chunk_touched=own_chunk_touched,
+                    )
+                except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
+                    logger.warning(
+                        "Could not resolve %s on assertion %s: %s", field_name, assertion_id, error
+                    )
+                    summary["scanned"] += 1
+                    summary["failed"] += 1
                     continue
 
-            summary["scanned"] += 1
-            if outcome.stale:
-                summary["stale_ids"] += 1
-            if outcome.kind == "resolved" and outcome.resolution is not None:
-                resolutions.append(outcome.resolution)
-                summary["resolved"] += 1
-                _count(summary["resolved_by_strategy"], outcome.resolution.strategy)
-                _count(summary["anchor_types"], outcome.resolution.anchor_type)
-            else:
-                summary[outcome.kind] += 1
+                if entry is not None:
+                    if allow_llm:
+                        pending.append(entry)
+                    else:
+                        # The tail writes nothing for a reference it cannot answer, so
+                        # the pass retries it from scratch.
+                        _record_outcome(
+                            summary,
+                            resolutions,
+                            _finalize(_Outcome("unresolved"), entry.entry_notes, entry.stale),
+                            touched=touched,
+                            own_chunk_touched=own_chunk_touched,
+                        )
+                elif outcome is not None:
+                    _record_outcome(
+                        summary,
+                        resolutions,
+                        outcome,
+                        touched=touched,
+                        own_chunk_touched=own_chunk_touched,
+                    )
+
+        if pending:
+            await _trace_pending(
+                pending,
+                view,
+                texts,
+                summary,
+                resolutions,
+                counters=counters,
+                budget=budget,
+                max_iter=max_iter,
+                threshold=threshold,
+                touched=touched,
+            )
+
+    _fold_counters(summary, counters)
+    summary["llm_tokens_in"] = usage.tokens_in
+    summary["llm_tokens_out"] = usage.tokens_out
 
     logger.info(
         "Reference resolution planned: scanned=%d resolved=%d already=%d unresolved=%d "
-        "ambiguous=%d stale_ids=%d failed=%d",
+        "ambiguous=%d stale_ids=%d failed=%d llm_calls=%d/%d traces=%d",
         summary["scanned"],
         summary["resolved"],
         summary["already_resolved"],
@@ -741,8 +989,200 @@ async def plan_resolutions(
         summary["ambiguous"],
         summary["stale_ids"],
         summary["failed"],
+        summary["llm_calls"],
+        summary["llm_budget"],
+        summary["traces_started"],
     )
     return resolutions, summary
+
+
+async def _trace_pending(
+    pending: List[_Pending],
+    view: GraphView,
+    texts: DocumentTextCache,
+    summary: Dict[str, Any],
+    resolutions: List[Resolution],
+    *,
+    counters: Dict[str, Any],
+    budget: CallBudget,
+    max_iter: int,
+    threshold: float,
+    touched: Optional[Tuple[Set[str], Set[str]]],
+) -> None:
+    """Seed every pending reference, order them, then trace them one at a time."""
+
+    def record(entry: _Pending, outcome: _Outcome) -> None:
+        _record_outcome(
+            summary,
+            resolutions,
+            _finalize(outcome, entry.entry_notes, entry.stale),
+            touched=touched,
+            own_chunk_touched=entry.own_chunk_touched,
+        )
+
+    def fail(entry: _Pending, error: Exception) -> None:
+        logger.warning(
+            "Could not resolve %s on assertion %s: %s",
+            entry.field_name,
+            entry.assertion_id,
+            error,
+        )
+        summary["scanned"] += 1
+        summary["failed"] += 1
+
+    if not view.documents:
+        # Nothing to search and nothing to read: an agent asked to pick a document out of
+        # an empty set can only hallucinate one.
+        logger.info(
+            "Skipping %d reference trace(s): the graph view holds no documents.", len(pending)
+        )
+        for entry in pending:
+            summary["llm_skipped_empty_graph"] += 1
+            record(entry, _Outcome("unresolved"))
+        return
+
+    from cognee.tasks.graph import reference_retrieval
+
+    vector_engine = await reference_retrieval.get_vector_engine_async()
+    # One index per pass: both BM25 corpora are the whole view, and rebuilding them per
+    # reference would dominate the pass.
+    lexical = LexicalIndex(view)
+
+    seeded: List[_Pending] = []
+    for entry in pending:
+        try:
+            await _seed_reference(entry, view, lexical, vector_engine)
+        except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
+            fail(entry, error)
+            continue
+        seeded.append(entry)
+
+    seeded.sort(key=_order_key)
+
+    cache: Dict[Tuple[str, str], _TraceAnswer] = {}
+    consecutive_failures = 0
+    circuit_broken = False
+    exhausted_references = 0
+
+    for entry in seeded:
+        if circuit_broken:
+            record(entry, _Outcome("unresolved"))
+            continue
+
+        cache_key = (entry.fingerprint, candidate_set_key(entry.seed))
+        cached = cache.get(cache_key)
+        if cached is not None:
+            _bump(counters, "llm_cached")
+            record(entry, _edge_precheck_outcome(entry, cached, view, threshold, counters))
+            continue
+
+        tools = build_tracer_tools(
+            view=view,
+            texts=texts,
+            lexical=lexical,
+            registry=entry.registry,
+            vector_engine=vector_engine,
+            exclude_ids=entry.exclude_ids,
+            own_document_id=entry.own_document_id,
+            penalize_own_document=entry.field_name == "responds_to",
+        )
+
+        before = (
+            counters.get("llm_failed", 0),
+            counters.get("llm_budget_exhausted", 0),
+            counters.get("traces_iteration_capped", 0),
+        )
+        _bump(counters, "traces_started")
+        try:
+            finish, records, iterations = await trace_reference(
+                system_prompt_path=TRACE_SYSTEM_PROMPT,
+                hint=entry.hint,
+                source_props=entry.props,
+                source_document_name=_document_name(view, entry.own_document_id),
+                field_name=entry.field_name,
+                seed=entry.seed,
+                tools=tools,
+                registry=entry.registry,
+                budget=budget,
+                max_iter=max_iter,
+                counters=counters,
+            )
+        except (FileNotFoundError, ValueError):
+            # A missing or blank system prompt is a deployment bug, not a per-reference
+            # failure (R11): swallowing it would turn one bad file into a pass full of
+            # silent abstentions.
+            raise
+        except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
+            fail(entry, error)
+            continue
+
+        failed = counters.get("llm_failed", 0) > before[0]
+        exhausted = counters.get("llm_budget_exhausted", 0) > before[1]
+        capped = counters.get("traces_iteration_capped", 0) > before[2]
+
+        consecutive_failures = consecutive_failures + 1 if failed else 0
+        if consecutive_failures >= CIRCUIT_BREAKER_FAILURES:
+            circuit_broken = True
+            summary["notes"].append(NOTE_LLM_CIRCUIT_BROKEN)
+            logger.warning(
+                "Reference tracing circuit broken after %d consecutive failed calls; the "
+                "remaining references are left for the next pass.",
+                consecutive_failures,
+            )
+
+        if exhausted or failed:
+            # Neither got a real answer, so neither writes a record: a reference that
+            # never had its trace must stay retryable.
+            exhausted_references += 1 if exhausted else 0
+            record(entry, _Outcome("unresolved"))
+            continue
+
+        _bump(counters, "traces_finished")
+        try:
+            answer = await _build_answer(
+                entry,
+                finish,
+                records,
+                iterations,
+                capped=capped,
+                view=view,
+                texts=texts,
+                counters=counters,
+            )
+        except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
+            fail(entry, error)
+            continue
+
+        cache[cache_key] = answer
+        record(entry, _edge_precheck_outcome(entry, answer, view, threshold, counters))
+
+    if exhausted_references:
+        summary["notes"].append(NOTE_LLM_BUDGET_EXHAUSTED)
+        logger.warning(
+            "Reference resolution ran out of its %d-call budget with %d reference(s) "
+            "still untraced; nothing was written for them, so the next pass retries them.",
+            budget.max_calls,
+            exhausted_references,
+        )
+
+
+def _edge_precheck_outcome(
+    entry: _Pending,
+    answer: _TraceAnswer,
+    view: GraphView,
+    threshold: float,
+    counters: Dict[str, Any],
+) -> _Outcome:
+    outcome = _answer_to_outcome(entry, answer, view, threshold=threshold, counters=counters)
+    if outcome.kind == "resolved":
+        outcome = _edge_precheck(outcome, entry.props, view)
+    return outcome
+
+
+def _document_name(view: GraphView, document_id: Optional[str]) -> Optional[str]:
+    if not document_id:
+        return None
+    return _text_of(view.documents.get(document_id, {}).get("name"))
 
 
 async def write_resolutions(
@@ -760,6 +1200,10 @@ async def write_resolutions(
     edge a previous pass wrote cannot duplicate it -- but the upsert also overwrites that
     edge's stored properties, so a resolution the planner marked :data:`NOTE_EDGES_EXIST`
     writes no edge at all and is patched only.
+
+    Each resolution's ``patch_mode`` decides the node patch: ``"none"`` (``existing_id``,
+    ``entity_name``) patches nothing, ``"resolution_only"`` writes the audit blob without
+    touching the field, and ``"full"`` moves the anchor's id into the field.
 
     Indexing the new edge texts is the one step allowed to fail on its own: the edges are
     already stored, so the patches still run and the failure comes back as the
@@ -783,11 +1227,16 @@ async def write_resolutions(
         if NOTE_EDGES_EXIST in resolution.notes:
             continue
 
-        source_props = view.assertions.get(resolution.assertion_id, {})
-        endpoints[resolution.assertion_id] = source_props
         target_ids = list(resolution.target_ids)
         if resolution.anchor_id and resolution.anchor_id not in target_ids:
             target_ids.append(resolution.anchor_id)
+        if not target_ids:
+            # An abstention, a below-threshold answer or an inferred-but-unlinked record:
+            # audited on the node, never an edge.
+            continue
+
+        source_props = view.assertions.get(resolution.assertion_id, {})
+        endpoints[resolution.assertion_id] = source_props
 
         for target_id in target_ids:
             target_props = view.node_props(target_id)
@@ -806,7 +1255,7 @@ async def write_resolutions(
         logger.info(
             "Reference resolution dry_run: %d edge(s) and %d patch(es) withheld.",
             len(edges),
-            sum(1 for r in resolutions if r.strategy in _PATCHED_STRATEGIES),
+            sum(1 for r in resolutions if r.patch_mode != PATCH_NONE),
         )
         return summary
 
@@ -831,10 +1280,14 @@ async def write_resolutions(
             summary["notes"].append(NOTE_EDGE_INDEX_FAILED)
 
     for resolution in resolutions:
-        if resolution.strategy not in _PATCHED_STRATEGIES:
+        if resolution.patch_mode == PATCH_NONE:
             continue
 
-        values = build_node_patch(resolution, view.assertions.get(resolution.assertion_id, {}))
+        values = build_node_patch(
+            resolution,
+            view.assertions.get(resolution.assertion_id, {}),
+            mode=resolution.patch_mode,
+        )
         try:
             await graph_engine.update_node(resolution.assertion_id, values)
         except NotImplementedError:
@@ -865,13 +1318,16 @@ def _merge_write_summary(summary: Dict[str, Any], write_summary: Dict[str, Any])
 
     Only ``already_resolved`` adds rather than replaces: the write phase reports the
     planned resolutions that turned out to need no write, and those stop being resolutions
-    of this pass.
+    of this pass. ``notes`` concatenates, because the plan's notes (a budget that ran out,
+    a broken circuit) and the write's (an index that failed) are about different phases.
     """
     written = dict(write_summary)
     already = written.pop("already_resolved", 0)
+    notes = list(written.pop("notes", []) or [])
     summary["already_resolved"] = summary.get("already_resolved", 0) + already
     summary["resolved"] = max(0, summary.get("resolved", 0) - already)
     summary.update(written)
+    summary["notes"] = list(summary.get("notes") or []) + notes
 
 
 def _dataset_id(ctx, dataset_id):
@@ -880,13 +1336,20 @@ def _dataset_id(ctx, dataset_id):
     return from_context if from_context is not None else dataset_id
 
 
+def _allow_llm(scope: str, allow_llm: Optional[bool]) -> bool:
+    """Decision D1: only the whole-graph pass may spend LLM calls, unless told otherwise."""
+    return scope == "all" if allow_llm is None else bool(allow_llm)
+
+
 async def _plan(
     data,
     *,
     scope: str,
+    allow_llm: Optional[bool],
     force: bool,
-    confidence_floor: float,
-    enable_prose_lookup: bool,
+    llm_max_calls: Optional[int],
+    tracer_max_iter: Optional[int],
+    llm_confidence_threshold: Optional[float],
     dataset_id,
     ctx,
 ) -> Tuple[Any, GraphView, List[Resolution], Dict[str, Any]]:
@@ -897,9 +1360,11 @@ async def _plan(
     resolutions, summary = await plan_resolutions(
         view,
         texts,
+        allow_llm=_allow_llm(scope, allow_llm),
         force=force,
-        confidence_floor=confidence_floor,
-        enable_prose_lookup=enable_prose_lookup,
+        llm_max_calls=llm_max_calls,
+        tracer_max_iter=tracer_max_iter,
+        llm_confidence_threshold=llm_confidence_threshold,
         touched=touched,
     )
     return graph_engine, view, resolutions, summary
@@ -918,9 +1383,13 @@ async def detect_dangling_references(
     data: Any = None,
     *,
     scope: str = "all",
+    allow_llm: Optional[bool] = None,
     force: bool = False,
-    confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
-    enable_prose_lookup: bool = False,
+    llm_max_calls: Optional[int] = None,
+    tracer_max_iter: Optional[int] = None,
+    llm_confidence_threshold: Optional[float] = None,
+    infer_unstated: Optional[bool] = None,
+    infer_confidence_threshold: Optional[float] = None,
     dataset_id=None,
     ctx=None,
 ) -> Dict[str, Any]:
@@ -928,13 +1397,22 @@ async def detect_dangling_references(
 
     ``data`` is the memify seed and is ignored unless ``scope="touched"``, where it names
     the chunks and documents the current ingestion produced.
+
+    ``infer_unstated`` / ``infer_confidence_threshold`` are accepted and validated by
+    ``resolve_references_pipeline`` today but do nothing here: the unstated
+    denial/allegation inference (decision D2, strategy ``llm_inferred``) is a separate
+    pass over the same budget, and until it lands the options are carried so a caller's
+    wiring does not have to change when it does.
     """
+    del infer_unstated, infer_confidence_threshold
     _, _, resolutions, summary = await _plan(
         data,
         scope=scope,
+        allow_llm=allow_llm,
         force=force,
-        confidence_floor=confidence_floor,
-        enable_prose_lookup=enable_prose_lookup,
+        llm_max_calls=llm_max_calls,
+        tracer_max_iter=tracer_max_iter,
+        llm_confidence_threshold=llm_confidence_threshold,
         dataset_id=dataset_id,
         ctx=ctx,
     )
@@ -983,10 +1461,13 @@ async def resolve_assertion_references(
     data: Any = None,
     *,
     scope: str = "all",
+    allow_llm: Optional[bool] = None,
     force: bool = False,
     dry_run: bool = False,
-    confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
-    enable_prose_lookup: bool = False,
+    llm_max_calls: Optional[int] = None,
+    tracer_max_iter: Optional[int] = None,
+    llm_confidence_threshold: Optional[float] = None,
+    dataset_id=None,
     ctx=None,
 ) -> Any:
     """Resolve dangling assertion references, then return the input unchanged.
@@ -996,11 +1477,20 @@ async def resolve_assertion_references(
             ``scope="touched"``, where they identify the ingestion to resolve around.
         scope: ``"touched"`` for an ingest tail (this document's references, and
             references pointing at it), ``"all"`` for the whole graph.
+        allow_llm: Whether the agentic tracer may run. Defaults to ``scope == "all"``,
+            so the ingest tail is LLM-free (decision D1) and the memify pass is not.
         force: Re-resolve references a previous pass already answered, from the
-            ``<field>_text`` it preserved.
-        dry_run: Plan and log without writing.
-        confidence_floor: Resolutions below this confidence are left dangling.
-        enable_prose_lookup: Opt into the BM25 chunk lookup for locator-less references.
+            structured reference (or the ``<field>_text``) it preserved.
+        dry_run: Plan and log without writing. Traces still run, so the returned plan
+            shows what the agent would have linked.
+        llm_max_calls: Calls this pass may spend across every reference it traces.
+            ``None`` takes ``REFERENCE_LLM_MAX_CALLS``; ``0`` seeds without spending.
+        tracer_max_iter: Steps one reference's trace may take. ``None`` takes
+            ``REFERENCE_TRACER_MAX_ITER``.
+        llm_confidence_threshold: Below this the agent's answer is recorded but never
+            linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
+        dataset_id: Dataset whose relational rows hold the document locations, when no
+            pipeline context supplies one.
         ctx: Pipeline context, used for provenance and the dataset's document locations.
 
     Returns:
@@ -1016,10 +1506,12 @@ async def resolve_assertion_references(
         graph_engine, view, resolutions, summary = await _plan(
             data,
             scope=scope,
+            allow_llm=allow_llm,
             force=force,
-            confidence_floor=confidence_floor,
-            enable_prose_lookup=enable_prose_lookup,
-            dataset_id=None,
+            llm_max_calls=llm_max_calls,
+            tracer_max_iter=tracer_max_iter,
+            llm_confidence_threshold=llm_confidence_threshold,
+            dataset_id=dataset_id,
             ctx=ctx,
         )
         write_summary = await write_resolutions(
