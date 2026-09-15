@@ -126,17 +126,20 @@ class Locator:
 
 @dataclass(frozen=True)
 class LocatorPattern:
-    """One kind of locator: how a reference writes it and how the document marks it.
+    """One kind of locator, and how a *document* marks it.
 
     ``marker`` is a template whose ``{number}`` placeholder is filled with the surface
     forms of one locator; ``any_marker`` matches any marker of the kind, so the end of a
     span and the sequence check can be found without knowing which number comes next. A
     ``document_level`` locator names a document rather than a place inside one, so it has
     no marker and stays in the reference's naming hint.
+
+    There is deliberately no pattern for how a *reference* writes a locator (decision
+    D5): the ``(kind, value)`` pair reaches ``build_locator`` from the extraction LLM or
+    from the agent, and nothing here ever runs a regex over reference text.
     """
 
     kind: str
-    reference: Tuple[re.Pattern, ...]
     marker: Optional[str] = None
     any_marker: Optional[re.Pattern] = None
     document_level: bool = False
@@ -189,20 +192,11 @@ _NUMBER_WORD_ALTERNATION = "|".join(sorted(NUMBER_WORDS, key=len, reverse=True))
 LOCATOR_PATTERNS: Tuple[LocatorPattern, ...] = (
     LocatorPattern(
         kind="paragraph",
-        reference=(
-            re.compile(r"¶¶\s*(\d+)\s*[-–]\s*\d+"),
-            re.compile(r"¶\s*(\d{1,3})"),
-            re.compile(r"\bpara(?:graph|\.)\s*(\d{1,3})"),
-        ),
         marker=r"^[ \t]*(?:¶\s*(?:{number})\b|(?:{number})\.(?=[ \t]))",
         any_marker=re.compile(r"^[ \t]*(?:¶\s*(\d{1,3})\b|(\d{1,3})\.(?=[ \t]))", re.M),
     ),
     LocatorPattern(
         kind="section",
-        reference=(
-            re.compile(r"§+\s*([\d]+(?:\.\d+)*[a-z]?)"),
-            re.compile(r"\bsec(?:tion|\.)\s+([\d.]+[a-z]?)"),
-        ),
         marker=r"^[ \t]*(?:§\s*(?:{number})\b|section\s+(?:{number})\b)",
         any_marker=re.compile(
             r"^[ \t]*(?:§\s*(\d+(?:\.\d+)*[a-z]?)\b|section\s+(\d+(?:\.\d+)*[a-z]?)\b)",
@@ -211,13 +205,11 @@ LOCATOR_PATTERNS: Tuple[LocatorPattern, ...] = (
     ),
     LocatorPattern(
         kind="exhibit",
-        reference=(re.compile(r"\bex(?:hibit|\.)\s+([a-z]{1,2}|\d{1,3})"),),
         marker=r"^[ \t]*exhibit\s+(?:{number})\b",
         any_marker=re.compile(r"^[ \t]*exhibit\s+([a-z]{1,2}|\d{1,3})\b", re.M | re.I),
     ),
     LocatorPattern(
         kind="count",
-        reference=(re.compile(rf"\bcount\s+([ivxl]+|\d{{1,2}}|{_NUMBER_WORD_ALTERNATION})\b"),),
         marker=r"^[ \t]*count\s+(?:{number})\b",
         any_marker=re.compile(
             rf"^[ \t]*count\s+([ivxl]+|\d{{1,2}}|{_NUMBER_WORD_ALTERNATION})\b",
@@ -226,20 +218,11 @@ LOCATOR_PATTERNS: Tuple[LocatorPattern, ...] = (
     ),
     LocatorPattern(
         kind="article",
-        reference=(re.compile(r"\bart(?:icle|\.)\s+([ivxl]+|\d{1,2})\b"),),
         marker=r"^[ \t]*article\s+(?:{number})\b",
         any_marker=re.compile(r"^[ \t]*article\s+([ivxl]+|\d{1,2})\b", re.M | re.I),
     ),
-    LocatorPattern(
-        kind="resolution",
-        reference=(re.compile(r"\bres(?:olution|\.)\s*(?:no\.?\s*)?([0-9]{2,4}-[a-z0-9-]+)"),),
-        document_level=True,
-    ),
-    LocatorPattern(
-        kind="ordinance",
-        reference=(re.compile(r"\bord(?:inance|\.)\s*(?:no\.?\s*)?([0-9]{2,4}-[a-z0-9-]+)"),),
-        document_level=True,
-    ),
+    LocatorPattern(kind="resolution", document_level=True),
+    LocatorPattern(kind="ordinance", document_level=True),
 )
 
 _PATTERN_BY_KIND = {pattern.kind: pattern for pattern in LOCATOR_PATTERNS}

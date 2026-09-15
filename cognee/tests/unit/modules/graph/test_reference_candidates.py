@@ -361,7 +361,9 @@ def test_format_candidate_lines_passage_type_word():
     assert lines == '[P3] Passage in "Complaint" (chunk 2): "text"'
 
 
-def test_format_candidate_lines_summary_type_word():
+def test_format_candidate_lines_renders_an_unlisted_type_as_a_document():
+    """Only assertions and passages have a type word; a summary never reaches a candidate
+    (seed retrieval folds it onto its chunk), so it falls through with everything else."""
     candidate = Candidate(
         label="S1",
         node_id="n1",
@@ -372,7 +374,7 @@ def test_format_candidate_lines_summary_type_word():
         chunk_index=0,
     )
     lines = format_candidate_lines([candidate])
-    assert lines == '[S1] Summary in "Complaint" (chunk 0): "summary text"'
+    assert lines == '[S1] Document "Complaint": "summary text"'
 
 
 def test_format_candidate_lines_document():

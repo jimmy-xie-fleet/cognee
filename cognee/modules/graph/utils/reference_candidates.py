@@ -34,10 +34,12 @@ _LABEL_PREFIX_BY_TYPE = {
 _DEFAULT_LABEL_PREFIX = "N"
 _DOCUMENT_LABEL_PREFIX = "D"
 
+# How a candidate line names the node's kind. A ``TextSummary`` has no entry: seed
+# retrieval folds every summary hit onto the chunk it was made from, so no candidate is
+# ever of that type, and anything unlisted renders as a document.
 _TYPE_WORD_BY_NODE_TYPE = {
     "Assertion": "Assertion",
     "DocumentChunk": "Passage",
-    "TextSummary": "Summary",
 }
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -276,7 +278,7 @@ def _format_candidate_line(candidate: Candidate) -> str:
 def format_candidate_lines(candidates: Iterable[Candidate]) -> str:
     """Render one numbered line per candidate, newline-joined.
 
-    Assertions, passages (``DocumentChunk``) and summaries render as
+    Assertions and passages (``DocumentChunk``) render as
     ``[A7] Assertion in "<document>" (chunk 4): "<text>"`` (the ``(chunk N)`` clause is
     omitted when ``chunk_index`` is ``None``); every other node type renders as a document:
     ``[D2] Document "<document>": "<text>"``.
