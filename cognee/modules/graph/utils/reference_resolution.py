@@ -13,6 +13,8 @@ here is what makes the scoring, the span selection and the write shapes testable
 graph engine.
 """
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -1203,3 +1205,158 @@ def build_node_patch(resolution: Resolution, current_props: Mapping[str, Any]) -
             "notes": list(resolution.notes),
         },
     }
+
+
+# --------------------------------------------------------------------------------------
+# Structured reference hints (§1.2) -- reads Assertion.responds_to_ref / attributed_to_ref
+# --------------------------------------------------------------------------------------
+#
+# Extraction now writes a structured reference (a plain dict, so core never imports the
+# legal domain package) instead of only free text. These helpers read that dict -- or a
+# JSON string, the shape Neo4j returns a dict property as -- into one typed hint, render it
+# for display/retrieval, fingerprint it for re-run guards, and turn a known
+# ``(kind, value)`` pair into the ``Locator`` ``find_locator_span`` already understands.
+# Deliberately additive: nothing above this block is touched by this change.
+
+
+@dataclass(frozen=True)
+class ReferenceHint:
+    """One reference an assertion carries, already split into its named parts.
+
+    ``legacy_text`` is set only when the hint came from a pre-structured free-text
+    reference (no ``document_hint``/locator/``date`` of its own to read) -- ``document_hint``
+    then mirrors it verbatim so a caller reading only ``document_hint`` still gets the
+    reference's words.
+    """
+
+    document_hint: str = ""
+    locator_kind: Optional[str] = None
+    locator_value: Optional[str] = None
+    date: Optional[str] = None
+    basis: Optional[str] = None
+    legacy_text: Optional[str] = None  # a pre-structured free-text reference
+
+
+def _clean_hint_value(value: Any) -> Optional[str]:
+    """Stringify and strip one hint field; blank / ``"none"`` (any case) fold to ``None``."""
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+    except Exception:
+        return None
+    if not text or text.casefold() == "none":
+        return None
+    return text
+
+
+def parse_reference_hint(
+    raw: Any, *, fallback_text: Optional[str] = None
+) -> Optional[ReferenceHint]:
+    """Read a structured reference dict (or the JSON string Neo4j stores it as) into a hint.
+
+    ``raw`` is a ``dict`` (Ladybug returns node properties as-is), a JSON string that
+    decodes to a ``dict`` (Neo4j serialises dict properties as strings), or anything else.
+    A plain, non-JSON string in ``raw`` is *not* a hint -- it is never parsed, and never
+    becomes ``legacy_text`` on its own; only ``fallback_text`` can supply legacy text. When
+    the dict carries no ``document_hint``, no locator and no ``date`` -- or ``raw`` yields
+    nothing at all -- the result falls back to ``fallback_text`` (a pre-structured
+    free-text reference) when that is non-blank, else ``None``. Never raises.
+    """
+    data: Optional[Mapping[str, Any]] = None
+    try:
+        if isinstance(raw, dict):
+            data = raw
+        elif isinstance(raw, str):
+            try:
+                loaded = json.loads(raw)
+            except (ValueError, TypeError):
+                loaded = None
+            if isinstance(loaded, dict):
+                data = loaded
+        # Anything else (None, int, float, bool, list, a non-dict JSON value) is not a hint.
+
+        if data is not None:
+            document_hint = _clean_hint_value(data.get("document_hint")) or ""
+            locator_kind = _clean_hint_value(data.get("locator_kind"))
+            locator_value = _clean_hint_value(data.get("locator_value"))
+            date = _clean_hint_value(data.get("date"))
+            basis = _clean_hint_value(data.get("basis"))
+            if document_hint or locator_kind or locator_value or date:
+                return ReferenceHint(
+                    document_hint=document_hint,
+                    locator_kind=locator_kind,
+                    locator_value=locator_value,
+                    date=date,
+                    basis=basis,
+                )
+    except Exception:
+        pass
+
+    try:
+        fallback = fallback_text.strip() if isinstance(fallback_text, str) else ""
+    except Exception:
+        fallback = ""
+    if fallback:
+        return ReferenceHint(document_hint=fallback, legacy_text=fallback)
+    return None
+
+
+def reference_display_text(hint: Optional[ReferenceHint]) -> str:
+    """Render a hint for display/retrieval: composition only, no parsing.
+
+    ``"Complaint paragraph 13"``, ``"June 10 letter (2026-06-10)"`` -- a legacy hint
+    renders as its stored text verbatim. May be ``""`` only when everything is empty.
+    """
+    if hint is None:
+        return ""
+    if hint.legacy_text:
+        text = hint.legacy_text
+    else:
+        text = hint.document_hint or ""
+        if hint.locator_kind and hint.locator_value:
+            text = f"{text} {hint.locator_kind} {hint.locator_value}"
+        if hint.date:
+            text = f"{text} ({hint.date})"
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def reference_fingerprint(hint: ReferenceHint, field_name: str) -> str:
+    """A 16-hex-char sha1 over ``field_name`` and every field of ``hint``.
+
+    Used as a re-run guard: unchanged inputs (including which field this is) hash the same.
+    """
+    parts = (
+        field_name,
+        hint.document_hint or "",
+        hint.locator_kind or "",
+        hint.locator_value or "",
+        hint.date or "",
+        hint.legacy_text or "",
+    )
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def build_locator(kind: Optional[str], value: Optional[str]) -> Optional[Locator]:
+    """A ``Locator`` for an already-known ``(kind, value)`` pair, or ``None``.
+
+    ``None`` when ``kind`` is falsy, ``"none"``, ``"page"`` (there is no ``page`` kind), or
+    not one of the marker-bearing kinds in ``_PATTERN_BY_KIND`` (``resolution``/``ordinance``
+    are document-level and have no marker), or when ``value`` is blank. The ordinal is
+    ``_ordinal_for_kind``'s -- ``None`` when the number has no single position (a dotted
+    section like ``"3.2"``).
+    """
+    if not isinstance(kind, str):
+        return None
+    kind_lower = kind.strip().casefold()
+    if not kind_lower or kind_lower in ("none", "page"):
+        return None
+    pattern = _PATTERN_BY_KIND.get(kind_lower)
+    if pattern is None or pattern.marker is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    number = value.strip()
+    if not number:
+        return None
+    return Locator(kind=kind_lower, number=number, ordinal=_ordinal_for_kind(kind_lower, number))

@@ -4,6 +4,7 @@ Deterministic and dependency-free: no LLM, no database, no network. Every value 
 here comes out of the formulas documented in ``reference_resolution`` itself.
 """
 
+import json
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -22,9 +23,12 @@ from cognee.modules.graph.utils.reference_resolution import (
     STRATEGY_PROSE_LOOKUP,
     DateHint,
     DocumentProfile,
+    Locator,
+    ReferenceHint,
     Resolution,
     _date_renderings,
     anchor_chunk_index,
+    build_locator,
     build_node_patch,
     build_reference_edge,
     chunks_overlapping,
@@ -36,6 +40,9 @@ from cognee.modules.graph.utils.reference_resolution import (
     normalize_reference_text,
     parse_dates,
     parse_reference,
+    parse_reference_hint,
+    reference_display_text,
+    reference_fingerprint,
     roman_to_int,
     scan_chunks_for_marker,
     score_document,
@@ -822,3 +829,263 @@ def test_document_profile_dataclass_is_hashable_and_frozen():
     assert hash(profile) == hash(profile)
     with pytest.raises(FrozenInstanceError):
         profile.name = "other"
+
+
+# --------------------------------------------------------------------------------------
+# parse_reference_hint
+# --------------------------------------------------------------------------------------
+
+
+def test_parse_reference_hint_reads_a_dict():
+    hint = parse_reference_hint(
+        {
+            "document_hint": "the Complaint",
+            "locator_kind": "paragraph",
+            "locator_value": "17",
+            "basis": "cited",
+        }
+    )
+    assert hint == ReferenceHint(
+        document_hint="the Complaint",
+        locator_kind="paragraph",
+        locator_value="17",
+        date=None,
+        basis="cited",
+        legacy_text=None,
+    )
+
+
+def test_parse_reference_hint_reads_a_json_string():
+    raw = json.dumps(
+        {
+            "document_hint": "the Whitfield report",
+            "date": "2026-06-10",
+        }
+    )
+    hint = parse_reference_hint(raw)
+    assert hint == ReferenceHint(document_hint="the Whitfield report", date="2026-06-10")
+
+
+def test_parse_reference_hint_falls_back_to_legacy_text():
+    hint = parse_reference_hint(None, fallback_text="Complaint ¶5")
+    assert hint == ReferenceHint(document_hint="Complaint ¶5", legacy_text="Complaint ¶5")
+
+
+def test_parse_reference_hint_non_json_string_falls_through_to_fallback():
+    # A bare, non-JSON string in `raw` is NOT a hint dict -- it falls through to
+    # `fallback_text`, it is never treated as the legacy text itself.
+    hint = parse_reference_hint("Complaint ¶5", fallback_text="Complaint ¶5")
+    assert hint == ReferenceHint(document_hint="Complaint ¶5", legacy_text="Complaint ¶5")
+
+    assert parse_reference_hint("Complaint ¶5") is None
+
+
+def test_parse_reference_hint_none_without_fallback_is_none():
+    assert parse_reference_hint(None) is None
+    assert parse_reference_hint(None, fallback_text="") is None
+    assert parse_reference_hint(None, fallback_text="   ") is None
+
+
+@pytest.mark.parametrize("garbage", [123, 4.5, ["a", "b"], True, {"basis": "cited"}])
+def test_parse_reference_hint_garbage_is_none(garbage):
+    assert parse_reference_hint(garbage) is None
+
+
+def test_parse_reference_hint_garbage_json_value_falls_through():
+    # `json.loads` succeeds but yields a non-dict (a bare JSON string) -- still not a hint.
+    assert parse_reference_hint('"just a json string"') is None
+    assert parse_reference_hint("not json {") is None
+    assert parse_reference_hint("[1, 2, 3]") is None
+
+
+def test_parse_reference_hint_strips_and_blanks_fields():
+    hint = parse_reference_hint(
+        {
+            "document_hint": "  the Complaint  ",
+            "locator_kind": "  paragraph ",
+            "locator_value": " 17 ",
+            "date": "  ",
+            "basis": None,
+        }
+    )
+    assert hint == ReferenceHint(
+        document_hint="the Complaint",
+        locator_kind="paragraph",
+        locator_value="17",
+        date=None,
+        basis=None,
+    )
+
+
+def test_parse_reference_hint_drops_blank_document_hint_to_empty_string():
+    hint = parse_reference_hint(
+        {"document_hint": "   ", "locator_kind": "paragraph", "locator_value": "3"}
+    )
+    assert hint.document_hint == ""
+    assert hint.locator_kind == "paragraph"
+
+
+@pytest.mark.parametrize("value", ["none", "None", "NONE", "", "   "])
+def test_parse_reference_hint_drops_none_and_blank_markers(value):
+    hint = parse_reference_hint(
+        {
+            "document_hint": "the Complaint",
+            "locator_kind": value,
+            "locator_value": value,
+            "date": value,
+            "basis": value,
+        }
+    )
+    assert hint.locator_kind is None
+    assert hint.locator_value is None
+    assert hint.date is None
+    assert hint.basis is None
+    assert hint.document_hint == "the Complaint"
+
+
+def test_parse_reference_hint_empty_dict_falls_back():
+    hint = parse_reference_hint({}, fallback_text="Complaint ¶5")
+    assert hint == ReferenceHint(document_hint="Complaint ¶5", legacy_text="Complaint ¶5")
+    assert parse_reference_hint({}) is None
+
+
+def test_parse_reference_hint_never_raises():
+    for raw in (object(), b"bytes", {"document_hint": object()}):
+        parse_reference_hint(raw)
+    parse_reference_hint(None, fallback_text=object())
+
+
+# --------------------------------------------------------------------------------------
+# reference_display_text
+# --------------------------------------------------------------------------------------
+
+
+def test_reference_display_text_document_and_locator():
+    hint = ReferenceHint(document_hint="Complaint", locator_kind="paragraph", locator_value="13")
+    assert reference_display_text(hint) == "Complaint paragraph 13"
+
+
+def test_reference_display_text_document_and_date():
+    hint = ReferenceHint(document_hint="June 10 letter", date="2026-06-10")
+    assert reference_display_text(hint) == "June 10 letter (2026-06-10)"
+
+
+def test_reference_display_text_document_locator_and_date():
+    hint = ReferenceHint(
+        document_hint="Complaint", locator_kind="paragraph", locator_value="13", date="2026-06-10"
+    )
+    assert reference_display_text(hint) == "Complaint paragraph 13 (2026-06-10)"
+
+
+def test_reference_display_text_locator_needs_both_kind_and_value():
+    hint = ReferenceHint(document_hint="Complaint", locator_kind="paragraph", locator_value=None)
+    assert reference_display_text(hint) == "Complaint"
+
+
+def test_reference_display_text_legacy_text_wins():
+    hint = ReferenceHint(
+        document_hint="ignored",
+        locator_kind="paragraph",
+        locator_value="1",
+        legacy_text="the Adams stipulation",
+    )
+    assert reference_display_text(hint) == "the Adams stipulation"
+
+
+def test_reference_display_text_collapses_whitespace():
+    hint = ReferenceHint(document_hint="the   Complaint")
+    assert reference_display_text(hint) == "the Complaint"
+
+
+def test_reference_display_text_empty_hint_is_blank():
+    assert reference_display_text(ReferenceHint()) == ""
+
+
+# --------------------------------------------------------------------------------------
+# reference_fingerprint
+# --------------------------------------------------------------------------------------
+
+
+def test_reference_fingerprint_is_stable():
+    hint = ReferenceHint(document_hint="Complaint", locator_kind="paragraph", locator_value="5")
+    assert reference_fingerprint(hint, "responds_to") == reference_fingerprint(hint, "responds_to")
+    fingerprint = reference_fingerprint(hint, "responds_to")
+    assert isinstance(fingerprint, str)
+    assert len(fingerprint) == 16
+    int(fingerprint, 16)  # hex-decodable
+
+
+def test_reference_fingerprint_is_sensitive_to_field_name():
+    hint = ReferenceHint(document_hint="Complaint", locator_kind="paragraph", locator_value="5")
+    assert reference_fingerprint(hint, "responds_to") != reference_fingerprint(
+        hint, "attributed_to"
+    )
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        ReferenceHint(document_hint="Complaint2", locator_kind="paragraph", locator_value="5"),
+        ReferenceHint(document_hint="Complaint", locator_kind="section", locator_value="5"),
+        ReferenceHint(document_hint="Complaint", locator_kind="paragraph", locator_value="6"),
+        ReferenceHint(
+            document_hint="Complaint",
+            locator_kind="paragraph",
+            locator_value="5",
+            date="2026-06-10",
+        ),
+        ReferenceHint(document_hint="Complaint", legacy_text="Complaint"),
+    ],
+)
+def test_reference_fingerprint_is_sensitive_to_every_field(other):
+    base = ReferenceHint(document_hint="Complaint", locator_kind="paragraph", locator_value="5")
+    assert reference_fingerprint(base, "responds_to") != reference_fingerprint(other, "responds_to")
+
+
+# --------------------------------------------------------------------------------------
+# build_locator
+# --------------------------------------------------------------------------------------
+
+
+def test_build_locator_digits():
+    assert build_locator("paragraph", "17") == Locator(kind="paragraph", number="17", ordinal=17)
+
+
+def test_build_locator_number_word():
+    assert build_locator("count", "two") == Locator(kind="count", number="two", ordinal=2)
+
+
+def test_build_locator_roman_numeral():
+    assert build_locator("article", "II") == Locator(kind="article", number="II", ordinal=2)
+
+
+def test_build_locator_letter():
+    assert build_locator("exhibit", "C") == Locator(kind="exhibit", number="C", ordinal=3)
+
+
+def test_build_locator_dotted_section_has_no_ordinal():
+    locator = build_locator("section", "3.2")
+    assert locator == Locator(kind="section", number="3.2", ordinal=None)
+
+
+def test_build_locator_lowercases_the_kind():
+    assert build_locator("Paragraph", "5") == Locator(kind="paragraph", number="5", ordinal=5)
+
+
+@pytest.mark.parametrize(
+    ("kind", "value"),
+    [
+        (None, "5"),
+        ("", "5"),
+        ("none", "5"),
+        ("None", "5"),
+        ("page", "5"),
+        ("paragraph", None),
+        ("paragraph", ""),
+        ("paragraph", "   "),
+        ("resolution", "2026-01"),  # document-level kind, no marker
+        ("not-a-real-kind", "5"),
+    ],
+)
+def test_build_locator_returns_none(kind, value):
+    assert build_locator(kind, value) is None
