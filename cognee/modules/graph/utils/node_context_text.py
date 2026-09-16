@@ -27,16 +27,18 @@ from cognee.modules.graph.utils.convert_node_to_data_point import get_all_subcla
 # it as a ``DataPoint`` subclass for ``context_fields_for_datapoints``.
 from cognee.modules.graph.utils.reference_resolution import (
     STANCE_VERB_BY_POLARITY,
+    UNNAMED_PROPOSITION,
+    UNNAMED_SPEAKER,
     UNRECORDED_STANCE_VERB,
     as_sentence,
 )
 from cognee.modules.retrieval.utils.stop_words import DEFAULT_STOP_WORDS
 
 UNNAMED_NODE = "Unnamed Node"
-UNNAMED_SPEAKER = "unnamed speaker"
 UNKNOWN_POLARITY = "unknown"
-# What ``derived_edge_text`` calls a proposition it has no wording for.
-UNNAMED_PROPOSITION = "this statement"
+# ``UNNAMED_SPEAKER``/``UNNAMED_PROPOSITION`` are imported from ``reference_resolution``
+# above rather than restated here: the stance sentence a prompt reads and the stance
+# sentence stored on the edge have to word a missing speaker the same way.
 
 
 def _get_top_n_frequent_words(
@@ -102,11 +104,14 @@ def node_context_label(props: Mapping[str, Any]) -> str:
     """A node on one line, for an edge line or a bullet. Empty when there is nothing to show."""
     name = _scalar_text(props.get("name"))
     statement_type = _scalar_text(props.get("statement_type"))
+    node_id = _scalar_text(props.get("id"))
     if statement_type is not None:
         polarity = _scalar_text(props.get("polarity")) or UNKNOWN_POLARITY
-        return f"[{statement_type}/{polarity}] {name or UNNAMED_NODE}"
+        # The id fallback is the same one every other node gets: a nameless node still
+        # has to be identifiable in the line that mentions it.
+        return f"[{statement_type}/{polarity}] {name or node_id or UNNAMED_NODE}"
 
-    return name or _scalar_text(props.get("id")) or ""
+    return name or node_id or ""
 
 
 def _assertion_context_text(props: Mapping[str, Any], statement_type: str) -> tuple[str, str]:

@@ -181,7 +181,11 @@ def _entity_from_result(result: Any) -> dict:
         "type": _entity_type(result_payload),
         "edges": [],
     }
-    entity.update(_context_properties(result_payload))
+    for field, value in _context_properties(result_payload).items():
+        # Never overwrite a computed key: ``name`` is normalized, ``edges`` is filled in
+        # by the graph lane, and a subclass is free to declare either as a context field.
+        if field not in entity:
+            entity[field] = value
     return entity
 
 

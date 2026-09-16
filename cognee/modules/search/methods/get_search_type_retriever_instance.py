@@ -161,6 +161,9 @@ async def get_search_type_retriever_instance(
                 ),
                 "use_truth_weight": retriever_specific_config.get("use_truth_weight", False),
                 "facts_top_k": _hybrid_lane_top_k(retriever_specific_config, "facts_top_k", top_k),
+                "statements_top_k": _hybrid_lane_top_k(
+                    retriever_specific_config, "statements_top_k", top_k
+                ),
                 "include_references": include_references,
             },
         ),

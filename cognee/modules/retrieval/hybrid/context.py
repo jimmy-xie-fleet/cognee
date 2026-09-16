@@ -3,6 +3,7 @@ from typing import Any, Optional
 from cognee.modules.retrieval.hybrid.entities import format_entities
 from cognee.modules.retrieval.hybrid.facts import format_facts
 from cognee.modules.retrieval.hybrid.results import display_value, payload, result_id
+from cognee.modules.retrieval.hybrid.statements import format_statements
 
 
 def format_hybrid_context(global_context: str, retrieved_objects: Any) -> str:
@@ -15,6 +16,13 @@ def format_hybrid_context(global_context: str, retrieved_objects: Any) -> str:
     passages = format_passages(retrieved_objects.get("chunks", []))
     if passages:
         sections.append(passages)
+
+    # Statements before entities: a statement states who claimed what, which is the frame
+    # the entity blocks under it are then read in. A lane that retrieved nothing -- every
+    # graph without assertions in it -- adds no key, no section and no separator.
+    statements = format_statements(retrieved_objects.get("statements", []))
+    if statements:
+        sections.append(statements)
 
     entities = format_entities(retrieved_objects.get("entities", []))
     if entities:

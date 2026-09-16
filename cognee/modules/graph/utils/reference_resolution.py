@@ -86,6 +86,13 @@ STANCE_VERB_BY_POLARITY = {
 }
 UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
 
+# What a stance sentence calls a speaker it has no name for, and a proposition it has no
+# wording for. Public for the same reason the verb table is: ``node_context_text`` words a
+# node's stance line with these, so the sentence a prompt reads is the sentence that was
+# embedded for retrieval -- down to the fallbacks.
+UNNAMED_SPEAKER = "an unnamed party"
+UNNAMED_PROPOSITION = "this statement"
+
 _STANCE_VERB_BY_POLARITY = STANCE_VERB_BY_POLARITY
 _UNRECORDED_STANCE_VERB = UNRECORDED_STANCE_VERB
 
@@ -548,9 +555,9 @@ def derived_edge_text(
     be embedded and shown as the fact it denies.
     """
     stripped_proposition = _strip_nonblank_text(proposition)
-    clause = (stripped_proposition or "").rstrip(".").strip() or "this statement"
+    clause = (stripped_proposition or "").rstrip(".").strip() or UNNAMED_PROPOSITION
     stance = _strip_nonblank_text(polarity) or "unknown"
-    label = _strip_nonblank_text(target_label) or "an unnamed party"
+    label = _strip_nonblank_text(target_label) or UNNAMED_SPEAKER
 
     if relationship_name == "asserted_by":
         stance_verb = _STANCE_VERB_BY_POLARITY.get(stance, _UNRECORDED_STANCE_VERB)

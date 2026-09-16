@@ -22,6 +22,7 @@ from cognee.modules.retrieval.hybrid.facts import (
 from cognee.modules.retrieval.hybrid.merge import merge_hybrid_results
 from cognee.modules.retrieval.hybrid.references import cite_hybrid_completions
 from cognee.modules.retrieval.hybrid.results import empty_hybrid_result
+from cognee.modules.retrieval.hybrid.statements import build_statements, search_statements
 from cognee.modules.retrieval.hybrid.truth import build_truth_context
 from cognee.modules.retrieval.utils.completion import generate_completion, generate_completion_batch
 from cognee.modules.retrieval.utils.global_context import (
@@ -36,6 +37,10 @@ from cognee.shared.logging_utils import get_logger
 logger = get_logger("HybridRetriever")
 
 DEFAULT_HYBRID_LANE_TOP_K = 10
+
+# The statements lane is seeded from one vector collection and renders a short block per
+# hit, so it is budgeted wider than the entity lane. Task 7 moves this onto RetrievalConfig.
+DEFAULT_STATEMENTS_TOP_K = 20
 
 
 class HybridRetriever(BaseRetriever):
@@ -60,6 +65,7 @@ class HybridRetriever(BaseRetriever):
         use_importance_weight: bool = True,
         use_truth_weight: bool = False,
         facts_top_k: Optional[int] = 5,
+        statements_top_k: Optional[int] = DEFAULT_STATEMENTS_TOP_K,
     ):
         self.chunks_top_k = chunks_top_k if chunks_top_k is not None else 5
         self.entities_top_k = entities_top_k if entities_top_k is not None else 5
@@ -78,6 +84,9 @@ class HybridRetriever(BaseRetriever):
         self.use_importance_weight = use_importance_weight
         self.use_truth_weight = use_truth_weight
         self.facts_top_k = facts_top_k if facts_top_k is not None else 5
+        self.statements_top_k = (
+            statements_top_k if statements_top_k is not None else DEFAULT_STATEMENTS_TOP_K
+        )
 
     def _use_session_cache(self) -> bool:
         user = session_user.get()
@@ -122,7 +131,7 @@ class HybridRetriever(BaseRetriever):
         # ranking byte-identical to an un-personalized run.
         personal_weights = await load_preference_weights()
 
-        chunk_objects, (entities, facts) = await asyncio.gather(
+        chunk_objects, (entities, facts), statements = await asyncio.gather(
             retrieve_hybrid_chunks(
                 vector_engine=self._unified_engine.vector,
                 query=query,
@@ -140,8 +149,40 @@ class HybridRetriever(BaseRetriever):
                 personal_influence=get_base_config().personalization_influence,
             ),
             self._retrieve_entities_and_facts(query, query_vector),
+            self._retrieve_statements(query, query_vector),
         )
-        return {**chunk_objects, "entities": entities, "facts": facts}
+        retrieved = {**chunk_objects, "entities": entities, "facts": facts}
+        # A graph with no assertions in it keeps exactly the result shape it always had:
+        # the key appears only when the lane found something, so nothing downstream --
+        # merging, id extraction, a golden context -- sees the lane at all.
+        if statements:
+            retrieved["statements"] = statements
+        return retrieved
+
+    async def _retrieve_statements(self, query: str, query_vector: list[float]) -> list[dict]:
+        """Statements lane, run concurrently with the chunk and entity lanes.
+
+        An ``Assertion``'s stance lives in ``polarity`` and the proposition in ``name``, so
+        the lane that finds the statement also pulls the statement it answers and the
+        speaker behind it -- one vector search, one graph round trip, both overlapping the
+        other lanes. A graph without an ``Assertion_name`` collection stops at the search.
+        """
+        hits = await search_statements(
+            self._unified_engine.vector,
+            query,
+            self.statements_top_k,
+            self.node_name,
+            self.node_name_filter_operator,
+            query_vector,
+        )
+        if not hits:
+            return []
+        return await build_statements(
+            self._unified_engine.graph,
+            hits,
+            node_name=self.node_name,
+            node_name_filter_operator=self.node_name_filter_operator,
+        )
 
     async def _retrieve_entities_and_facts(self, query: str, query_vector: list[float]) -> tuple:
         """Entity lane, run concurrently with the chunk lane so the graph round trip for

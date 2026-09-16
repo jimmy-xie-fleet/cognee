@@ -14,6 +14,7 @@ import pytest
 
 from cognee.modules.graph.cognee_graph.CogneeGraph import CogneeGraph
 from cognee.modules.graph.models.EdgeType import EdgeType
+from cognee.modules.retrieval.hybrid import entities as entities_module
 from cognee.modules.retrieval.hybrid.entities import (
     _entity_from_result,
     build_entities,
@@ -76,6 +77,30 @@ def test_entity_from_result_carries_the_assertion_stance_fields():
     assert {field: entity[field] for field in CONTEXT_FIELDS} == {
         field: ASSERTION_PAYLOAD[field] for field in CONTEXT_FIELDS
     }
+
+
+def test_declared_context_fields_do_not_overwrite_the_computed_entity_keys():
+    """A context field that collides with a computed key must lose to the computed value.
+
+    No subclass declares one today; the guard is what keeps the next one from silently
+    replacing the name the renderer normalized, or the edges the graph lane filled in.
+    """
+    colliding_payload = {
+        **ASSERTION_PAYLOAD,
+        "name": "  Adams breached the lease  ",
+        "edges": ["raw"],
+    }
+
+    with patch.object(
+        entities_module,
+        "context_fields_for_datapoints",
+        return_value=["name", "edges", "statement_type"],
+    ):
+        entity = _entity_from_result(_hit(colliding_payload))
+
+    assert entity["name"] == "Adams breached the lease"
+    assert entity["edges"] == []
+    assert entity["statement_type"] == "denial"
 
 
 def test_entity_block_of_an_assertion_renders_the_stance():
