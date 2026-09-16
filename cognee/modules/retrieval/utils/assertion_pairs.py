@@ -44,6 +44,7 @@ from typing import Any, Iterable, Optional, Sequence
 from cognee.infrastructure.engine import is_internal_node
 from cognee.modules.graph.cognee_graph.CogneeGraphElements import Edge, Node
 from cognee.modules.graph.utils.node_context_text import is_assertion_props
+from cognee.modules.retrieval.config import get_retrieval_config
 from cognee.modules.retrieval.utils.brute_force_triplet_search import (
     DEFAULT_EDGE_PROPERTIES_TO_PROJECT,
     default_node_properties_to_project,
@@ -52,9 +53,6 @@ from cognee.modules.retrieval.utils.merge_results import edge_identity
 from cognee.shared.logging_utils import get_logger
 
 logger = get_logger("assertion_pairs")
-
-# Task 7 moves this onto RetrievalConfig; until then the module constant is the switch.
-PAIR_EXPANSION_ENABLED = True
 
 # What an assertion is paired with: the statement it answers, and who is behind it.
 PAIR_EDGE_TYPES = ("responds_to", "attributed_to", "asserted_by")
@@ -258,7 +256,11 @@ async def append_assertion_pair_edges(
     object -- whenever there is nothing to add, so a retrieval over a graph with no
     assertions in it is untouched, down to identity.
     """
-    if not PAIR_EXPANSION_ENABLED or not edges or graph_engine is None:
+    if (
+        not get_retrieval_config().graph_completion_pair_expansion
+        or not edges
+        or graph_engine is None
+    ):
         return edges
 
     endpoints = [

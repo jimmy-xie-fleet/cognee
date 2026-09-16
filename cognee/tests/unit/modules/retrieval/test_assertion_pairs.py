@@ -15,7 +15,7 @@ assertion. And that a graph with no assertions in it never asks the adapter for 
 neighborhood, nor even resolves a graph engine.
 """
 
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -434,10 +434,12 @@ async def test_a_provider_that_fails_degrades_to_the_retrieved_edges():
 
 @pytest.mark.asyncio
 async def test_the_feature_flag_switches_the_expansion_off():
+    """Task 7: the switch moved onto RetrievalConfig.graph_completion_pair_expansion."""
     triplets = [_edge(_node(DENIAL_PROPS), _node({"id": "doc-1", "name": "Complaint"}), {})]
     graph = _pair_graph()
+    disabled_config = SimpleNamespace(graph_completion_pair_expansion=False)
 
-    with patch.object(assertion_pairs, "PAIR_EXPANSION_ENABLED", False):
+    with patch.object(assertion_pairs, "get_retrieval_config", return_value=disabled_config):
         expanded = await append_assertion_pair_edges(graph, triplets)
 
     assert expanded is triplets

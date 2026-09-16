@@ -550,5 +550,7 @@ async def test_registry_threads_the_statements_lane_top_k():
     )
 
     assert explicit.statements_top_k == 4
-    assert capped.statements_top_k == 10
+    # Task 7: RetrievalConfig.hybrid_statements_top_k (default 20) wins over the
+    # request top_k now, so "capped" no longer means min(top_k, 10).
+    assert capped.statements_top_k == 20
     assert unset.statements_top_k == DEFAULT_STATEMENTS_TOP_K

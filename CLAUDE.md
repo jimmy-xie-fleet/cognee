@@ -970,6 +970,31 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   not only a bulk load's earliest documents — needs one
   `resolve_references_pipeline(dataset=…)` pass after ingestion.
 
+#### Retrieval budgets
+
+Hybrid and graph-completion recall over a legal graph needs to feed the LLM as much
+relevant context as the plain graph gets — richer graphs (assertions, pair edges,
+statements) get truncated by the same lane sizes a plain-entity graph uses otherwise.
+Lane sizes are per-request (`retriever_specific_config`), but that dict is not reachable
+over HTTP, so a UI can never raise them; `RetrievalConfig`
+(`cognee/modules/retrieval/config.py`) makes the defaults tunable by env instead. An
+explicit `retriever_specific_config` value always wins over the config; the config's
+default wins over the request's own `top_k`.
+
+| Env var | Field | Default |
+|---|---|---|
+| `HYBRID_CHUNKS_TOP_K` | `hybrid_chunks_top_k` | 30 |
+| `HYBRID_ENTITIES_TOP_K` | `hybrid_entities_top_k` | 30 |
+| `HYBRID_FACTS_TOP_K` | `hybrid_facts_top_k` | 30 |
+| `HYBRID_STATEMENTS_TOP_K` | `hybrid_statements_top_k` | 20 |
+| `HYBRID_MAX_EDGES_PER_ENTITY` | `hybrid_max_edges_per_entity` | 20 |
+| `DISPUTES_TOP_K` | `disputes_top_k` | 50 |
+| `GRAPH_COMPLETION_PAIR_EXPANSION` | `graph_completion_pair_expansion` | `true` |
+
+`graph_completion_pair_expansion` gates the assertion pair-expansion described above
+(`cognee/modules/retrieval/utils/assertion_pairs.py`) — set it `false` to render an
+assertion without pulling in the statement it answers.
+
 ### Skills (Procedural Memory)
 Dataset-scoped `SKILL.md` playbooks agents can discover, load on demand, execute, and improve from run history.
 

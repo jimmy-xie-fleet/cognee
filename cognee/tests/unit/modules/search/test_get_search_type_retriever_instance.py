@@ -1,4 +1,5 @@
 import importlib
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -236,7 +237,10 @@ async def test_hybrid_completion_retriever_receives_config():
 
 
 @pytest.mark.asyncio
-async def test_hybrid_completion_caps_default_channel_limits():
+async def test_hybrid_completion_uses_config_defaults_over_request_top_k():
+    """Task 7: RetrievalConfig's raised lane defaults win over the request top_k
+    whenever the caller does not set a lane explicitly, so a bigger request top_k no
+    longer changes the lane sizes."""
     import cognee.modules.search.methods.get_search_type_retriever_instance as mod
 
     retriever_instance = await mod.get_search_type_retriever_instance(
@@ -246,16 +250,18 @@ async def test_hybrid_completion_caps_default_channel_limits():
     )
 
     assert isinstance(retriever_instance, HybridRetriever)
-    assert retriever_instance.chunks_top_k == 10
-    assert retriever_instance.entities_top_k == 10
+    assert retriever_instance.chunks_top_k == 30
+    assert retriever_instance.entities_top_k == 30
     assert retriever_instance.text_summaries_top_k is None
     assert retriever_instance.use_importance_weight is True
-    assert retriever_instance.facts_top_k == 10
+    assert retriever_instance.facts_top_k == 30
+    assert retriever_instance.statements_top_k == 20
+    assert retriever_instance.max_edges_per_entity == 20
     assert retriever_instance.include_references is False
 
 
 @pytest.mark.asyncio
-async def test_hybrid_completion_leaves_lane_defaults_when_top_k_is_none():
+async def test_hybrid_completion_uses_config_defaults_when_top_k_is_none():
     import cognee.modules.search.methods.get_search_type_retriever_instance as mod
 
     retriever_instance = await mod.get_search_type_retriever_instance(
@@ -264,13 +270,16 @@ async def test_hybrid_completion_leaves_lane_defaults_when_top_k_is_none():
         top_k=None,
     )
 
-    assert retriever_instance.chunks_top_k == 5
-    assert retriever_instance.entities_top_k == 5
-    assert retriever_instance.facts_top_k == 5
+    assert retriever_instance.chunks_top_k == 30
+    assert retriever_instance.entities_top_k == 30
+    assert retriever_instance.facts_top_k == 30
+    assert retriever_instance.statements_top_k == 20
 
 
 @pytest.mark.asyncio
-async def test_hybrid_completion_keeps_search_top_k_when_below_lane_cap():
+async def test_hybrid_completion_uses_config_defaults_when_top_k_is_below_them():
+    """Config still wins even when the request top_k is smaller than the config default
+    -- config is not merely a ceiling on top_k, it replaces it as the default."""
     import cognee.modules.search.methods.get_search_type_retriever_instance as mod
 
     retriever_instance = await mod.get_search_type_retriever_instance(
@@ -278,6 +287,34 @@ async def test_hybrid_completion_keeps_search_top_k_when_below_lane_cap():
         query_text="q",
         top_k=5,
     )
+
+    assert retriever_instance.chunks_top_k == 30
+    assert retriever_instance.entities_top_k == 30
+    assert retriever_instance.facts_top_k == 30
+
+
+@pytest.mark.asyncio
+async def test_hybrid_completion_falls_back_to_request_top_k_when_config_field_unset():
+    """Third tier of the resolution order: only reached when neither an explicit
+    retriever_specific_config value nor a RetrievalConfig field is available -- exercised
+    here with a fake config object standing in for a field left unset, since every real
+    RetrievalConfig field always carries a default."""
+    import cognee.modules.search.methods.get_search_type_retriever_instance as mod
+
+    unset_config = types.SimpleNamespace(
+        hybrid_chunks_top_k=None,
+        hybrid_entities_top_k=None,
+        hybrid_facts_top_k=None,
+        hybrid_statements_top_k=None,
+        hybrid_max_edges_per_entity=None,
+    )
+
+    with patch.object(mod, "get_retrieval_config", return_value=unset_config):
+        retriever_instance = await mod.get_search_type_retriever_instance(
+            SearchType.HYBRID_COMPLETION,
+            query_text="q",
+            top_k=5,
+        )
 
     assert retriever_instance.chunks_top_k == 5
     assert retriever_instance.entities_top_k == 5
