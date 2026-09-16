@@ -57,15 +57,16 @@ from cognee.tasks.graph.reference_pass import (
     PATCH_FULL,
     PATCH_NONE,
     CallBudget,
+    Outcome,
+    OutcomeKind,
     PassContext,
     _default_patch_mode,
     _empty_summary,
-    _finalize,
-    _Outcome,
     _Pending,
     _prior_attempt,
     _record_outcome,
     _trace_pending,
+    _unresolved,
     _unstated_pending,
     inferred_edge_properties,
 )
@@ -145,7 +146,7 @@ def _resolve_existing_id(
     field_name: str,
     value: str,
     reference_text: str,
-) -> _Outcome:
+) -> Outcome:
     """Step 1: the field already holds an id -- make sure the edge exists.
 
     ``reference_text`` is the wording the document used when a previous pass preserved
@@ -155,14 +156,14 @@ def _resolve_existing_id(
         logger.debug(
             "Reference %s.%s points at an unknown node %s.", assertion_id, field_name, value
         )
-        return _Outcome("unresolved")
+        return Outcome(OutcomeKind.UNRESOLVED)
 
     if (assertion_id, value, field_name) in ctx.view.edge_keys:
-        return _Outcome("already_resolved")
+        return Outcome(OutcomeKind.ALREADY_RESOLVED)
 
     props = ctx.view.node_props(value)
-    return _Outcome(
-        "resolved",
+    return Outcome(
+        OutcomeKind.RESOLVED,
         Resolution(
             assertion_id=assertion_id,
             field=field_name,
@@ -205,7 +206,7 @@ def _resolve_entity_name(
     reference_text: str,
     *,
     stale: bool = False,
-) -> Optional[_Outcome]:
+) -> Optional[Outcome]:
     """Step 2: the reference names one entity. None means "not an entity name".
 
     ``stale`` says the field holds an id that is no longer a node. Then an edge already in
@@ -224,15 +225,15 @@ def _resolve_entity_name(
             field_name,
             len(entity_ids),
         )
-        return _Outcome("ambiguous")
+        return Outcome(OutcomeKind.AMBIGUOUS)
 
     entity_id = entity_ids[0]
     edges_exist = (assertion_id, entity_id, field_name) in ctx.view.edge_keys
     if edges_exist and not stale:
-        return _Outcome("already_resolved")
+        return Outcome(OutcomeKind.ALREADY_RESOLVED)
 
-    return _Outcome(
-        "resolved",
+    return Outcome(
+        OutcomeKind.RESOLVED,
         Resolution(
             assertion_id=assertion_id,
             field=field_name,
@@ -250,7 +251,7 @@ def _resolve_entity_name(
     )
 
 
-def _replace_dead_id(outcome: _Outcome) -> _Outcome:
+def _replace_dead_id(outcome: Outcome) -> Outcome:
     """A stale id re-resolved by name has to actually replace the dead id.
 
     ``entity_name`` patches nothing by default -- the field keeps the words the document
@@ -261,7 +262,7 @@ def _replace_dead_id(outcome: _Outcome) -> _Outcome:
     resolution = outcome.resolution
     if resolution is None or resolution.patch_mode == PATCH_FULL:
         return outcome
-    return _Outcome(outcome.kind, replace(resolution, patch_mode=PATCH_FULL), outcome.stale)
+    return replace(outcome, resolution=replace(resolution, patch_mode=PATCH_FULL))
 
 
 def _cheap_cascade(
@@ -271,7 +272,7 @@ def _cheap_cascade(
     props: dict,
     *,
     own_chunk_touched: bool,
-) -> Tuple[Optional[_Outcome], Optional[_Pending]]:
+) -> Tuple[Optional[Outcome], Optional[_Pending]]:
     """Steps 1-3 for one ``(assertion, field)``: no retrieval, no LLM, no document reads.
 
     ``(outcome, None)`` when the reference is answered or there is nothing to answer;
@@ -295,6 +296,10 @@ def _cheap_cascade(
     entry_notes: Tuple[str, ...] = ()
     stale = False
 
+    def concluded(outcome: Outcome) -> Outcome:
+        """One conclusion, carrying the conditions this reference was read under."""
+        return replace(outcome, notes=entry_notes, stale=stale)
+
     if holds_id:
         # An id that is no longer a node -- the target was forgotten, or an amended
         # document re-chunked under new ids -- re-resolves from the preserved reference
@@ -304,12 +309,8 @@ def _cheap_cascade(
             entry_notes = (NOTE_STALE_ID,) if stale else ()
         else:
             return (
-                _finalize(
-                    _resolve_existing_id(
-                        ctx, assertion_id, field_name, value, stored_text or value
-                    ),
-                    entry_notes,
-                    stale,
+                concluded(
+                    _resolve_existing_id(ctx, assertion_id, field_name, value, stored_text or value)
                 ),
                 None,
             )
@@ -322,10 +323,10 @@ def _cheap_cascade(
         if entity_outcome is not None:
             if stale:
                 entity_outcome = _replace_dead_id(entity_outcome)
-            return _finalize(entity_outcome, entry_notes, stale), None
+            return concluded(entity_outcome), None
 
     if hint is None:
-        return _finalize(_Outcome("unresolved"), entry_notes, stale), None
+        return concluded(Outcome(OutcomeKind.UNRESOLVED)), None
 
     fingerprint = reference_fingerprint(hint, field_name)
     # A stale id means the stored answer is dark, so a matching fingerprint must not stop
@@ -335,11 +336,11 @@ def _cheap_cascade(
         # answer, whether or not the node could be patched to remember it: without this, a
         # backend with no ``update_node`` re-spends the whole budget on every pass.
         if (assertion_id, field_name) in ctx.view.resolver_edge_keys:
-            return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
+            return concluded(Outcome(OutcomeKind.ALREADY_RESOLVED)), None
 
         prior = _prior_attempt(props, field_name, max_iter=ctx.max_iter)
         if prior is not None and prior.get("fingerprint") == fingerprint:
-            return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
+            return concluded(Outcome(OutcomeKind.ALREADY_RESOLVED)), None
 
     return None, _Pending(
         assertion_id=assertion_id,
@@ -444,8 +445,9 @@ async def plan_resolutions(
                     logger.warning(
                         "Could not resolve %s on assertion %s: %s", field_name, assertion_id, error
                     )
-                    summary["scanned"] += 1
-                    summary["failed"] += 1
+                    _record_outcome(
+                        ctx, Outcome(OutcomeKind.FAILED), own_chunk_touched=own_chunk_touched
+                    )
                     # A field whose cascade blew up is still the stated loop's: guessing
                     # at it instead would hide the bug behind an inference.
                     handled.add((assertion_id, field_name))
@@ -471,9 +473,7 @@ async def plan_resolutions(
                         # The tail writes nothing for a reference it cannot answer, so
                         # the pass retries it from scratch.
                         _record_outcome(
-                            ctx,
-                            _finalize(_Outcome("unresolved"), entry.entry_notes, entry.stale),
-                            own_chunk_touched=own_chunk_touched,
+                            ctx, _unresolved(entry), own_chunk_touched=own_chunk_touched
                         )
                 elif outcome is not None:
                     _record_outcome(ctx, outcome, own_chunk_touched=own_chunk_touched)

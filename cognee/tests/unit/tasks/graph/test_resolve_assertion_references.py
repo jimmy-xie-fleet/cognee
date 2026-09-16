@@ -2067,6 +2067,8 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         documents={},
         document_by_chunk={},
         node_ids={"gone"},
+        # The whole mapping runs now, and the edge pre-check reads this.
+        edge_keys=set(),
     )
     entry = pass_module._Pending(
         assertion_id="a1",
@@ -2088,9 +2090,9 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         capped=False,
     )
 
-    outcome = pass_module._answer_to_outcome(_pass_context(view, threshold=0.6), entry, answer)
+    outcome = pass_module.finish_to_outcome(_pass_context(view, threshold=0.6), entry, answer)
 
-    assert outcome.kind == "resolved"
+    assert outcome.kind is pass_module.OutcomeKind.RESOLVED
     assert outcome.resolution.anchor_id == "gone"
     assert outcome.resolution.anchor_type is None
 
