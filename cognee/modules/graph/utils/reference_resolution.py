@@ -78,11 +78,16 @@ _WORD_MARKER_KINDS = frozenset({"count"})
 # How an asserted_by edge words the speaker's stance, and how a reference edge words the
 # statement it points at. Both are read by a human and embedded for retrieval, so the
 # stance has to be in the sentence rather than reconstructible from the endpoints.
-_STANCE_VERB_BY_POLARITY = {
+# Public: ``node_context_text`` words a node's stance line with the same table, so the
+# sentence a prompt reads matches the sentence that was embedded for retrieval.
+STANCE_VERB_BY_POLARITY = {
     "positive": "affirms that",
     "negative": "denies that",
 }
-_UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
+UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
+
+_STANCE_VERB_BY_POLARITY = STANCE_VERB_BY_POLARITY
+_UNRECORDED_STANCE_VERB = UNRECORDED_STANCE_VERB
 
 _DERIVED_EDGE_VERBS = {
     "attributed_to": "is attributed to",
@@ -519,10 +524,13 @@ def _strip_nonblank_text(value: Optional[str]) -> Optional[str]:
     return stripped_value or None
 
 
-def _sentence(text: str) -> str:
-    """One sentence of edge text, terminated exactly once."""
+def as_sentence(text: str) -> str:
+    """One sentence, terminated exactly once. Public for ``node_context_text``."""
     stripped_text = text.strip()
     return stripped_text if stripped_text.endswith((".", "!", "?")) else f"{stripped_text}."
+
+
+_sentence = as_sentence
 
 
 def derived_edge_text(

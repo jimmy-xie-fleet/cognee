@@ -21,6 +21,9 @@ class MetaData(TypedDict):
     type: NotRequired[str]
     index_fields: list[str]
     identity_fields: NotRequired[list[str]]
+    # Properties a renderer needs beyond name/description; unioned into the graph
+    # projection whitelist by ``context_fields_for_datapoints``.
+    context_fields: NotRequired[list[str]]
     transparent: NotRequired[bool]
 
 

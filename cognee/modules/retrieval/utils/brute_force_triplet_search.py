@@ -10,6 +10,7 @@ from cognee.infrastructure.databases.vector.exceptions import CollectionNotFound
 from cognee.modules.graph.cognee_graph.CogneeGraph import CogneeGraph
 from cognee.modules.graph.cognee_graph.CogneeGraphElements import Edge
 from cognee.modules.graph.exceptions.exceptions import EntityNotFoundError
+from cognee.modules.graph.utils.node_context_text import context_fields_for_datapoints
 from cognee.modules.observability import (
     COGNEE_RESULT_SUMMARY,
     COGNEE_VECTOR_COLLECTION,
@@ -62,10 +63,30 @@ async def get_memory_fragment(
 ) -> CogneeGraph:
     """Creates and initializes a CogneeGraph memory fragment with optional property projections."""
     if properties_to_project is None:
-        properties_to_project = ["id", "description", "name", "type", "text", "importance_weight"]
+        # A node reaches a renderer as exactly these properties, so a node type whose text
+        # cannot be rendered from name/description alone (an Assertion: ``name`` is the
+        # affirmative proposition and the stance lives in ``polarity``) has its declared
+        # context fields projected too. A caller that named its own properties gets those
+        # and nothing else.
+        properties_to_project = [
+            "id",
+            "description",
+            "name",
+            "type",
+            "text",
+            "importance_weight",
+            *context_fields_for_datapoints(),
+        ]
 
-    node_properties_to_project = list(properties_to_project)
-    edge_properties_to_project = ["relationship_name", "edge_text", "edge_object_id"]
+    node_properties_to_project = list(dict.fromkeys(properties_to_project))
+    edge_properties_to_project = [
+        "relationship_name",
+        "edge_text",
+        "edge_object_id",
+        # How a resolved reference edge was matched, so the prompt can report it.
+        "resolution_confidence",
+        "resolution_strategy",
+    ]
 
     if feedback_influence > 0.0:
         if "feedback_weight" not in node_properties_to_project:
