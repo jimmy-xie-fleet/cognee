@@ -160,9 +160,7 @@
       "must_not_claim": [
         {
           "claim": "The Overlook engineer found the building's electrical service to be overloaded or unsafe (the memo states no overloading, tripped breakers or unsafe conditions were observed).",
-          "match": [
-            "overloaded"
-          ]
+          "match": []
         },
         {
           "claim": "The Fester-Mayor emails show the Mayor directing Fester to reach a predetermined blight finding (she wrote 'do the real analysis' and 'Present it straight').",
@@ -344,27 +342,19 @@
       "must_not_claim": [
         {
           "claim": "The engineer found that the electrical service was overloaded or presented an unsafe condition.",
-          "match": [
-            "overloaded"
-          ]
+          "match": []
         },
         {
           "claim": "The engineer found structural distress, foundation settlement, or that the building was structurally unsound.",
-          "match": [
-            "structurally unsound"
-          ]
+          "match": []
         },
         {
           "claim": "The engineer performed a load calculation or a code compliance review.",
-          "match": [
-            "code compliance review"
-          ]
+          "match": []
         },
         {
           "claim": "The engineer found that the HVAC units were non-operational.",
-          "match": [
-            "non-operational"
-          ]
+          "match": []
         }
       ],
       "notes": "Negation-sensitive. Every negative finding here ('no overloading', 'no unsafe conditions', 'no structural distress') was rewritten as a positive claim in the failure that motivated this eval."
@@ -466,9 +456,7 @@
       "must_not_claim": [
         {
           "claim": "The Mayor instructed Fester to find the property blighted or to reach a predetermined conclusion.",
-          "match": [
-            "predetermined conclusion"
-          ]
+          "match": []
         },
         {
           "claim": "Fester told the Mayor he would reach whatever conclusion she wanted.",

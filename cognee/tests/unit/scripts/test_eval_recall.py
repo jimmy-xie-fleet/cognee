@@ -1942,3 +1942,60 @@ def test_resolve_search_types_accepts_auto_and_rejects_an_unknown_name():
     with pytest.raises(ValueError) as error:
         lib.resolve_search_types(["DISPUTES_ONLY"])
     assert "DISPUTES_ONLY" in str(error.value)
+
+
+def test_a_fresh_run_refuses_a_populated_out_directory(tmp_path, monkeypatch, capsys):
+    """The pending matrix is written first, so a populated --out must not be clobbered."""
+    path = write_question_file(tmp_path, question_document())
+    run_dir = tmp_path / "run"
+    lib.write_jsonl(run_dir / lib.ANSWERS_FILENAME, [answer_row("adams-01")])
+    monkeypatch.setattr(cli.lib, "configure_llm_environment", lambda: None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "--questions",
+                str(path),
+                "--datasets",
+                "adams",
+                "--search-types",
+                "HYBRID_COMPLETION",
+                "--out",
+                str(run_dir),
+            ]
+        )
+
+    assert excinfo.value.code == 2
+    assert "use --resume" in capsys.readouterr().err
+    assert [r["question_id"] for r in lib.read_jsonl(run_dir / lib.ANSWERS_FILENAME)] == [
+        "adams-01"
+    ]
+
+
+def test_the_session_prefix_carries_a_per_process_nonce(tmp_path):
+    prefix = cli._session_prefix(tmp_path / "run1")
+
+    assert prefix.startswith("eval-run1-")
+    assert len(prefix) == len("eval-run1-") + 8
+    assert cli._session_prefix(tmp_path / "run1") == prefix  # stable within one process
+
+
+def test_judge_only_into_a_new_directory_copies_the_manifest(tmp_path, monkeypatch):
+    path = write_question_file(tmp_path, question_document())
+    source = tmp_path / "source"
+    lib.write_jsonl(source / lib.ANSWERS_FILENAME, [answer_row("adams-01", answer="graded")])
+    (source / lib.MANIFEST_FILENAME).write_text(json.dumps({"label": "server=main"}))
+    destination = tmp_path / "copy"
+    monkeypatch.setattr(cli.lib, "configure_llm_environment", lambda: None)
+
+    async def fake_run_judge(rows, questions, on_row=None, **kwargs):
+        return []
+
+    monkeypatch.setattr(cli.lib, "run_judge", fake_run_judge)
+
+    code = cli.main(
+        ["--judge-only", str(source), "--questions", str(path), "--out", str(destination)]
+    )
+
+    assert code == 0
+    assert json.loads((destination / lib.MANIFEST_FILENAME).read_text()) == {"label": "server=main"}

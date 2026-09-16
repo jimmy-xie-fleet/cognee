@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import uuid
 from pathlib import Path
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
@@ -264,9 +265,14 @@ def _verdict_reporter(total: int, journal: Path | None = None):
     return report
 
 
+# One nonce per process: a --resume retries a cell on a fresh session rather than the
+# one the failed attempt may already have written a QA turn to.
+_PROCESS_NONCE = uuid.uuid4().hex[:8]
+
+
 def _session_prefix(run_directory: Path) -> str:
     """Namespace for this run's per-cell sessions, so two runs never share one."""
-    return f"eval-{run_directory.name}"
+    return f"eval-{run_directory.name}-{_PROCESS_NONCE}"
 
 
 def _run_matrix(args, questions, datasets, search_types, run_directory: Path) -> list:
@@ -367,6 +373,11 @@ def main(argv: list[str] | None = None) -> int:
         # would grade the stale matrix and then delete the evidence.
         answer_rows = _fold_journals(source_directory, run_directory, previous)
         existing_verdicts = _fold_verdict_journal(source_directory, run_directory, answer_rows)
+        if run_directory != source_directory:
+            source_manifest = source_directory / lib.MANIFEST_FILENAME
+            if source_manifest.exists():
+                # A re-graded copy keeps the provenance of the run it grades.
+                (run_directory / lib.MANIFEST_FILENAME).write_bytes(source_manifest.read_bytes())
         _progress(f"Re-judging {len(answer_rows)} saved answer(s) from {source_directory}")
 
     elif args.resume:
@@ -416,6 +427,13 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         run_directory = Path(args.out) if args.out else lib.default_run_directory(DEFAULT_RUNS_ROOT)
+        if (run_directory / lib.ANSWERS_FILENAME).exists():
+            # The pending matrix is written before the first request, so a fresh run
+            # into a populated directory would erase its answers up front.
+            parser.error(
+                f"{run_directory} already holds {lib.ANSWERS_FILENAME}; "
+                "use --resume to continue it or a fresh --out"
+            )
         run_directory.mkdir(parents=True, exist_ok=True)
 
         manifest_path = lib.write_manifest(

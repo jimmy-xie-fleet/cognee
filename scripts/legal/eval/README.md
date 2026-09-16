@@ -195,7 +195,7 @@ being overwritten; pass `--out` to write the merged run somewhere else instead.
 | `n` | cells attempted |
 | `answered` | cells that came back without an error - check this first |
 | `judge issues` | indices the judge invented or put on both lists; above zero means read those rows |
-| `mean coverage` | mean over graded questions of `covered / (covered + missed)` gold facts |
+| `mean coverage` | mean over graded questions of `covered / all of the question's gold facts` - the judge answers with indices, so it cannot shrink the denominator |
 | `wrong claims` | total claims contradicting a gold fact or the retrieved context |
 | `fabricated claims` | total specific claims supported by neither context nor gold facts (includes every triggered `must_not_claim`) |
 | `stance errors` | total places the answer asserted as true something the documents negate, or the reverse |
@@ -214,6 +214,8 @@ Under the table is an error histogram by class:
 | `401` | the token expired mid-run - `--resume` the run |
 | `timeout` | raise `--timeout`, or `--pause-seconds` to reduce load |
 | `5xx` | the server was saturated - `--pause-seconds`, then `--resume` |
+| `pending` | the matrix row was written but the cell was never attempted (the run died) - `--resume` |
+| `empty` | the server answered with no text or the "memory still warming up" marker - `--resume` later |
 | `other` | read the `error` field in `answers.jsonl` |
 
 `--spot-check 0.2` prints a seeded 20% of verdicts with question, gold facts,
