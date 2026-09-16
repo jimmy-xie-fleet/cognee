@@ -140,6 +140,65 @@ def test_find_locator_span_matches_a_digit_marker_from_a_roman_reference():
     assert text[start:end] == "Article 4\nFourth article.\n"
 
 
+@pytest.mark.parametrize("marker", ["Section", "SECTION", "§"])
+@pytest.mark.parametrize("number", ["4.2.1", "4.20", "4.2a"])
+def test_find_locator_span_requires_the_complete_section_number(marker, number):
+    text = f"{marker} {number} Tenant indemnifies the landlord.\n"
+    assert find_locator_span(text, _locator("section", "4.2")) is None
+
+
+@pytest.mark.parametrize("marker", ["Section", "SECTION", "§"])
+def test_find_locator_span_parent_section_includes_its_children(marker):
+    text = (
+        f"{marker} 4 INDEMNITY\n"
+        f"{marker} 4.1 TENANT OBLIGATIONS\nTenant indemnifies the landlord.\n"
+        f"{marker} 4.2 LANDLORD OBLIGATIONS\nLandlord indemnifies the tenant.\n"
+        f"{marker} 5 INSURANCE\nTenant carries insurance.\n"
+    )
+    start, end, notes = find_locator_span(text, _locator("section", "4"))
+
+    assert start == 0
+    assert end == text.index(f"{marker} 5")
+    assert notes == ()
+    assert select_anchored_assertions(
+        text[start:end],
+        [
+            ("tenant", "Tenant indemnifies the landlord."),
+            ("landlord", "Landlord indemnifies the tenant."),
+            ("insurance", "Tenant carries insurance."),
+        ],
+    ) == ["tenant", "landlord"]
+
+
+@pytest.mark.parametrize("next_section", ["4.3", "5"])
+def test_find_locator_span_nested_section_ends_at_sibling_or_parent(next_section):
+    text = (
+        "Section 4.1 Unrelated preceding section.\n"
+        "Section 4.2. INDEMNITY\n"
+        "SECTION 4.2.1 TENANT OBLIGATIONS\nTenant indemnifies the landlord.\n"
+        "SECTION 4.2.2 LANDLORD OBLIGATIONS\nLandlord indemnifies the tenant.\n"
+        f"Section {next_section} Insurance.\n"
+    )
+    start, end, notes = find_locator_span(text, _locator("section", "4.2"))
+
+    assert start == text.index("Section 4.2.")
+    assert end == text.index(f"Section {next_section}")
+    assert notes == ()
+
+
+def test_find_locator_span_section_sequence_ignores_descendants():
+    text = (
+        "Section 4 Unrelated numbered list.\nSection 8 Another list item.\n"
+        "Section 4 Indemnity.\nSection 4.1 Tenant indemnifies the landlord.\n"
+        "Section 5 Insurance.\n"
+    )
+    start, end, notes = find_locator_span(text, _locator("section", "4"))
+
+    assert start == text.index("Section 4 Indemnity.")
+    assert end == text.index("Section 5")
+    assert notes == ()
+
+
 def test_find_locator_span_returns_none_when_the_marker_is_absent():
     assert find_locator_span(COMPLAINT_TEXT, _locator("paragraph", "12")) is None
 

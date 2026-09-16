@@ -993,6 +993,11 @@ async def _remember_inner(
 
     client = get_remote_client()
     if client is not None:
+        if kwargs.get("enrichment_tasks"):
+            raise ValueError(
+                "enrichment_tasks is not supported while connected to a remote Cognee "
+                "instance; tasks cannot be serialized to a remote instance."
+            )
         span.set_attribute(COGNEE_OPERATION_MODE, "cloud")
         return await client.remember(
             data,

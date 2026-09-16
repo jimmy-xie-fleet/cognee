@@ -6,10 +6,10 @@ cap, or when the pass-wide :class:`CallBudget` cannot pay for another call. What
 sets once -- both confidence bars, the budget, the step cap, the counters -- is read off
 its ``PassContext``; the arguments are this one reference.
 
-Two spending rules, because they are the difference between a bounded pass and an unbounded
-one: ``budget.take()`` runs **before** every call, so a trace that starts after the pass
-budget ran out costs nothing; and reaching ``max_iter`` returns an abstention **without** a
-final "just answer now" call, so a reference costs at most ``max_iter`` calls exactly.
+The limit counts ``LLMGateway`` invocations: ``budget.take()`` runs before each invocation,
+and reaching ``max_iter`` returns an abstention without an extra finish invocation. An
+adapter may make multiple provider requests for validation retries, schema fallback or
+transient errors inside one invocation. This is not a provider-request or monetary cap.
 
 Nothing here writes to the graph.
 """
@@ -113,18 +113,17 @@ class TracerStep(BaseModel):
 
 @dataclass
 class CallBudget:
-    """LLM calls one resolver pass may spend, shared by every trace in it.
+    """Gateway invocations allowed for one pass, shared by every trace in it.
 
-    Deliberately a plain mutable object handed to each trace rather than a ContextVar: a
-    ContextVar is *copied* into a task, so concurrent traces would each get their own
-    budget. Traces run sequentially for the same reason.
+    Provider retries inside the gateway are not counted. The same mutable instance is
+    handed to the sequential traces so they consume one pass-wide allowance.
     """
 
     max_calls: int
     used: int = 0
 
     def take(self) -> bool:
-        """Claim one call. False (and nothing spent) once the budget is gone."""
+        """Claim one gateway invocation, or return False when the allowance is used."""
         if self.used >= self.max_calls:
             return False
         self.used += 1
@@ -256,7 +255,7 @@ async def trace_reference(
     tools: Mapping[str, ToolSpec],
     registry: LabelRegistry,
 ) -> Tuple[TracerFinish, List[TraceRecord], int]:
-    """Resolve one reference, or abstain, in at most ``ctx.max_iter`` LLM calls.
+    """Resolve one reference in at most ``ctx.max_iter`` gateway invocations.
 
     ``unstated`` selects the task -- a reference the document wrote, or the statement this
     one answers without saying so -- and, with the context's two confidence bars, renders
@@ -264,7 +263,7 @@ async def trace_reference(
     the model is never talked into answers the caller then throws away. An unstated trace
     is shown no reference block at all: there is no reference to show it.
 
-    Returns ``(finish, tool step records, calls actually spent)``. ``finish`` always names
+    Returns ``(finish, tool step records, gateway invocations attempted)``. ``finish`` names
     either a label this trace's ``registry`` can resolve or ``None``: a label the model
     invented is converted to an abstention here. Counters are created on first use, and the
     specific abstention causes are counted apart from ``llm_abstained``.
@@ -325,8 +324,8 @@ async def trace_reference(
                 response_model=TracerStep,
             )
         except Exception as error:
-            # The slot is spent either way; a retry would spend a second one while every
-            # other reference in the pass is still waiting.
+            # The gateway slot is spent either way. The adapter may have retried
+            # provider requests internally; the tracer does not invoke it again here.
             _bump(ctx.counters, "llm_failed")
             logger.warning("Reference trace step %s failed: %s", step_number, error)
             return _abstain(f"tracer call failed: {error}"), records, iterations

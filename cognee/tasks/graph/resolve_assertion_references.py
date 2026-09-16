@@ -491,7 +491,7 @@ async def plan_resolutions(
 
     logger.info(
         "Reference resolution planned: scanned=%d resolved=%d already=%d unresolved=%d "
-        "ambiguous=%d stale_ids=%d failed=%d llm_calls=%d/%d traces=%d",
+        "ambiguous=%d stale_ids=%d failed=%d gateway_calls=%d/%d traces=%d",
         summary["scanned"],
         summary["resolved"],
         summary["already_resolved"],
@@ -513,7 +513,7 @@ def _dataset_id(ctx, dataset_id):
 
 
 def _allow_llm(scope: str, allow_llm: Optional[bool]) -> bool:
-    """Only the whole-graph pass may spend LLM calls, unless told otherwise."""
+    """Only the whole-graph pass may invoke the gateway, unless told otherwise."""
     return scope == "all" if allow_llm is None else bool(allow_llm)
 
 
@@ -663,9 +663,11 @@ async def resolve_assertion_references(
             reference (or the ``<field>_text``) it preserved.
         dry_run: Plan and log without writing. Traces still run, so the returned plan shows
             what the agent would have linked.
-        llm_max_calls: Calls this pass may spend across every reference it traces.
-            ``None`` takes ``REFERENCE_LLM_MAX_CALLS``; ``0`` seeds without spending.
-        tracer_max_iter: Steps one reference's trace may take. ``None`` takes
+        llm_max_calls: Gateway invocations allowed across every reference in this pass.
+            Provider retries inside an invocation are not counted; this is not a request
+            or spend cap. ``None`` takes ``REFERENCE_LLM_MAX_CALLS``; ``0`` runs only seed
+            retrieval, which may still make paid embedding requests.
+        tracer_max_iter: Gateway/tool steps one reference may take. ``None`` takes
             ``REFERENCE_TRACER_MAX_ITER``.
         llm_confidence_threshold: Below this the agent's answer is recorded but never
             linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
