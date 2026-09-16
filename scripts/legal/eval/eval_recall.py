@@ -193,7 +193,8 @@ def _open_session(args) -> tuple:
     return session, client
 
 
-def _progress_reporter(total: int):
+def _progress_reporter(total: int, journal: Path | None = None):
+    """Per-row progress line, plus an append to the answers journal when given one."""
     state = {"done": 0}
 
     def report(row: lib.AnswerRow) -> None:
@@ -203,13 +204,29 @@ def _progress_reporter(total: int):
             f"[{state['done']}/{total}] {row.dataset} / {row.search_type} / "
             f"{row.question_id}: {status}"
         )
+        if journal is not None:
+            lib.append_jsonl(journal, row)
 
     return report
 
 
-def _run_matrix(args, questions, datasets, search_types) -> list:
+def _verdict_reporter(total: int, journal: Path | None = None):
+    """Per-verdict progress line, plus an append to the verdicts journal when given one."""
+    state = {"done": 0}
+
+    def report(row: lib.VerdictRow) -> None:
+        state["done"] += 1
+        _progress(f"[judge {state['done']}/{total}] {row.question_id} ({row.search_type})")
+        if journal is not None:
+            lib.append_jsonl(journal, row)
+
+    return report
+
+
+def _run_matrix(args, questions, datasets, search_types, run_directory: Path) -> list:
     session, client = _open_session(args)
     total = len(datasets) * len(search_types) * len(questions)
+    journal = run_directory / lib.PARTIAL_ANSWERS_FILENAME
     try:
         rows = lib.run_answers(
             session,
@@ -217,7 +234,7 @@ def _run_matrix(args, questions, datasets, search_types) -> list:
             datasets=datasets,
             search_types=search_types,
             top_k=args.top_k,
-            on_row=_progress_reporter(total),
+            on_row=_progress_reporter(total, journal),
         )
     finally:
         client.close()
@@ -226,10 +243,10 @@ def _run_matrix(args, questions, datasets, search_types) -> list:
     return rows
 
 
-def _answer_rows(args, failed, by_id) -> list:
+def _answer_rows(args, failed, by_id, run_directory: Path) -> list:
     """Re-answer exactly the failed cells, one at a time, preserving their top_k."""
     session, client = _open_session(args)
-    report = _progress_reporter(len(failed))
+    report = _progress_reporter(len(failed), run_directory / lib.PARTIAL_ANSWERS_FILENAME)
     rows = []
     try:
         for row in failed:
@@ -299,6 +316,15 @@ def main(argv: list[str] | None = None) -> int:
         run_directory = Path(args.out) if args.out else source_directory
         run_directory.mkdir(parents=True, exist_ok=True)
 
+        recovered = lib.recover_partial_answers(source_directory, previous)
+        recovered_count = sum(1 for old, new in zip(previous, recovered) if old is not new)
+        if recovered_count:
+            _progress(
+                f"Recovered {recovered_count} row(s) from an interrupted run's "
+                f"{lib.PARTIAL_ANSWERS_FILENAME}"
+            )
+        previous = recovered
+
         failed = lib.rows_needing_answers(previous)
         _progress(
             f"Resuming {source_directory}: {len(failed)} of {len(previous)} row(s) to re-answer "
@@ -316,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-        reanswered = _answer_rows(args, failed, by_id) if failed else []
+        reanswered = _answer_rows(args, failed, by_id, run_directory) if failed else []
         answer_rows = lib.merge_answer_rows(previous, reanswered)
 
         verdicts_path = source_directory / lib.VERDICTS_FILENAME
@@ -324,6 +350,9 @@ def main(argv: list[str] | None = None) -> int:
             existing_verdicts = [
                 lib.VerdictRow.from_dict(row) for row in lib.read_jsonl(verdicts_path)
             ]
+        existing_verdicts = lib.recover_partial_verdicts(
+            source_directory, existing_verdicts, answer_rows
+        )
 
         _write_answers(run_directory, answer_rows, backup=run_directory == source_directory)
 
@@ -340,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         run_directory = Path(args.out) if args.out else lib.default_run_directory(DEFAULT_RUNS_ROOT)
         run_directory.mkdir(parents=True, exist_ok=True)
 
-        answer_rows = _run_matrix(args, questions, datasets, search_types)
+        answer_rows = _run_matrix(args, questions, datasets, search_types, run_directory)
         _write_answers(run_directory, answer_rows, backup=False)
 
     if args.no_judge:
@@ -357,13 +386,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             pending = list(answer_rows)
-        judged = 0
-
-        def report_verdict(row: lib.VerdictRow) -> None:
-            nonlocal judged
-            judged += 1
-            _progress(f"[judge {judged}/{len(pending)}] {row.question_id} ({row.search_type})")
-
+        report_verdict = _verdict_reporter(
+            len(pending), run_directory / lib.PARTIAL_VERDICTS_FILENAME
+        )
         fresh = asyncio.run(lib.run_judge(pending, questions, on_row=report_verdict))
         verdict_rows = lib.merge_verdict_rows(existing_verdicts, fresh, answer_rows)
         backup = args.resume and run_directory == Path(args.resume)
@@ -373,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
         _progress(f"Wrote {run_directory / lib.VERDICTS_FILENAME}")
         aggregates = lib.aggregate(verdict_rows)
         histogram = lib.error_histogram(verdict_rows)
+
+    # Both main files are complete now; the journals have nothing left to protect.
+    lib.clear_partial_files(run_directory)
 
     report = lib.render_report(
         aggregates,

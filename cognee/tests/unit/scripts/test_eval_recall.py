@@ -982,6 +982,121 @@ def test_the_cli_maps_the_key_before_doing_anything_else(tmp_path, monkeypatch):
     assert calls == ["configure"]
 
 
+def test_append_jsonl_writes_one_flushed_line_per_row(tmp_path):
+    journal = tmp_path / lib.PARTIAL_ANSWERS_FILENAME
+
+    lib.append_jsonl(journal, answer_row("q1"))
+    lib.append_jsonl(journal, answer_row("q2", error="answer: boom"))
+
+    rows = [lib.AnswerRow.from_dict(row) for row in lib.read_jsonl(journal)]
+    assert [row.question_id for row in rows] == ["q1", "q2"]
+    assert rows[1].error == "answer: boom"
+
+
+def test_recover_partial_answers_overlays_the_journal_in_place(tmp_path):
+    """A run that died mid-resume already paid for some cells; do not ask again."""
+    previous = [
+        answer_row("q1"),
+        answer_row("q2", error="answer: TransientHttpError: ReadTimeout"),
+        answer_row("q3", error="answer: HttpError: 500"),
+    ]
+    lib.append_jsonl(tmp_path / lib.PARTIAL_ANSWERS_FILENAME, answer_row("q2", answer="recovered"))
+
+    recovered = lib.recover_partial_answers(tmp_path, previous)
+
+    assert [row.question_id for row in recovered] == ["q1", "q2", "q3"]
+    assert recovered[1].answer == "recovered" and recovered[1].error is None
+    assert recovered[2].error == "answer: HttpError: 500"
+    assert [row.question_id for row in lib.rows_needing_answers(recovered)] == ["q3"]
+
+
+def test_recover_partial_answers_without_a_journal_changes_nothing(tmp_path):
+    previous = [answer_row("q1"), answer_row("q2", error="answer: boom")]
+
+    assert lib.recover_partial_answers(tmp_path, previous) == previous
+
+
+def test_recover_partial_verdicts_overlays_the_journal(tmp_path):
+    existing = [verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], [])]
+    order = [answer_row("q1"), answer_row("q2")]
+    lib.append_jsonl(
+        tmp_path / lib.PARTIAL_VERDICTS_FILENAME,
+        verdict("adams", "HYBRID_COMPLETION", "q2", ["a"], []),
+    )
+
+    recovered = lib.recover_partial_verdicts(tmp_path, existing, order)
+
+    assert [row.question_id for row in recovered] == ["q1", "q2"]
+    assert lib.rows_needing_verdicts(order, recovered) == []
+
+
+def test_clear_partial_files_removes_both_journals(tmp_path):
+    lib.append_jsonl(tmp_path / lib.PARTIAL_ANSWERS_FILENAME, answer_row("q1"))
+    lib.append_jsonl(tmp_path / lib.PARTIAL_VERDICTS_FILENAME, {"question_id": "q1"})
+
+    lib.clear_partial_files(tmp_path)
+    lib.clear_partial_files(tmp_path)  # idempotent
+
+    assert not (tmp_path / lib.PARTIAL_ANSWERS_FILENAME).exists()
+    assert not (tmp_path / lib.PARTIAL_VERDICTS_FILENAME).exists()
+
+
+def test_the_cli_reporters_journal_every_row(tmp_path, capsys):
+    answers_journal = tmp_path / lib.PARTIAL_ANSWERS_FILENAME
+    verdicts_journal = tmp_path / lib.PARTIAL_VERDICTS_FILENAME
+
+    cli._progress_reporter(2, answers_journal)(answer_row("q1"))
+    cli._progress_reporter(2)(answer_row("q2"))  # no journal → nothing written
+    cli._verdict_reporter(1, verdicts_journal)(
+        verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], [])
+    )
+
+    assert [row["question_id"] for row in lib.read_jsonl(answers_journal)] == ["q1"]
+    assert [row["question_id"] for row in lib.read_jsonl(verdicts_journal)] == ["q1"]
+    capsys.readouterr()
+
+
+def test_resume_recovers_the_journal_and_asks_only_for_the_rest(tmp_path, monkeypatch, capsys):
+    """End to end through main: journal rows are kept, only the still-failed cell is re-asked."""
+    document = {
+        "corpus": "adams",
+        "questions": [question_document(id=qid)["questions"][0] for qid in ("q1", "q2", "q3")],
+    }
+    questions_path = write_question_file(tmp_path, document)
+    run_dir = tmp_path / "run"
+    lib.write_jsonl(
+        run_dir / lib.ANSWERS_FILENAME,
+        [
+            answer_row("q1"),
+            answer_row("q2", error="answer: TransientHttpError: ReadTimeout"),
+            answer_row("q3", error="answer: HttpError: 500"),
+        ],
+    )
+    lib.append_jsonl(run_dir / lib.PARTIAL_ANSWERS_FILENAME, answer_row("q2", answer="recovered"))
+    asked: list[list[str]] = []
+
+    def fake_answer_rows(args, failed, by_id, run_directory):
+        asked.append([row.question_id for row in failed])
+        return [answer_row("q3", answer="fresh")]
+
+    monkeypatch.setattr(cli, "_answer_rows", fake_answer_rows)
+    monkeypatch.setattr(cli.lib, "configure_llm_environment", lambda: None)
+
+    code = cli.main(["--resume", str(run_dir), "--questions", str(questions_path), "--no-judge"])
+
+    assert code == 0
+    assert asked == [["q3"]]
+    rows = [lib.AnswerRow.from_dict(r) for r in lib.read_jsonl(run_dir / lib.ANSWERS_FILENAME)]
+    assert [(row.question_id, row.answer) for row in rows] == [
+        ("q1", "kept"),
+        ("q2", "recovered"),
+        ("q3", "fresh"),
+    ]
+    assert not (run_dir / lib.PARTIAL_ANSWERS_FILENAME).exists()
+    captured = capsys.readouterr()
+    assert "Recovered 1 row(s)" in captured.out + captured.err  # progress lines go to stderr
+
+
 def test_resume_rejudges_a_row_whose_verdict_is_itself_an_error():
     """A verdict that failed to grade is a hole, not a grade.
 

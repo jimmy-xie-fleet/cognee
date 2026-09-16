@@ -84,6 +84,11 @@ QUESTION_CATEGORIES = (
 
 ANSWERS_FILENAME = "answers.jsonl"
 VERDICTS_FILENAME = "verdicts.jsonl"
+# Crash journals: every row is appended here the moment it exists, so a run that
+# dies (disk full, server down, killed) loses nothing a --resume cannot recover.
+# Folded into the main files and deleted once a run finishes writing them.
+PARTIAL_ANSWERS_FILENAME = "answers.partial.jsonl"
+PARTIAL_VERDICTS_FILENAME = "verdicts.partial.jsonl"
 REPORT_FILENAME = "report.md"
 
 
@@ -1219,6 +1224,55 @@ def write_jsonl(path: str | Path, rows: Iterable[Any]) -> Path:
             payload = row.to_dict() if hasattr(row, "to_dict") else row
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return path
+
+
+def append_jsonl(path: str | Path, row: Any) -> Path:
+    """Append one row and flush - the crash journal a ``--resume`` picks up.
+
+    ``write_jsonl`` runs once at the end of a run; a baseline that died at row 63
+    of 94 lost every answer it had paid for. One line per row, flushed, so the
+    most a crash can cost is the row in flight.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = row.to_dict() if hasattr(row, "to_dict") else row
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        handle.flush()
+    return path
+
+
+def recover_partial_answers(directory: str | Path, rows: Sequence[AnswerRow]) -> list[AnswerRow]:
+    """Overlay the answers journal of an interrupted run onto ``rows``.
+
+    Journal rows replace their cells in place (``merge_answer_rows``), so a cell
+    the dead run had already re-answered is not asked again. No journal → ``rows``
+    unchanged.
+    """
+    path = Path(directory) / PARTIAL_ANSWERS_FILENAME
+    if not path.exists():
+        return list(rows)
+    recovered = [AnswerRow.from_dict(row) for row in read_jsonl(path)]
+    return merge_answer_rows(rows, recovered)
+
+
+def recover_partial_verdicts(
+    directory: str | Path, existing: Sequence[VerdictRow], order: Sequence[AnswerRow]
+) -> list[VerdictRow]:
+    """Overlay the verdicts journal of an interrupted run onto ``existing``."""
+    path = Path(directory) / PARTIAL_VERDICTS_FILENAME
+    if not path.exists():
+        return list(existing)
+    recovered = [VerdictRow.from_dict(row) for row in read_jsonl(path)]
+    return merge_verdict_rows(existing, recovered, order)
+
+
+def clear_partial_files(directory: str | Path) -> None:
+    """Drop both journals once their rows are folded into the main files."""
+    for name in (PARTIAL_ANSWERS_FILENAME, PARTIAL_VERDICTS_FILENAME):
+        path = Path(directory) / name
+        if path.exists():
+            path.unlink()
 
 
 def read_jsonl(path: str | Path) -> list[dict]:
