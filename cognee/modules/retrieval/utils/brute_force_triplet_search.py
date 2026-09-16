@@ -48,6 +48,40 @@ def format_triplets(edges):
     return "".join(triplets)
 
 
+# The properties a projected node or edge reaches a renderer as. Module level because
+# these are not private to the projection any more: assertion pair expansion appends
+# edges the projection never saw, and it has to whitelist them the same way rather than
+# keep a second copy of this list to drift against.
+BASE_NODE_PROPERTIES_TO_PROJECT = (
+    "id",
+    "description",
+    "name",
+    "type",
+    "text",
+    "importance_weight",
+)
+
+DEFAULT_EDGE_PROPERTIES_TO_PROJECT = (
+    "relationship_name",
+    "edge_text",
+    "edge_object_id",
+    # How a resolved reference edge was matched, so the prompt can report it.
+    "resolution_confidence",
+    "resolution_strategy",
+)
+
+
+def default_node_properties_to_project() -> List[str]:
+    """The node properties projected when a caller named none.
+
+    A node reaches a renderer as exactly these properties, so a node type whose text
+    cannot be rendered from name/description alone (an Assertion: ``name`` is the
+    affirmative proposition and the stance lives in ``polarity``) has its declared
+    context fields projected too.
+    """
+    return [*BASE_NODE_PROPERTIES_TO_PROJECT, *context_fields_for_datapoints()]
+
+
 async def get_memory_fragment(
     properties_to_project: Optional[List[str]] = None,
     node_type: Optional[Type] = None,
@@ -63,30 +97,11 @@ async def get_memory_fragment(
 ) -> CogneeGraph:
     """Creates and initializes a CogneeGraph memory fragment with optional property projections."""
     if properties_to_project is None:
-        # A node reaches a renderer as exactly these properties, so a node type whose text
-        # cannot be rendered from name/description alone (an Assertion: ``name`` is the
-        # affirmative proposition and the stance lives in ``polarity``) has its declared
-        # context fields projected too. A caller that named its own properties gets those
-        # and nothing else.
-        properties_to_project = [
-            "id",
-            "description",
-            "name",
-            "type",
-            "text",
-            "importance_weight",
-            *context_fields_for_datapoints(),
-        ]
+        # A caller that named its own properties gets those and nothing else.
+        properties_to_project = default_node_properties_to_project()
 
     node_properties_to_project = list(dict.fromkeys(properties_to_project))
-    edge_properties_to_project = [
-        "relationship_name",
-        "edge_text",
-        "edge_object_id",
-        # How a resolved reference edge was matched, so the prompt can report it.
-        "resolution_confidence",
-        "resolution_strategy",
-    ]
+    edge_properties_to_project = list(DEFAULT_EDGE_PROPERTIES_TO_PROJECT)
 
     if feedback_influence > 0.0:
         if "feedback_weight" not in node_properties_to_project:
