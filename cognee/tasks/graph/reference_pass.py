@@ -17,10 +17,13 @@ from cognee.modules.graph.utils.reference_candidates import (
     candidate_set_key,
 )
 from cognee.modules.graph.utils.reference_resolution import (
+    STRATEGY_LLM_INFERRED,
     STRATEGY_LLM_TRACE,
     ReferenceHint,
     Resolution,
     build_locator,
+    parse_reference_hint,
+    reference_fingerprint,
     select_anchored_assertions,
 )
 from cognee.shared.logging_utils import get_logger
@@ -37,7 +40,6 @@ from cognee.tasks.graph.reference_retrieval import (
     search_candidates,
 )
 from cognee.tasks.graph.reference_tracer import (
-    TRACE_SYSTEM_PROMPT,
     CallBudget,
     TraceRecord,
     TracerFinish,
@@ -73,6 +75,8 @@ NOTE_LLM_CIRCUIT_BROKEN = "llm_circuit_broken"
 # A pass run with ``llm_max_calls=0``. Reported instead of the exhaustion flag, because a
 # budget of nothing was never exhausted.
 NOTE_LLM_ESTIMATE_ONLY = "llm_estimate_only"
+# This resolution came out of the unstated inference, not a reference the document made.
+NOTE_UNSTATED = "unstated"
 # A ``force`` re-check came back empty, so the answer already in the field stands.
 NOTE_FORCE_KEPT_PRIOR = "force_kept_prior"
 
@@ -85,7 +89,7 @@ PATCH_RESOLUTION_ONLY = "resolution_only"
 _PATCHED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE})
 
 # The strategies whose stored ``<field>_resolution`` the attempt guard recognises.
-_TRACED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE})
+_TRACED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE, STRATEGY_LLM_INFERRED})
 
 # After this many consecutive traces whose only outcome was a failed gateway call, stop
 # starting new ones: the rest of the budget would be burnt on the same error.
@@ -109,6 +113,14 @@ _LEGACY_BASIS_ORDER = 4
 # these can narrow a picked passage to the statements quoted in a located span.
 _NARROWING_TOOL = "locate_paragraph"
 
+# The unstated inference: only on ``responds_to``, and only as an inference. The link is
+# marked ``inferred`` and weighted low so it can be told apart from a relationship the
+# document wrote (``cross_connect_entities.py`` sets the same weight for the same reason).
+UNSTATED_FIELD = "responds_to"
+UNSTATED_STATEMENT_TYPES = frozenset({"denial", "admission"})
+UNSTATED_BASIS = "unstated"
+INFERRED_EDGE_FEEDBACK_WEIGHT = 0.2
+
 
 @dataclass(frozen=True)
 class _Outcome:
@@ -122,7 +134,11 @@ class _Outcome:
 
 @dataclass
 class _Pending:
-    """A reference the cheap steps could not answer, waiting for a seed and a trace."""
+    """A reference the cheap steps could not answer, waiting for a seed and a trace.
+
+    ``unstated`` marks an inference candidate instead: a denial or an admission that made
+    no reference at all, whose ``hint`` is synthesised from its own proposition.
+    """
 
     assertion_id: str
     field_name: str
@@ -137,6 +153,7 @@ class _Pending:
     exclude_ids: Set[str] = field(default_factory=set)
     seed: List[Candidate] = field(default_factory=list)
     registry: Optional[LabelRegistry] = None
+    unstated: bool = False
     # The field already holds the id of a node still in the graph, and only ``force``
     # re-opened it. A re-check that comes back empty must not unseat that answer.
     field_holds_live_id: bool = False
@@ -170,6 +187,17 @@ def _count(counter: Dict[str, int], key: Optional[str]) -> None:
 
 def _bump(counters: Dict[str, Any], key: str, amount: int = 1) -> None:
     counters[key] = counters.get(key, 0) + amount
+
+
+def _count_inference(
+    counters: Dict[str, Any], entry: _Pending, outcome: Optional[_Outcome]
+) -> None:
+    """Count an inference that turned into a link, once it is really in the plan.
+
+    ``None`` is an outcome the touched scope dropped, so it was never a link.
+    """
+    if outcome is not None and entry.unstated and outcome.kind == "resolved":
+        _bump(counters, "inferred_resolved")
 
 
 def _default_patch_mode(strategy: str) -> str:
@@ -422,6 +450,125 @@ async def _build_answer(
     )
 
 
+def _unstated_hint(proposition: str) -> ReferenceHint:
+    """The synthetic hint an unstated inference is fingerprinted and seeded by.
+
+    An inference has no reference wording, so the statement's own proposition stands in for
+    it. That keeps the fingerprint distinct from any stated hint's, whose ``document_hint``
+    holds the words a document was named by. ``basis`` is not hashed.
+    """
+    return ReferenceHint(document_hint=proposition, basis=UNSTATED_BASIS, legacy_text=None)
+
+
+def _unstated_pending(
+    view: GraphView,
+    *,
+    handled: Set[Tuple[str, str]],
+    force: bool,
+    touched: Optional[Tuple[Set[str], Set[str]]],
+    counters: Dict[str, Any],
+    max_iter: Optional[int] = None,
+) -> List[_Pending]:
+    """The statements worth asking about although they reference nothing.
+
+    Eligible: a denial or an admission that records no reference of its own (``responds_to``
+    blank **and** no ``responds_to_ref``, so a reference the stated loop owns is never
+    answered twice), quotes the document, which is what makes an inferred link checkable,
+    and has a proposition to search on.
+
+    The stated loop's two guards apply here as well: an inference that already wrote its
+    edge is not made again -- that edge is its *only* record on a backend that cannot patch
+    nodes -- and a ``touched`` scope leaves the rest to the whole-graph pass.
+    """
+    entries: List[_Pending] = []
+
+    for assertion_id, props in view.assertions.items():
+        if (assertion_id, UNSTATED_FIELD) in handled:
+            continue
+        if touched is not None and str(props.get("source_chunk_id") or "") not in touched[0]:
+            continue
+        if not force and (assertion_id, UNSTATED_FIELD) in view.resolver_edge_keys:
+            continue
+        statement_type = (_text_of(props.get("statement_type")) or "").strip().casefold()
+        if statement_type not in UNSTATED_STATEMENT_TYPES:
+            continue
+        if _text_of(props.get(UNSTATED_FIELD)):
+            continue
+        # No fallback text: a structured reference is the stated loop's.
+        if parse_reference_hint(props.get(f"{UNSTATED_FIELD}_ref")) is not None:
+            continue
+        if not _text_of(props.get("source_quote")):
+            continue
+        proposition = _text_of(props.get("name"))
+        if not proposition:
+            continue
+
+        hint = _unstated_hint(proposition)
+        fingerprint = reference_fingerprint(hint, UNSTATED_FIELD)
+        if not force:
+            prior = _prior_attempt(props, UNSTATED_FIELD, max_iter=max_iter)
+            if (
+                prior is not None
+                and prior.get("strategy") == STRATEGY_LLM_INFERRED
+                and prior.get("fingerprint") == fingerprint
+            ):
+                continue
+
+        _bump(counters, "inferred_scanned")
+        entries.append(
+            _Pending(
+                assertion_id=assertion_id,
+                field_name=UNSTATED_FIELD,
+                props=props,
+                hint=hint,
+                # No reference was made, so there is no reference text: the seed falls
+                # back to the proposition, and the edge quotes no wording it cannot.
+                reference_text="",
+                fingerprint=fingerprint,
+                entry_notes=(),
+                stale=False,
+                # Always true given the scope filter above; kept explicit so the field
+                # means the same thing on every ``_Pending``.
+                own_chunk_touched=(
+                    touched is None or str(props.get("source_chunk_id") or "") in touched[0]
+                ),
+                unstated=True,
+            )
+        )
+
+    return entries
+
+
+def _strategy_of(entry: _Pending) -> str:
+    """``llm_inferred`` for a link nobody wrote, ``llm_trace`` for a reference somebody did."""
+    return STRATEGY_LLM_INFERRED if entry.unstated else STRATEGY_LLM_TRACE
+
+
+def _patch_mode_of(entry: _Pending) -> str:
+    """An inferred link never writes the field.
+
+    Moving the anchor's id into ``responds_to`` would make the graph claim the document
+    stated a reference it never wrote. The link is an edge plus the audit blob, no more.
+    """
+    return PATCH_RESOLUTION_ONLY if entry.unstated else _default_patch_mode(STRATEGY_LLM_TRACE)
+
+
+def _strategy_notes(entry: _Pending) -> Tuple[str, ...]:
+    """Notes every resolution of this kind carries, before its own outcome note."""
+    return (NOTE_UNSTATED,) if entry.unstated else ()
+
+
+def inferred_edge_properties(strategy: str) -> Optional[Dict[str, Any]]:
+    """The marks an inferred reference edge carries into the graph, or ``None``.
+
+    ``ensure_default_edge_properties`` only fills a ``feedback_weight`` that is *absent*,
+    so the low weight set here is what reaches storage.
+    """
+    if strategy != STRATEGY_LLM_INFERRED:
+        return None
+    return {"inferred": True, "feedback_weight": INFERRED_EDGE_FEEDBACK_WEIGHT}
+
+
 def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> _Outcome:
     """An answer worth remembering but never worth linking.
 
@@ -435,9 +582,9 @@ def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> _Outco
             assertion_id=entry.assertion_id,
             field=entry.field_name,
             reference_text=entry.reference_text,
-            strategy=STRATEGY_LLM_TRACE,
+            strategy=_strategy_of(entry),
             confidence=answer.finish.confidence,
-            notes=(note,),
+            notes=_strategy_notes(entry) + (note,),
             reason=answer.finish.reason or None,
             fingerprint=entry.fingerprint,
             patch_mode=PATCH_RESOLUTION_ONLY,
@@ -515,16 +662,17 @@ def _answer_to_outcome(
             assertion_id=entry.assertion_id,
             field=entry.field_name,
             reference_text=entry.reference_text,
-            strategy=STRATEGY_LLM_TRACE,
+            strategy=_strategy_of(entry),
             confidence=answer.finish.confidence,
             anchor_id=node_id,
             anchor_type=anchor_type,
             target_ids=target_ids,
             target_type=target_type,
             document_id=document_id,
+            notes=_strategy_notes(entry),
             reason=answer.finish.reason or None,
             fingerprint=entry.fingerprint,
-            patch_mode=_default_patch_mode(STRATEGY_LLM_TRACE),
+            patch_mode=_patch_mode_of(entry),
             iterations=answer.iterations,
             trace=answer.trace,
         ),
@@ -576,8 +724,15 @@ async def _trace_pending(
     max_iter: int,
     threshold: float,
     touched: Optional[Tuple[Set[str], Set[str]]],
+    unstated: Sequence[_Pending] = (),
+    infer_threshold: float = 1.0,
 ) -> None:
-    """Seed every candidate, order them, then trace them one at a time."""
+    """Seed every candidate, order them, then trace them one at a time.
+
+    Two groups run, never interleaved: the references the documents made, then -- when
+    ``infer_unstated`` asked for them -- the unstated inferences. They share one budget, so
+    an inference can only ever spend what the stated references left.
+    """
 
     def record(entry: _Pending, outcome: _Outcome) -> Optional[_Outcome]:
         """Fold one answer into the plan; ``None`` when the touched scope dropped it."""
@@ -601,7 +756,7 @@ async def _trace_pending(
         summary["scanned"] += 1
         summary["failed"] += 1
 
-    candidates = list(pending)
+    candidates = list(pending) + list(unstated)
 
     if not view.documents:
         # An agent asked to pick a document out of an empty set can only invent one.
@@ -628,12 +783,18 @@ async def _trace_pending(
             continue
         seeded.append(entry)
 
+    # Ordered within each group, never across: the inferences wait for the whole stated
+    # residue however strong their seeds look.
+    stated_group = sorted((e for e in seeded if not e.unstated), key=_order_key)
+    unstated_group = sorted((e for e in seeded if e.unstated), key=_order_key)
+
     cache: Dict[Tuple[str, str], _TraceAnswer] = {}
     consecutive_failures = 0
     circuit_broken = False
     exhausted_references = 0
 
-    for entry in sorted(seeded, key=_order_key):
+    for entry in stated_group + unstated_group:
+        entry_threshold = infer_threshold if entry.unstated else threshold
         if circuit_broken:
             record(entry, _Outcome("unresolved"))
             continue
@@ -643,10 +804,11 @@ async def _trace_pending(
         if cached is not None:
             _bump(counters, "llm_cached")
             try:
-                record(
+                outcome = record(
                     entry,
-                    _edge_precheck_outcome(entry, cached, view, threshold, counters, summary),
+                    _edge_precheck_outcome(entry, cached, view, entry_threshold, counters, summary),
                 )
+                _count_inference(counters, entry, outcome)
             except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
                 fail(entry, error)
             continue
@@ -666,14 +828,21 @@ async def _trace_pending(
             counters.get("llm_failed", 0),
             counters.get("llm_budget_exhausted", 0),
             counters.get("traces_iteration_capped", 0),
+            counters.get("llm_calls", 0),
             counters.get("llm_unknown_label", 0),
             counters.get("llm_malformed_step", 0),
         )
         _bump(counters, "traces_started")
         try:
             finish, records, iterations = await trace_reference(
-                system_prompt_path=TRACE_SYSTEM_PROMPT,
-                hint=entry.hint,
+                # The unstated variant shares the contract and differs on the task: it
+                # asks what this statement answers, and is shown no reference block. Both
+                # bars go with it, so the prompt quotes the one ``entry_threshold`` will
+                # apply instead of a number written into the template.
+                unstated=entry.unstated,
+                threshold=threshold,
+                infer_threshold=infer_threshold,
+                hint=None if entry.unstated else entry.hint,
                 source_props=entry.props,
                 source_document_name=_document_name(view, entry.own_document_id),
                 field_name=entry.field_name,
@@ -699,10 +868,14 @@ async def _trace_pending(
         # The counters the tracer bumped are the only report of *why* an empty trace was
         # empty; read them as a delta, before ``_build_answer`` bumps its own.
         negative_note = None
-        if counters.get("llm_unknown_label", 0) > before[3]:
+        if counters.get("llm_unknown_label", 0) > before[4]:
             negative_note = NOTE_LLM_UNKNOWN_LABEL
-        elif counters.get("llm_malformed_step", 0) > before[4]:
+        elif counters.get("llm_malformed_step", 0) > before[5]:
             negative_note = NOTE_LLM_MALFORMED_STEP
+        if entry.unstated:
+            # ``trace_reference`` counts every successful call in ``llm_calls``; the split
+            # between stated and inferred spend is the caller's to keep.
+            _bump(counters, "llm_calls_inferred", counters.get("llm_calls", 0) - before[3])
 
         consecutive_failures = consecutive_failures + 1 if failed else 0
         if consecutive_failures >= CIRCUIT_BREAKER_FAILURES:
@@ -738,10 +911,11 @@ async def _trace_pending(
                 max_iter=max_iter,
             )
             cache[cache_key] = answer
-            record(
+            outcome = record(
                 entry,
-                _edge_precheck_outcome(entry, answer, view, threshold, counters, summary),
+                _edge_precheck_outcome(entry, answer, view, entry_threshold, counters, summary),
             )
+            _count_inference(counters, entry, outcome)
         except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
             fail(entry, error)
             continue

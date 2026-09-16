@@ -16,10 +16,11 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+from jinja2 import TemplateNotFound
 from pydantic import BaseModel, Field
 
 from cognee.infrastructure.llm import LLMGateway
-from cognee.infrastructure.llm.prompts import read_query_prompt, render_prompt
+from cognee.infrastructure.llm.prompts import render_prompt
 from cognee.modules.graph.utils.reference_candidates import (
     Candidate,
     LabelRegistry,
@@ -36,6 +37,9 @@ from cognee.tasks.graph.reference_tracer_tools import (
 
 logger = get_logger("reference_tracer")
 
+# One template for both tasks: the unstated variant is the stated prompt plus a trailing
+# `{% if unstated %}` block, and both confidence bars are interpolated from the values the
+# pass will actually judge the answer against rather than written out twice.
 TRACE_SYSTEM_PROMPT = "trace_reference_system.txt"
 TRACE_USER_PROMPT = "trace_reference_user.txt"
 
@@ -149,7 +153,8 @@ def _reference_block(hint: Optional[ReferenceHint]) -> Optional[Dict[str, str]]:
     """The reference as the document made it, or None when there is nothing to show.
 
     None drives the user template's ``{% if reference %}`` to its "no reference recorded"
-    branch. Fence-neutralised like the source block: every field here is document wording.
+    branch, which is the shape the unstated-inference variant always runs in.
+    Fence-neutralised like the source block: every field here is document wording.
     """
     if hint is None:
         return None
@@ -226,7 +231,9 @@ def _render_args(arguments: Mapping[str, Any]) -> str:
 
 async def trace_reference(
     *,
-    system_prompt_path: str,
+    unstated: bool,
+    threshold: float,
+    infer_threshold: float,
     hint: Optional[ReferenceHint],
     source_props: Mapping[str, Any],
     source_document_name: Optional[str],
@@ -240,6 +247,11 @@ async def trace_reference(
 ) -> Tuple[TracerFinish, List[TraceRecord], int]:
     """Resolve one reference, or abstain, in at most ``max_iter`` LLM calls.
 
+    ``unstated`` selects the task -- a reference the document wrote, or the statement this
+    one answers without saying so -- and, with ``threshold`` and ``infer_threshold``,
+    renders the one system template. The bar the prompt quotes is the bar the pass will
+    apply, so the model is never talked into answers the caller then throws away.
+
     Returns ``(finish, tool step records, calls actually spent)``. ``finish`` always names
     either a label this trace's ``registry`` can resolve or ``None``: a label the model
     invented is converted to an abstention here. Counters are created on first use, and the
@@ -249,12 +261,24 @@ async def trace_reference(
     manifest = render_tool_manifest(tools)
     # A missing or blank system prompt is a deployment bug, not a per-reference failure:
     # tracing without one would spend the pass budget on a model told nothing about labels,
-    # abstention or the fence. Raise before any slot is taken, so nothing is spent.
-    system_prompt = read_query_prompt(system_prompt_path)
-    if system_prompt is None:
-        raise FileNotFoundError(f"Reference tracer system prompt not found: {system_prompt_path}")
+    # abstention or the fence. Raise before any slot is taken, so nothing is spent. Jinja
+    # reports a missing template its own way; the pass re-raises FileNotFoundError and
+    # ValueError as configuration errors, so keep signalling those two.
+    try:
+        system_prompt = render_prompt(
+            TRACE_SYSTEM_PROMPT,
+            {
+                "unstated": unstated,
+                "threshold": threshold,
+                "infer_threshold": infer_threshold,
+            },
+        )
+    except TemplateNotFound as error:
+        raise FileNotFoundError(
+            f"Reference tracer system prompt not found: {TRACE_SYSTEM_PROMPT}"
+        ) from error
     if not system_prompt.strip():
-        raise ValueError(f"Reference tracer system prompt is empty: {system_prompt_path}")
+        raise ValueError(f"Reference tracer system prompt is empty: {TRACE_SYSTEM_PROMPT}")
     # The seed opens ``{{ context }}``, and every line of it is document text.
     context = _neutralize_fences(format_candidate_lines(seed)) or "(no seed candidates)"
     reference = _reference_block(hint)

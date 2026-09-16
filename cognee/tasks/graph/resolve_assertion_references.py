@@ -10,7 +10,8 @@ id), ``entity_name`` (the reference names one ``Entity``), the attempt guard (a 
 pass already traced this reference), the seed (one vector + BM25 retrieval, no LLM), then
 the agentic tracer. The last two run **only** in the ``improve()``/memify pass; the ingest
 tail runs with ``allow_llm=False`` and stops after ``entity_name``, so a forward reference
-stays dangling, with nothing written, until the pass picks it up.
+stays dangling, with nothing written, until the pass picks it up. With ``infer_unstated``
+on, one more group follows: the denials and admissions that reference nothing at all.
 Nothing here parses or scores the reference's own text -- deciding which document "the
 Whitfield rebuttal appraisal" names is the agent's job, not a regex's.
 
@@ -63,6 +64,8 @@ from cognee.tasks.graph.reference_pass import (
     _prior_attempt,
     _record_outcome,
     _trace_pending,
+    _unstated_pending,
+    inferred_edge_properties,
 )
 from cognee.tasks.storage.index_graph_edges import index_graph_edges
 
@@ -153,6 +156,8 @@ def _empty_summary() -> Dict[str, Any]:
         # the budget was charged (a failed call too), so it is what reaches ``llm_budget``.
         "llm_calls": 0,
         "llm_calls_attempted": 0,
+        "llm_calls_stated": 0,
+        "llm_calls_inferred": 0,
         "llm_budget": 0,
         "llm_budget_exhausted": False,
         "traces_started": 0,
@@ -168,6 +173,10 @@ def _empty_summary() -> Dict[str, Any]:
         "tool_calls_by_name": {},
         "llm_tokens_in": 0,
         "llm_tokens_out": 0,
+        # The unstated-inference pass. Always reported (zero when it is off), so a
+        # consumer never has to branch on whether it ran.
+        "inferred_scanned": 0,
+        "inferred_resolved": 0,
     }
 
 
@@ -406,6 +415,7 @@ def _fold_counters(summary: Dict[str, Any], counters: Dict[str, Any]) -> None:
     summary["llm_budget_exhausted"] = (
         bool(counters.get("llm_budget_exhausted")) and summary["llm_budget"] > 0
     )
+    summary["llm_calls_stated"] = summary["llm_calls"] - summary["llm_calls_inferred"]
 
 
 async def plan_resolutions(
@@ -417,6 +427,8 @@ async def plan_resolutions(
     llm_max_calls: Optional[int] = None,
     tracer_max_iter: Optional[int] = None,
     llm_confidence_threshold: Optional[float] = None,
+    infer_unstated: Optional[bool] = None,
+    infer_confidence_threshold: Optional[float] = None,
     touched: Optional[Tuple[Set[str], Set[str]]] = None,
 ) -> Tuple[List[Resolution], Dict[str, Any]]:
     """Run the cascade over every dangling reference in the view.
@@ -425,8 +437,9 @@ async def plan_resolutions(
     assertion carrying it came from a touched chunk, so a reference on an untouched
     statement is left to the whole-graph pass rather than traced and then discarded.
 
-    ``allow_llm=False`` stops after the entity-name step -- the ingest tail's contract.
-    Every tunable defaults to its ``CognifyConfig`` value.
+    ``allow_llm=False`` stops after the entity-name step -- the ingest tail's contract, and
+    the one setting under which the unstated inference never runs. Every tunable defaults
+    to its ``CognifyConfig`` value.
     """
     config = get_cognify_config()
     max_calls = config.reference_llm_max_calls if llm_max_calls is None else int(llm_max_calls)
@@ -436,10 +449,20 @@ async def plan_resolutions(
         if llm_confidence_threshold is None
         else float(llm_confidence_threshold)
     )
+    infer = config.reference_infer_unstated if infer_unstated is None else bool(infer_unstated)
+    infer_threshold = (
+        config.reference_infer_confidence_threshold
+        if infer_confidence_threshold is None
+        else float(infer_confidence_threshold)
+    )
+
     summary = _empty_summary()
     summary["llm_budget"] = max_calls
     resolutions: List[Resolution] = []
     pending: List[_Pending] = []
+    # Every (assertion, field) the stated loop took an interest in, so the unstated
+    # inference never offers a second answer for a field that already has one.
+    handled: Set[Tuple[str, str]] = set()
     counters: Dict[str, Any] = {}
     budget = CallBudget(max_calls)
 
@@ -466,7 +489,13 @@ async def plan_resolutions(
                     )
                     summary["scanned"] += 1
                     summary["failed"] += 1
+                    # A field whose cascade blew up is still the stated loop's: guessing
+                    # at it instead would hide the bug behind an inference.
+                    handled.add((assertion_id, field_name))
                     continue
+
+                if entry is not None or outcome is not None:
+                    handled.add((assertion_id, field_name))
 
                 if entry is not None:
                     if allow_llm and (touched is None or own_chunk_touched):
@@ -500,7 +529,22 @@ async def plan_resolutions(
                         own_chunk_touched=own_chunk_touched,
                     )
 
-        if pending:
+        # Strictly after the stated loop built its residue: the statements that reference
+        # nothing at all, and only when a caller opted in.
+        unstated = (
+            _unstated_pending(
+                view,
+                handled=handled,
+                force=force,
+                touched=touched,
+                counters=counters,
+                max_iter=max_iter,
+            )
+            if allow_llm and infer
+            else []
+        )
+
+        if pending or unstated:
             await _trace_pending(
                 pending,
                 view,
@@ -512,6 +556,8 @@ async def plan_resolutions(
                 max_iter=max_iter,
                 threshold=threshold,
                 touched=touched,
+                unstated=unstated,
+                infer_threshold=infer_threshold,
             )
 
     _fold_counters(summary, counters)
@@ -579,7 +625,8 @@ async def write_resolutions(
         if resolution.anchor_id and resolution.anchor_id not in target_ids:
             target_ids.append(resolution.anchor_id)
         if not target_ids:
-            # An abstention or a below-threshold answer: audited on the node, never an edge.
+            # An abstention, a below-threshold answer or an inferred-but-unlinked record:
+            # audited on the node, never an edge.
             continue
 
         source_props = view.assertions.get(resolution.assertion_id, {})
@@ -595,6 +642,9 @@ async def write_resolutions(
                     source_props=source_props,
                     target_label=_node_label(target_props),
                     target_type=target_props.get("type") or resolution.target_type or "Node",
+                    # An inferred link is marked and weighted down on the edge itself, so
+                    # a reader can tell it from a reference the document wrote.
+                    extra_properties=inferred_edge_properties(resolution.strategy),
                 )
             )
 
@@ -696,6 +746,8 @@ async def _plan(
     llm_max_calls: Optional[int],
     tracer_max_iter: Optional[int],
     llm_confidence_threshold: Optional[float],
+    infer_unstated: Optional[bool],
+    infer_confidence_threshold: Optional[float],
     dataset_id,
     ctx,
 ) -> Tuple[Any, GraphView, List[Resolution], Dict[str, Any]]:
@@ -711,6 +763,8 @@ async def _plan(
         llm_max_calls=llm_max_calls,
         tracer_max_iter=tracer_max_iter,
         llm_confidence_threshold=llm_confidence_threshold,
+        infer_unstated=infer_unstated,
+        infer_confidence_threshold=infer_confidence_threshold,
         touched=touched,
     )
     return graph_engine, view, resolutions, summary
@@ -734,6 +788,8 @@ async def detect_dangling_references(
     llm_max_calls: Optional[int] = None,
     tracer_max_iter: Optional[int] = None,
     llm_confidence_threshold: Optional[float] = None,
+    infer_unstated: Optional[bool] = None,
+    infer_confidence_threshold: Optional[float] = None,
     dataset_id=None,
     ctx=None,
 ) -> Dict[str, Any]:
@@ -741,6 +797,11 @@ async def detect_dangling_references(
 
     ``data`` is the memify seed and is ignored unless ``scope="touched"``, where it names
     the chunks and documents the current ingestion produced.
+
+    ``infer_unstated`` opts into the unstated denial/admission inference (strategy
+    ``llm_inferred``), which spends the same budget strictly after every stated reference
+    was offered a trace; ``infer_confidence_threshold`` is the higher bar it is held to.
+    Neither does anything when ``allow_llm`` resolves to ``False``.
     """
     _, _, resolutions, summary = await _plan(
         data,
@@ -750,6 +811,8 @@ async def detect_dangling_references(
         llm_max_calls=llm_max_calls,
         tracer_max_iter=tracer_max_iter,
         llm_confidence_threshold=llm_confidence_threshold,
+        infer_unstated=infer_unstated,
+        infer_confidence_threshold=infer_confidence_threshold,
         dataset_id=dataset_id,
         ctx=ctx,
     )
@@ -804,6 +867,8 @@ async def resolve_assertion_references(
     llm_max_calls: Optional[int] = None,
     tracer_max_iter: Optional[int] = None,
     llm_confidence_threshold: Optional[float] = None,
+    infer_unstated: Optional[bool] = None,
+    infer_confidence_threshold: Optional[float] = None,
     dataset_id=None,
     ctx=None,
 ) -> Any:
@@ -824,6 +889,11 @@ async def resolve_assertion_references(
             ``REFERENCE_TRACER_MAX_ITER``.
         llm_confidence_threshold: Below this the agent's answer is recorded but never
             linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
+        infer_unstated: Also infer the link a denial or an admission that references
+            nothing is answering. ``None`` takes ``REFERENCE_INFER_UNSTATED`` (off); the
+            tail never runs it.
+        infer_confidence_threshold: The higher bar an inferred link is held to. ``None``
+            takes ``REFERENCE_INFER_CONFIDENCE_THRESHOLD``.
         dataset_id: Dataset whose relational rows hold the document locations, when no
             pipeline context supplies one.
         ctx: Pipeline context, used for provenance and the document locations.
@@ -852,6 +922,8 @@ async def resolve_assertion_references(
             llm_max_calls=llm_max_calls,
             tracer_max_iter=tracer_max_iter,
             llm_confidence_threshold=llm_confidence_threshold,
+            infer_unstated=infer_unstated,
+            infer_confidence_threshold=infer_confidence_threshold,
             dataset_id=dataset_id,
             ctx=ctx,
         )
