@@ -799,7 +799,9 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   with identical wording, and are never merged across speakers, statement types, or chunks;
   an omitted polarity is stored as `unknown`, never assumed positive.
 - **Search**: assertions are embedded in the `Assertion_name` vector collection, separate from
-  `Entity_name`.
+  `Entity_name`. Recall renders them with their stance and pulls in the statements they answer
+  — see "Recall over assertions" below; `DISPUTES` reads the graph's denial→allegation structure
+  directly.
 - **Explicit kwargs, no env var** — there is no global switch; every call that wants legal
   extraction must splat `legal_profile()` in.
 - **`improve()` covers assertions**: with `TRIPLET_EMBEDDING=true` its default enrichment
@@ -918,11 +920,8 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
   enum-constrained `statement_type` still drives the assertion property, so only the OWL `is_a`
   link is lost; speaker context is resolved per chunk, not across the whole document;
-  `HYBRID_COMPLETION` searches `Entity_name` only, so it misses assertions unless paired with a
-  search type that also queries `Assertion_name`; relationship names (e.g. `asserted_by`,
-  `supersedes`) are not ontology-grounded, only node types are; `polarity` and
-  `statement_type` are not projected into retrieval contexts today — the stance reaches a
-  completion through derived-edge text and descriptions, not as fields; `update()` takes
+  relationship names (e.g. `asserted_by`, `supersedes`) are not ontology-grounded, only node
+  types are; `update()` takes
   `graph_model`/`custom_prompt` but has no `config` or `chunk_size` parameter, so editing a
   document ingested with the profile re-extracts it without the ontology and at the default
   chunk size; `remember(session_id=…)` rejects the profile outright (session memory is bridged
@@ -969,6 +968,46 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   several allegations; and because the tail is LLM-free, **every** cross-document reference —
   not only a bulk load's earliest documents — needs one
   `resolve_references_pipeline(dataset=…)` pass after ingestion.
+
+#### Recall over assertions
+
+`Assertion.name` is the proposition phrased affirmatively, so a renderer that prints only
+`name` + `description` shows a denial as the fact it denies — which is how an early legal graph
+"found" a contradiction the documents never contained. Three retrieval changes close that gap;
+all three are no-ops on a graph without assertions (golden tests pin the plain rendering
+byte-for-byte).
+
+- **Stance-aware rendering.** One shared renderer, `node_context_text`
+  (`cognee/modules/graph/utils/node_context_text.py`), is used by `resolve_edges_to_text` (the
+  `GRAPH_COMPLETION` family) and by the hybrid entity/statement blocks. An assertion renders as
+  `[<statement_type> by <speaker>; stance: <polarity>] <proposition>`, followed by a stance
+  sentence built from the same verb table the resolver's edge texts use (`Defendants deny that
+  …`; `polarity=unknown` reads "takes an unrecorded stance on"), the verbatim `source_quote` with
+  its `(verified)` mark, then the description. The fields reach the renderer because a
+  `DataPoint` subclass may declare `metadata["context_fields"]` — `Assertion` declares
+  `statement_type`, `polarity`, `asserted_by`, `source_quote`, `source_quote_verified` — and
+  `get_memory_fragment` unions every subclass's context fields into the graph projection
+  (`brute_force_triplet_search.py`, `default_node_properties_to_project()`); edges also project
+  `resolution_confidence` and `resolution_strategy`.
+- **Pair expansion.** After the lane merge, `GraphCompletionRetriever.resolve_edges_to_text`
+  calls `expand_assertion_pairs` (`cognee/modules/retrieval/utils/assertion_pairs.py`): one
+  `get_neighborhood(depth=1, edge_types=["responds_to", "attributed_to", "asserted_by"])` call
+  over the retrieved assertions, keeping only edges that touch a retrieved one, so a retrieved
+  denial brings the allegation it answers and its speaker into the context. Pair edges are
+  context-only: they are not in the evidence ids, and the agentic `memory_search` tool, which
+  calls the module-level renderer, does not get them. Gate: `GRAPH_COMPLETION_PAIR_EXPANSION`.
+- **Hybrid statements lane.** `HYBRID_COMPLETION` searches `Assertion_name` as a fourth lane
+  (`cognee/modules/retrieval/hybrid/statements.py`) and renders a `## Relevant statements`
+  section between the passages and the entities: one stance-aware block per hit, then
+  `↳ responds to: …`, `↳ answered by: …`, `↳ speaker: …` lines from the same pair expansion, in a
+  fixed relationship order. A dataset without an `Assertion_name` collection grows no section
+  and no result key. Under a NodeSet-scoped search a counterpart outside the scope is dropped
+  (untagged counts as outside, like the entity lane); in concurrent session mode the statements
+  of whichever lane found them survive the merge. Budget: `HYBRID_STATEMENTS_TOP_K` (default 20).
+
+Still open: statement ids are not part of `extract_context_object_ids`, access tracking or
+`include_references`, so per-turn feedback cannot attribute a rendered statement;
+`TRIPLET_COMPLETION` has no assertion pairing.
 
 #### Retrieval budgets
 
