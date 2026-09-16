@@ -1,23 +1,17 @@
 """Deterministic helpers for resolving the free-text references an assertion carries.
 
-An extracted ``Assertion`` records its reference as a structured hint
-(``responds_to_ref={"document_hint": "the Complaint", "locator_kind": "paragraph", ...}``)
-or, on older data, as the string the document wrote -- and no graph edge can follow
-either. The helpers here are what the resolver composes around that: reading the hint,
-rendering and fingerprinting it, turning a known ``(kind, value)`` pair into a locator,
-finding the character span that locator points at inside a document, and the write shapes
-for the edge and the node patch that record the answer.
+Reading a structured reference hint, rendering and fingerprinting it, turning a known
+``(kind, value)`` pair into a locator, finding the character span that locator points at
+inside a document, and the write shapes for the edge and the node patch that record the
+answer.
 
-Deliberately **not** here (decision D5): any parsing of, or scoring against, the
-reference's own free text. Guessing which document "the Whitfield rebuttal appraisal"
-names is the agentic tracer's job, and no regex in this module ever runs over reference
-text -- the marker patterns below run over *document* text, with a number the extraction
-LLM or the agent supplied.
+Deliberately **not** here: any parsing of, or scoring against, the reference's own free
+text. Guessing which document "the Whitfield rebuttal appraisal" names is the agentic
+tracer's job, and no regex in this module ever runs over reference text -- the marker
+patterns below run over *document* text, with a number the extraction LLM or the agent
+supplied.
 
 Everything in this module is pure: no I/O, no database, no LLM, no clock, no randomness.
-The task that reads documents and writes edges composes these helpers; keeping the rules
-here is what makes the span selection and the write shapes testable without a graph
-engine.
 """
 
 import hashlib
@@ -38,9 +32,8 @@ from cognee.modules.engine.models.Assertion import _normalize
 # a consumer can tell an id that was already in the field from one this resolver derived.
 STRATEGY_EXISTING_ID = "existing_id"
 STRATEGY_ENTITY_NAME = "entity_name"
-# The agentic tracer's two answers: a reference the document actually made
-# (``llm_trace``) and a denial/admission link the document only implied
-# (``llm_inferred``, opt-in). Both are written by the resolver pass, never by the tail.
+# The agentic tracer's two answers: a reference the document made (``llm_trace``) and one
+# it only implied (``llm_inferred``, opt-in). Both come from the pass, never from the tail.
 STRATEGY_LLM_TRACE = "llm_trace"
 STRATEGY_LLM_INFERRED = "llm_inferred"
 
@@ -84,9 +77,7 @@ _WORD_MARKER_KINDS = frozenset({"count"})
 
 # How an asserted_by edge words the speaker's stance, and how a reference edge words the
 # statement it points at. Both are read by a human and embedded for retrieval, so the
-# stance has to be in the sentence rather than reconstructible from the endpoints. The
-# unknown phrase reads "takes an unrecorded stance on X" rather than "... on that X": the
-# verb takes its object directly, and the result still has to be a sentence.
+# stance has to be in the sentence rather than reconstructible from the endpoints.
 _STANCE_VERB_BY_POLARITY = {
     "positive": "affirms that",
     "negative": "denies that",
@@ -117,15 +108,10 @@ class Locator:
 class LocatorPattern:
     """One kind of locator, and how a *document* marks it.
 
-    ``marker`` is a template whose ``{number}`` placeholder is filled with the surface
-    forms of one locator; ``any_marker`` matches any marker of the kind, so the end of a
-    span and the sequence check can be found without knowing which number comes next. A
-    ``document_level`` locator names a document rather than a place inside one, so it has
-    no marker and stays in the reference's naming hint.
-
-    There is deliberately no pattern for how a *reference* writes a locator (decision
-    D5): the ``(kind, value)`` pair reaches ``build_locator`` from the extraction LLM or
-    from the agent, and nothing here ever runs a regex over reference text.
+    ``marker`` is a template whose ``{number}`` placeholder is filled with the surface forms
+    of one locator; ``any_marker`` matches any marker of the kind, so the end of a span and
+    the sequence check can be found without knowing which number comes next. A
+    ``document_level`` locator names a document rather than a place inside one.
     """
 
     kind: str
@@ -138,16 +124,11 @@ class LocatorPattern:
 class Resolution:
     """What one reference on one assertion resolved to, and how.
 
-    The last five fields carry the agentic tracer's answer. ``patch_mode`` decides what
-    the write phase may put back on the node: ``"full"`` points the field at the anchor
-    (the shape every resolved reference has always written), ``"resolution_only"`` writes
-    only the ``<field>_resolution`` audit blob (an abstention must never overwrite a field
-    the extraction left as the document wrote it), and ``"none"`` patches nothing at all
-    (``existing_id`` already holds an id; ``entity_name`` must keep its name).
-
-    ``trace`` is a tuple of plain dicts rather than tracer objects on purpose: this module
-    is pure and knows nothing about the task layer's ``TraceRecord``. It makes a
-    ``Resolution`` unhashable, which is fine -- nothing puts one in a set.
+    ``patch_mode`` decides what the write phase may put back on the node: ``"full"`` points
+    the field at the anchor, ``"resolution_only"`` writes only the audit blob (an abstention
+    must never overwrite a field the extraction left as the document wrote it), and
+    ``"none"`` patches nothing. ``trace`` is a tuple of plain dicts rather than tracer
+    objects because this module is pure and knows nothing about ``TraceRecord``.
     """
 
     assertion_id: str
@@ -166,9 +147,9 @@ class Resolution:
     patch_mode: str = "full"
     iterations: int = 0
     trace: Tuple[Dict[str, Any], ...] = ()
-    # The per-reference step cap a trace was held to, recorded only by the record that
-    # hit it: the guard that skips an already-attempted reference honours such a record
-    # only while the cap it was capped at is still in force (R22).
+    # The per-reference step cap a trace was held to, recorded only by the record that hit
+    # it: the guard that skips an already-attempted reference honours such a record only
+    # while that cap is still in force.
     max_iter: Optional[int] = None
 
 
@@ -228,9 +209,8 @@ _LINE_RE = re.compile(r"^[^\n]*$", re.M)
 def normalize_reference_text(value: Optional[str]) -> str:
     """Fold a reference, a span of document text or a stored quote the same way.
 
-    NFKC, curly quotes straightened, control characters dropped, whitespace collapsed and
-    case folded -- ``Assertion``'s normalizer, so a quote that verified against a document
-    also matches the span of that document it was taken from.
+    ``Assertion``'s own normalizer, so a quote that verified against a document also
+    matches the span of that document it was taken from.
     """
     if not isinstance(value, str):
         return ""
@@ -292,9 +272,9 @@ def _int_to_roman(value: int) -> Optional[str]:
 def _ordinal_for_kind(kind: str, number: str) -> Optional[int]:
     """The integer position a locator number states, when it states one.
 
-    A dotted section number ("3.2") has no single position, and a letter is only an
-    alphabet position for the kinds that are lettered -- "Exhibit C" is the third exhibit,
-    while "Count C" would be a roman hundred.
+    A dotted section number ("3.2") has no single position, and a letter is only an alphabet
+    position for the lettered kinds -- "Exhibit C" is the third exhibit, "Count C" a roman
+    hundred.
     """
     folded = number.strip().casefold()
     if not folded:
@@ -393,10 +373,9 @@ def find_locator_span(
 ) -> Optional[Tuple[int, int, Tuple[str, ...]]]:
     """Where in a document a locator points, as ``(start, end, notes)``.
 
-    With one marker in the document the answer is that marker. With several -- a number
-    that also opens an unrelated list -- the one whose next marker of the same kind
-    continues the sequence wins; when none does, the first is used and the span is noted
-    ``ambiguous_marker`` so the caller can weigh it lower.
+    With several markers -- a number that also opens an unrelated list -- the one whose next
+    marker of the same kind continues the sequence wins; when none does, the first is used
+    and the span is noted ``ambiguous_marker`` so the caller can weigh it lower.
     """
     if not text or locator is None:
         return None
@@ -453,7 +432,7 @@ def anchor_chunk_index(
     """The chunk a span belongs to: the one it covers most of, earliest on a tie.
 
     A marker often ends one chunk and its text starts the next, so the chunk holding the
-    marker is rarely the chunk holding what the locator points at.
+    marker is rarely the one holding what the locator points at.
     """
     start, end = span
     best_index = None
@@ -472,9 +451,8 @@ def scan_chunks_for_marker(
 ) -> Optional[Tuple[int, Tuple[int, int]]]:
     """Find a locator's marker chunk by chunk, as ``(chunk index, span in that chunk)``.
 
-    The fallback for a document whose stored chunks do not tile its text, where offsets
-    into the whole document cannot be mapped onto chunks. The span follows the same end
-    rules, bounded by the chunk it was found in.
+    The fallback for a document whose stored chunks do not tile its text, so offsets into
+    the whole document cannot be mapped onto chunks.
     """
     for index, chunk_text in enumerate(chunk_texts):
         span = find_locator_span(chunk_text, locator)
@@ -490,7 +468,7 @@ def select_anchored_assertions(
     """The candidates whose quoted source text lies inside the span, in input order.
 
     A blank or missing quote never selects: it normalizes to the empty string, which is
-    inside every span, and would anchor an assertion to a passage it never quoted.
+    inside every span.
     """
     normalized_span = normalize_reference_text(span_text)
     if not normalized_span:
@@ -533,11 +511,9 @@ def derived_edge_text(
 ) -> str:
     """The text an assertion's edge carries, stating the stance it was made with.
 
-    Without it the edge reaches storage with no ``edge_text`` and
-    ``ensure_default_edge_properties`` synthesizes one from the endpoint labels -- for an
-    assertion that is its affirmative ``name``, so a denial is embedded and shown as the
-    fact it denies. The stance therefore has to travel with the edge, not be reconstructed
-    from the endpoints, which no longer carry it.
+    Without it ``ensure_default_edge_properties`` synthesizes an ``edge_text`` from the
+    endpoint labels -- for an assertion that is its affirmative ``name``, so a denial would
+    be embedded and shown as the fact it denies.
     """
     stripped_proposition = _strip_nonblank_text(proposition)
     clause = (stripped_proposition or "").rstrip(".").strip() or "this statement"
@@ -587,11 +563,8 @@ def build_reference_edge(
 
     The raw shape ``add_edges`` takes: the caller still runs it through
     ``ensure_default_edge_properties``, which fills the storage defaults and leaves the
-    stance-preserving ``edge_text`` set here alone.
-
-    ``extra_properties`` is merged **last**, so a caller can both add properties (an
-    inferred link's ``inferred``/``feedback_weight`` marks) and deliberately override one
-    of the shape's own.
+    stance-preserving ``edge_text`` set here alone. ``extra_properties`` is merged **last**,
+    so a caller can add properties and deliberately override one of the shape's own.
     """
     properties = {
         "relationship_name": resolution.field,
@@ -618,13 +591,11 @@ def build_node_patch(
 ) -> Dict[str, Any]:
     """The properties to write back on the assertion the reference was read from.
 
-    In ``"full"`` mode the field itself becomes the anchor's id, so the graph can follow
-    it, and the text it used to hold moves to ``<field>_text`` -- but only if nothing is
-    there yet, because a re-resolution must not overwrite the original wording with its
-    own idea of it.
+    In ``"full"`` mode the field itself becomes the anchor's id and the text it used to
+    hold moves to ``<field>_text`` -- but only if nothing is there yet, because a
+    re-resolution must not overwrite the original wording with its own idea of it.
 
-    In ``"resolution_only"`` mode only the ``<field>_resolution`` blob is written. That is
-    what an abstention, a below-threshold answer and an inferred link all need: writing
+    In ``"resolution_only"`` mode only the ``<field>_resolution`` blob is written. Writing
     the field would either null out wording the extraction recorded (``anchor_id`` is
     ``None`` for every negative record) or make the graph claim the document stated a
     reference it never wrote.
@@ -657,15 +628,12 @@ def build_node_patch(
 
 
 # --------------------------------------------------------------------------------------
-# Structured reference hints (§1.2) -- reads Assertion.responds_to_ref / attributed_to_ref
+# Structured reference hints -- reads Assertion.responds_to_ref / attributed_to_ref
 # --------------------------------------------------------------------------------------
 #
-# Extraction now writes a structured reference (a plain dict, so core never imports the
-# legal domain package) instead of only free text. These helpers read that dict -- or a
-# JSON string, the shape Neo4j returns a dict property as -- into one typed hint, render it
-# for display/retrieval, fingerprint it for re-run guards, and turn a known
-# ``(kind, value)`` pair into the ``Locator`` ``find_locator_span`` already understands.
-# Deliberately additive: nothing above this block is touched by this change.
+# Extraction writes a structured reference as a plain dict, so core never imports the legal
+# domain package. These helpers read that dict -- or a JSON string, the shape Neo4j returns
+# a dict property as -- into one typed hint.
 
 
 @dataclass(frozen=True)
@@ -673,9 +641,7 @@ class ReferenceHint:
     """One reference an assertion carries, already split into its named parts.
 
     ``legacy_text`` is set only when the hint came from a pre-structured free-text
-    reference (no ``document_hint``/locator/``date`` of its own to read) -- ``document_hint``
-    then mirrors it verbatim so a caller reading only ``document_hint`` still gets the
-    reference's words.
+    reference; ``document_hint`` then mirrors it verbatim.
     """
 
     document_hint: str = ""
@@ -704,13 +670,10 @@ def parse_reference_hint(
 ) -> Optional[ReferenceHint]:
     """Read a structured reference dict (or the JSON string Neo4j stores it as) into a hint.
 
-    ``raw`` is a ``dict`` (Ladybug returns node properties as-is), a JSON string that
-    decodes to a ``dict`` (Neo4j serialises dict properties as strings), or anything else.
     A plain, non-JSON string in ``raw`` is *not* a hint -- it is never parsed, and never
     becomes ``legacy_text`` on its own; only ``fallback_text`` can supply legacy text. When
-    the dict carries no ``document_hint``, no locator and no ``date`` -- or ``raw`` yields
-    nothing at all -- the result falls back to ``fallback_text`` (a pre-structured
-    free-text reference) when that is non-blank, else ``None``. Never raises.
+    ``raw`` yields nothing usable the result falls back to ``fallback_text`` when that is
+    non-blank, else ``None``. Never raises.
     """
     data: Optional[Mapping[str, Any]] = None
     try:
@@ -754,8 +717,7 @@ def parse_reference_hint(
 def reference_display_text(hint: Optional[ReferenceHint]) -> str:
     """Render a hint for display/retrieval: composition only, no parsing.
 
-    ``"Complaint paragraph 13"``, ``"June 10 letter (2026-06-10)"`` -- a legacy hint
-    renders as its stored text verbatim. May be ``""`` only when everything is empty.
+    ``"Complaint paragraph 13"``; a legacy hint renders as its stored text verbatim.
     """
     if hint is None:
         return ""
@@ -773,7 +735,7 @@ def reference_display_text(hint: Optional[ReferenceHint]) -> str:
 def reference_fingerprint(hint: ReferenceHint, field_name: str) -> str:
     """A 16-hex-char sha1 over ``field_name`` and every field of ``hint``.
 
-    Used as a re-run guard: unchanged inputs (including which field this is) hash the same.
+    A re-run guard: unchanged inputs (including which field this is) hash the same.
     """
     parts = (
         field_name,
@@ -789,11 +751,9 @@ def reference_fingerprint(hint: ReferenceHint, field_name: str) -> str:
 def build_locator(kind: Optional[str], value: Optional[str]) -> Optional[Locator]:
     """A ``Locator`` for an already-known ``(kind, value)`` pair, or ``None``.
 
-    ``None`` when ``kind`` is falsy, ``"none"``, ``"page"`` (there is no ``page`` kind), or
-    not one of the marker-bearing kinds in ``_PATTERN_BY_KIND`` (``resolution``/``ordinance``
-    are document-level and have no marker), or when ``value`` is blank. The ordinal is
-    ``_ordinal_for_kind``'s -- ``None`` when the number has no single position (a dotted
-    section like ``"3.2"``).
+    ``None`` when ``kind`` is falsy, ``"none"``, ``"page"``, or not one of the
+    marker-bearing kinds (``resolution``/``ordinance`` are document-level), or when
+    ``value`` is blank.
     """
     if not isinstance(kind, str):
         return None

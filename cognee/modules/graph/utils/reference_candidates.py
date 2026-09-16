@@ -1,13 +1,7 @@
 """Pure helpers for the labelled candidates the reference tracer sees.
 
-Seed retrieval (``reference_retrieval.py``) and the agentic tracer tools
-(``reference_tracer_tools.py``) both need a way to hand a graph node to an LLM without
-handing it the node id: an opaque label such as ``A1``/``P3``/``D2`` stands in for the id,
-and a ``LabelRegistry`` is the only place that mapping is kept. This module holds that
-registry, the ``Candidate`` record the label attaches to, and the small set of pure
-functions that turn scored search hits into a stable, ordered, human-readable candidate
-list -- merging duplicate hits, penalising same-document matches, and rendering the
-numbered lines the tracer's tools return.
+A graph node reaches an LLM as an opaque label (``A1``/``P3``/``D2``) rather than as a node
+id, and a ``LabelRegistry`` is the only place that mapping is kept.
 
 Everything here is pure: no I/O, no database, no LLM, no clock, no randomness, and no
 import of anything under ``cognee.domains``.
@@ -33,9 +27,8 @@ _LABEL_PREFIX_BY_TYPE = {
 _DEFAULT_LABEL_PREFIX = "N"
 _DOCUMENT_LABEL_PREFIX = "D"
 
-# How a candidate line names the node's kind. A ``TextSummary`` has no entry: seed
-# retrieval folds every summary hit onto the chunk it was made from, so no candidate is
-# ever of that type, and anything unlisted renders as a document.
+# How a candidate line names the node's kind. Anything unlisted renders as a document; a
+# ``TextSummary`` is never a candidate, because seed retrieval folds it onto its chunk.
 _TYPE_WORD_BY_NODE_TYPE = {
     "Assertion": "Assertion",
     "DocumentChunk": "Passage",
@@ -80,11 +73,10 @@ def _label_prefix(node_type: str) -> str:
 class LabelRegistry:
     """Per-trace opaque labels the agent sees (``A1``, ``P3``, ``D2``) -> real node ids.
 
-    This is the ONLY way a node id enters an LLM finish: the tracer hands the model
-    labels, never ids, and ``resolve`` is the sole path back. ``label(node_id, node_type)``
-    is stable within a trace -- calling it again with the same node id always returns the
-    label first assigned to it, regardless of the ``node_type`` passed the second time.
-    Numbering is contiguous per prefix, starting at 1, in first-seen order.
+    This is the ONLY way a node id enters an LLM finish: the tracer hands the model labels,
+    never ids, and ``resolve`` is the sole path back. ``label(node_id, node_type)`` is
+    stable within a trace, whatever ``node_type`` a later call passes; numbering is
+    contiguous per prefix, starting at 1, in first-seen order.
     """
 
     def __init__(self) -> None:
@@ -159,14 +151,9 @@ def merge_candidates(
 ) -> List[Candidate]:
     """Union scored hits by node id and turn the top ``limit`` into labelled candidates.
 
-    Each item of ``scored`` is ``(node_id, node_type, similarity, source_tag, payload)``,
-    where ``payload`` may carry ``text``, ``document_id``, ``document_name`` and
-    ``chunk_index``. A node id seen more than once keeps its best (highest) similarity and
-    accumulates every distinct ``source_tag`` it was seen under, in first-seen order.
-    Results are sorted by ``(-score, node_id)`` for a deterministic order, then truncated
-    to ``limit`` *before* labelling -- a candidate dropped by the truncation never
-    consumes a label. ``text`` is whitespace-collapsed and truncated to
-    ``CANDIDATE_PREVIEW_CHARS``.
+    A node id seen more than once keeps its best similarity and accumulates every distinct
+    ``source_tag``. Results are sorted by ``(-score, node_id)`` for a deterministic order,
+    then truncated *before* labelling, so a dropped candidate never consumes a label.
     """
 
     best_score: Dict[str, float] = {}
@@ -217,8 +204,8 @@ def apply_penalty(
 ) -> List[Candidate]:
     """Subtract ``amount`` (floor 0) from every candidate whose id is in ``node_ids``.
 
-    Labels are untouched -- they belong to the registry, not to the ordering -- but the
-    list is re-sorted by ``(-score, node_id)`` after the penalty is applied.
+    Labels are untouched -- they belong to the registry, not to the ordering -- but the list
+    is re-sorted by ``(-score, node_id)`` afterwards.
     """
 
     penalized = [
@@ -245,11 +232,9 @@ def _document_label(candidate: Candidate) -> str:
 
 
 def _single_line_text(candidate: Candidate) -> str:
-    # Defensive, not merely documentary: merge_candidates/apply_penalty already collapse
-    # whitespace, but a Candidate can be constructed directly (e.g. a Task 7/8 tool
-    # preview), so this function must not trust the caller. Re-collapsing here also
-    # neutralises a bare "\r" -- str.splitlines() (and many terminal/log renderers) break
-    # on "\r" alone, not just "\n", so checking for "\n" only would miss it.
+    # Defensive, not merely documentary: a Candidate can be constructed directly, so this
+    # function must not trust the caller. Re-collapsing also neutralises a bare "\r", which
+    # str.splitlines() and many renderers break on just as they do on "\n".
     text = _collapse_whitespace(candidate.text)
     if "\n" in text or "\r" in text:
         # Unreachable through _collapse_whitespace's \s+ regex; kept as a raised error
@@ -277,10 +262,9 @@ def _format_candidate_line(candidate: Candidate) -> str:
 def format_candidate_lines(candidates: Iterable[Candidate]) -> str:
     """Render one numbered line per candidate, newline-joined.
 
-    Assertions and passages (``DocumentChunk``) render as
-    ``[A7] Assertion in "<document>" (chunk 4): "<text>"`` (the ``(chunk N)`` clause is
-    omitted when ``chunk_index`` is ``None``); every other node type renders as a document:
-    ``[D2] Document "<document>": "<text>"``.
+    Assertions and passages render as ``[A7] Assertion in "<document>" (chunk 4): "<text>"``
+    (the ``(chunk N)`` clause is omitted when ``chunk_index`` is ``None``); every other node
+    type renders as ``[D2] Document "<document>": "<text>"``.
     """
 
     return "\n".join(_format_candidate_line(candidate) for candidate in candidates)

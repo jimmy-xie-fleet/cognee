@@ -1,33 +1,18 @@
 """Seed retrieval for assertion references.
 
-One function, :func:`search_candidates`, turns one or two query texts into the labelled,
-merged, penalised candidate list the reference tracer works from. It is the only retrieval
-path in the resolver: the same call seeds every trace *and* backs the agent's ``search``
-tool, so the seed and the agent see one ranking.
+:func:`search_candidates` is the only retrieval path in the resolver: the same call seeds
+every trace *and* backs the agent's ``search`` tool, so both see one ranking.
 
-Candidates come from text the dataset already has indexed, never from a filename:
-
-* the vector collections the ingest populates -- ``Assertion_name``,
-  ``DocumentChunk_text``, ``TextSummary_text`` and one ``<DocumentType>_name`` collection
-  per concrete document type -- each queried once per pass with
-  :meth:`batch_search`, each behind a ``has_collection`` / ``CollectionNotFoundError``
-  guard so an un-indexed collection is an empty channel rather than an error;
-* two BM25 corpora over the graph view's own text (:class:`LexicalIndex`), built at most
-  once per pass, so an exact rare-token match ("Fester") can win a ranking that semantic
-  similarity alone would miss -- but only above ``BM25_MIN_RAW_SCORE``, so a merely-common
-  shared token cannot.
-
-With ``kind="documents"`` a document is reachable through its *content*: chunk hits are
-rolled up to the document that owns them, which is the only way a document whose filename
-is an opaque scan name (``SKM_C55826082316050``) can be found at all. ``kind="any"``
-does not roll chunks up -- there, a document surfaces only through its own
-``<DocumentType>_name`` embedding, i.e. through its name -- so a caller looking for a
-document should ask for ``kind="documents"``. No `kind` ever matches a filename as a
-string.
+Candidates come from text the dataset already has indexed, never from a filename: the
+vector collections the ingest populates, each behind a ``has_collection`` guard so an
+un-indexed collection is an empty channel rather than an error; and two BM25 corpora over
+the graph view's own text, so an exact rare-token match ("Fester") can win a ranking that
+semantic similarity alone would miss -- but only above ``BM25_MIN_RAW_SCORE``. Only
+``kind="documents"`` rolls chunk hits up to the document that owns them, which is the one
+way a document whose filename is an opaque scan name can be found at all.
 
 Dataset scoping is implicit: inside a pipeline the vector engine already resolves to the
-dataset's own databases, so this module never enters
-``set_database_global_context_variables``. Nothing here calls an LLM.
+dataset's own databases. Nothing here calls an LLM.
 """
 
 import asyncio
@@ -60,11 +45,9 @@ DOCUMENT_K = 3
 # a strong semantic hit can still outrank a merely-best lexical one.
 BM25_WEIGHT = 0.8
 # Raw BM25 score a result list's top hit must reach before the list is used at all. Every
-# token present in the corpus has a positive IDF (bm25_retriever.py:84), so any query
-# sharing one common token with the corpus produces a "top hit"; normalising by that top
-# would hand it the full BM25_WEIGHT and park it at or above the semantic field (a cosine
-# distance of 0.2-0.4 is a similarity of 0.6-0.8). This is the previous resolver's
-# calibrated prose gate (_PROSE_MINIMUM_SCORE, resolve_assertion_references.py:136).
+# token present in the corpus has a positive IDF, so any query sharing one common token
+# with the corpus produces a "top hit"; normalising by that top would hand it the full
+# BM25_WEIGHT and park it at or above the semantic field.
 BM25_MIN_RAW_SCORE = 1.0
 # Subtracted from a candidate that lives in the referring statement's own document. A
 # penalty, never a filter: "realleges the allegations of paragraphs 1-23" is a real
@@ -106,8 +89,8 @@ def _assertion_item(
 ) -> Optional[_Item]:
     """An ``Assertion`` hit, or None when the id is no longer a node in the view.
 
-    An assertion's index row carries ``source_chunk_id`` but no document fields (the
-    model has none), so the document it lives in is resolved through the view.
+    An assertion's index row carries ``source_chunk_id`` but no document fields, so the
+    document it lives in is resolved through the view.
     """
     props = view.assertions.get(node_id)
     if props is None:
@@ -178,11 +161,9 @@ def _summary_item(
 ) -> Optional[_Item]:
     """A ``TextSummary`` hit, mapped to the chunk it was made from.
 
-    A summary is not a node the tracer can read or link to, and ``TextSummary`` is not one
-    of the view's node types, so a summary hit is only useful as evidence *about its
-    chunk*: it becomes a passage candidate for the chunk ``TextSummary.source_chunk_id``
-    records (the flat form of its ``made_from`` edge), and merges with a direct hit on
-    that same chunk. A summary whose chunk the view cannot resolve is dropped.
+    A summary is not a node the tracer can read or link to, so a summary hit is only useful
+    as evidence *about its chunk*: it becomes a passage candidate for the chunk
+    ``TextSummary.source_chunk_id`` records, and merges with a direct hit on that chunk.
     """
     chunk_id = _text_of(payload.get("source_chunk_id"))
     if not chunk_id or chunk_id not in view.chunks:
@@ -219,8 +200,8 @@ def _document_of_chunk_item(
 ) -> Optional[_Item]:
     """The document a chunk hit belongs to, so a document is findable by its content.
 
-    ``payload`` is the chunk's, which says nothing about its document; it is accepted (and
-    ignored) so every channel mapper has one signature.
+    ``payload`` is the chunk's; it is accepted and ignored so every mapper has one
+    signature.
     """
     document_id = view.document_by_chunk.get(chunk_id)
     if not document_id:
@@ -235,10 +216,8 @@ class LexicalIndex:
     """Two BM25 corpora over a :class:`GraphView`: its chunk texts and its assertion names.
 
     Both are seeded straight from the view rather than through
-    ``BM25ChunksRetriever.initialize()``, which would run its own graph-wide query and
-    could not index assertion names at all. Each corpus is built at most once per pass
-    (``builds`` counts how many were built, so a caller or a test can see the reuse); a
-    corpus with no tokens is remembered as empty and never rebuilt.
+    ``BM25ChunksRetriever.initialize()``, which would run its own graph-wide query and could
+    not index assertion names at all. Each corpus is built at most once per pass.
     """
 
     CHUNKS = "chunks"
@@ -256,9 +235,8 @@ class LexicalIndex:
         """Whether a vector collection exists, asked once per pass and then remembered.
 
         The collection set cannot change while a pass runs, and the guard is not free --
-        LanceDB's ``has_collection`` lists every table -- so this cache turns one listing
-        per collection per search into one per collection per pass. An engine that does
-        not expose ``has_collection`` is assumed to have the collection; the
+        LanceDB's ``has_collection`` lists every table. An engine that does not expose
+        ``has_collection`` is assumed to have the collection; the
         ``CollectionNotFoundError`` guard around the search covers that case.
         """
         cached = self._collection_exists.get(name)
@@ -294,7 +272,7 @@ class LexicalIndex:
         texts = self._texts(corpus)
         retriever = None
         if texts:
-            # top_k covers the whole corpus; this class does its own ordering and cut so
+            # top_k covers the whole corpus: this class does its own ordering and cut, so
             # ties break deterministically on node id.
             retriever = BM25ChunksRetriever(top_k=len(texts), with_scores=True)
             for node_id, text in texts.items():
@@ -320,8 +298,7 @@ class LexicalIndex:
             return []
 
         scored = await retriever.get_retrieved_objects(query)
-        # A zero BM25 score means no query term occurs at all -- not a weak match but no
-        # match, so it is dropped rather than normalised to zero.
+        # A zero BM25 score means no query term occurs at all -- no match, not a weak one.
         results = [
             (str(payload["id"]), float(score)) for payload, score in scored or [] if score > 0
         ]
@@ -344,11 +321,9 @@ class LexicalIndex:
 def _weighted(results: Sequence[Tuple[str, float]]) -> List[Tuple[str, float]]:
     """Normalise raw BM25 scores by their own top score, scaled by ``BM25_WEIGHT``.
 
-    BM25 scores are unbounded and corpus-dependent, so only their ranking transfers: the
-    top hit becomes ``BM25_WEIGHT`` and the rest keep their ratio to it. The floor is
-    checked on the **raw** top score and applies to the whole list: a list whose best hit
-    is only a common-token coincidence contributes nothing, while a list that clears the
-    floor keeps its weaker members, scaled below the top hit.
+    BM25 scores are unbounded and corpus-dependent, so only their ranking transfers. The
+    floor is checked on the **raw** top score and applies to the whole list, so a list whose
+    best hit is only a common-token coincidence contributes nothing.
     """
     if not results:
         return []
@@ -370,9 +345,8 @@ async def _collection_hits(
 ) -> List[Tuple[int, Any]]:
     """``(query index, ScoredResult)`` for one collection, or [] when it is not indexed.
 
-    A collection the ingest never created is an empty channel, not an error: the
-    ``has_collection`` guard skips it, and a collection that disappears between the guard
-    and the query raises ``CollectionNotFoundError``, which is swallowed the same way.
+    A collection the ingest never created is an empty channel, not an error, and one that
+    disappears between the guard and the query is swallowed the same way.
     """
     query_texts = [text for _, text in queries]
     try:
@@ -424,29 +398,22 @@ async def search_candidates(
     """The labelled candidates one or two query texts find in the dataset's own text.
 
     Args:
-        queries: Up to a handful of query texts -- the seed passes the reference's display
-            text first and the referring proposition second. Each query's index becomes
-            part of the ``source`` tag on the candidates it found (``vector:0``,
-            ``bm25:1``), so a reader can see which query surfaced what. Blank queries are
-            skipped; when nothing is left, no backend is touched.
-        kind: Which channels to query. ``any`` (all of them), ``assertions``, ``passages``
-            (chunks and summaries) or ``documents`` (the document-name collections plus
-            chunk hits rolled up to the document that owns them, which is how a document
-            with an opaque filename is found at all).
-        view: The graph view this pass reads. It bounds the result: an id the view does
-            not hold is a stale index row and is dropped, and every candidate's document
-            fields are completed from it.
+        queries: Query texts. Each query's index becomes part of the ``source`` tag on the
+            candidates it found (``vector:0``, ``bm25:1``). Blank queries are skipped; when
+            nothing is left, no backend is touched.
+        kind: Which channels to query: ``any``, ``assertions``, ``passages`` (chunks and
+            summaries) or ``documents`` (document-name collections plus chunk hits rolled
+            up to the document that owns them).
+        view: Bounds the result: an id the view does not hold is a stale index row.
         lexical: The pass's :class:`LexicalIndex`, shared so its corpora are built once.
         registry: The trace's label registry. Labels are assigned to the merged, truncated
             list, and stay stable across calls that share a registry.
-        exclude_ids: Node ids that can never be candidates -- the referring assertion
-            itself and the chunk it was extracted from.
+        exclude_ids: Node ids that can never be candidates.
         own_document_id: The document the referring assertion lives in.
         penalize_own_document: Subtract ``SAME_DOCUMENT_PENALTY`` from candidates in
             ``own_document_id``. A penalty, not a filter.
         limit: How many candidates to return.
-        vector_engine: An already-resolved vector adapter; defaults to
-            ``await get_vector_engine_async()``.
+        vector_engine: An already-resolved vector adapter.
 
     Returns:
         Up to ``limit`` candidates, best score first, ties broken on node id.
@@ -466,18 +433,16 @@ async def search_candidates(
     want_passages = kind in ("any", "passages")
     want_documents = kind in ("any", "documents")
     # Only the document kind rolls chunk hits up; for "any" the chunks are candidates in
-    # their own right and a rolled-up document would just compete with them.
+    # their own right and a rolled-up document would compete with them.
     roll_chunks_up = kind == "documents"
 
     engine = vector_engine if vector_engine is not None else await get_vector_engine_async()
     items: List[Optional[_Item]] = []
 
     # (collection, k, item mapper), built in a fixed order. The channels are queried
-    # concurrently -- each batch_search embeds its own query texts, so serialising them
-    # would cost one embedding round trip after another -- but the items are assembled in
-    # *plan* order below, never in completion order, so the ranking is deterministic.
-    # No collection appears twice: the chunk roll-up only runs for kind="documents", where
-    # the passage channels are off.
+    # concurrently, but the items are assembled in *plan* order below, never in completion
+    # order, so the ranking is deterministic. No collection appears twice: the chunk
+    # roll-up only runs for kind="documents", where the passage channels are off.
     channels: List[Tuple[str, int, Callable[..., Optional[_Item]]]] = []
     if want_assertions:
         channels.append((ASSERTION_COLLECTION, DEFAULT_K_PER_QUERY, _assertion_item))
@@ -536,9 +501,8 @@ async def search_candidates(
 
     if penalize_own_document and own_document_id:
         own_document_id = str(own_document_id)
-        # The own-document node itself is penalised too: a reference whose referent is the
-        # very document the statement was written in is the same "pointing back at myself"
-        # case as a passage inside it.
+        # The own-document node itself is penalised too: it is the same "pointing back at
+        # myself" case as a passage inside it.
         own = {
             candidate.node_id
             for candidate in candidates

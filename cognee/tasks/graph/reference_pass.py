@@ -1,15 +1,10 @@
 """The agentic trace pass: seed a dangling reference, trace it, map the answer.
 
-Split out of :mod:`cognee.tasks.graph.resolve_assertion_references`, which still owns the
-cheap cascade (``existing_id`` / ``entity_name``), the plan/write entry points and the
-Tasks. This module owns everything between: the pass's own types (:class:`_Outcome`,
-:class:`_Pending`, :class:`_TraceAnswer`), the seed, the budget order, the tracer loop and
-the mapping from a :class:`~cognee.tasks.graph.reference_tracer.TracerFinish` onto a
-``Resolution``.
-
-The dependency runs one way -- the task module imports these names back and re-exports
-them, so ``scripts/legal`` and the tests keep one import site. See
-``cognee/tests/unit/tasks/graph/test_reference_pass_exports.py`` for the contract.
+Owns the pass's types (:class:`_Outcome`, :class:`_Pending`, :class:`_TraceAnswer`), the
+seed, the budget order, the tracer loop and the mapping from a
+:class:`~cognee.tasks.graph.reference_tracer.TracerFinish` onto a ``Resolution``.
+:mod:`cognee.tasks.graph.resolve_assertion_references` owns the cheap cascade and the
+entry points around it, and imports this module -- never the other way round.
 """
 
 import json
@@ -54,8 +49,7 @@ from cognee.tasks.graph.reference_tracer import (
 )
 from cognee.tasks.graph.reference_tracer_tools import _locate, build_tracer_tools
 
-# The same logger name the pass has always used, so nothing about its log output moves
-# with the code (``reference_graph_view`` does the same).
+# The resolver's logger name, so splitting the code did not move its log output.
 logger = get_logger("resolve_assertion_references")
 
 
@@ -72,31 +66,25 @@ NOTE_LLM_BELOW_THRESHOLD = "llm_below_threshold"
 NOTE_LLM_ITERATION_CAP = "llm_iteration_cap"
 # The answer named the very statement that was asking: nothing responds to itself.
 NOTE_LLM_SELF_REFERENCE = "llm_self_reference"
-# R24: the two causes that used to be filed as abstentions. The agent finished on a label
-# this trace never issued, or returned a step naming neither a tool call nor a finish.
+# Counted apart from an abstention: the agent finished on a label this trace never issued,
+# or returned a step naming neither a tool call nor a finish.
 NOTE_LLM_UNKNOWN_LABEL = "llm_unknown_label"
 NOTE_LLM_MALFORMED_STEP = "llm_malformed_step"
-# Summary-level notes: the pass ran out of calls, or gave up after repeated gateway
-# failures. Neither writes a per-reference record -- the reference never got its trace,
-# so the next pass has to be free to try it again.
+# Summary-level notes. Neither writes a per-reference record: the reference never got its
+# trace, so the next pass has to be free to try it again.
 NOTE_LLM_BUDGET_EXHAUSTED = "llm_budget_exhausted"
 NOTE_LLM_CIRCUIT_BROKEN = "llm_circuit_broken"
-# A pass run with ``llm_max_calls=0``: the seeds ran and ``traces_started`` is the
-# estimate of what a real budget would cost. Reported instead of the exhaustion flag,
-# because a budget of nothing was never exhausted.
+# A pass run with ``llm_max_calls=0``. Reported instead of the exhaustion flag, because a
+# budget of nothing was never exhausted.
 NOTE_LLM_ESTIMATE_ONLY = "llm_estimate_only"
-# This resolution came out of the unstated denial/admission inference (decision D2), not
-# out of a reference the document made.
+# This resolution came out of the unstated inference, not a reference the document made.
 NOTE_UNSTATED = "unstated"
-# Summary-level note: a ``force`` re-check of a reference whose field holds a live id came
-# back without an answer, so the answer already in the field (and its audit blob) stands.
+# A ``force`` re-check came back empty, so the answer already in the field stands.
 NOTE_FORCE_KEPT_PRIOR = "force_kept_prior"
 
 
-# What the write phase may put back on the node. ``_PATCHED_STRATEGIES`` is only the
-# default table: every resolution carries its own ``patch_mode``, and the negative records
-# (abstain, below threshold, iteration cap) override it to ``resolution_only`` so a field
-# the extraction left as the document wrote it is never nulled out.
+# What the write phase may put back on the node. Only the default table: a negative record
+# overrides it to ``resolution_only``, so a field the extraction wrote is never nulled out.
 PATCH_NONE = "none"
 PATCH_FULL = "full"
 PATCH_RESOLUTION_ONLY = "resolution_only"
@@ -106,19 +94,17 @@ _PATCHED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE})
 _TRACED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE, STRATEGY_LLM_INFERRED})
 
 # After this many consecutive traces whose only outcome was a failed gateway call, stop
-# starting new ones: the provider is down and the rest of the budget would be burnt on
-# the same error.
+# starting new ones: the rest of the budget would be burnt on the same error.
 CIRCUIT_BREAKER_FAILURES = 3
 
 # The seed is two retrievals merged: the general shortlist, plus a handful of documents so
-# a document label exists at step 1 (the agent cannot name a document it has not been
-# shown, and an opaque filename never surfaces through the name channel alone).
+# a document label exists at step 1 -- the agent cannot name one it has not been shown.
 SEED_DOCUMENT_LIMIT = DOCUMENT_K
 
 # How much of a tool call's arguments the stored trace keeps.
 TRACE_ARGS_MAX_CHARS = 300
 
-# Budget order (§5): the statements most likely to carry a real reference first, then the
+# Budget order: the statements most likely to carry a real reference first, then the
 # references whose hint is most specific, then the strongest seed.
 _PRIORITY_STATEMENT_TYPES = frozenset({"denial", "admission"})
 _BASIS_ORDER = {"cited": 0, "positional": 1, "described": 2}
@@ -129,12 +115,9 @@ _LEGACY_BASIS_ORDER = 4
 # these can narrow a picked passage to the statements quoted in a located span.
 _NARROWING_TOOL = "locate_paragraph"
 
-# Decision D2's unstated inference. A denial or an admission answers something by its
-# nature, so a statement of one of those types that records no reference at all is worth
-# asking about -- but only on ``responds_to``, and only as an inference: the link is
+# The unstated inference: only on ``responds_to``, and only as an inference. The link is
 # marked ``inferred`` and weighted low so it can be told apart from a relationship the
-# document actually wrote, and pruned first if it turns out to be noise
-# (``cross_connect_entities.py`` sets the same weight for the same reason).
+# document wrote (``cross_connect_entities.py`` sets the same weight for the same reason).
 UNSTATED_FIELD = "responds_to"
 UNSTATED_STATEMENT_TYPES = frozenset({"denial", "admission"})
 UNSTATED_BASIS = "unstated"
@@ -155,9 +138,8 @@ class _Outcome:
 class _Pending:
     """A reference the cheap steps could not answer, waiting for a seed and a trace.
 
-    ``unstated`` marks an inference candidate instead (decision D2): a denial or an
-    admission that made no reference at all, whose ``hint`` is synthesised from its own
-    proposition and is never shown to the agent.
+    ``unstated`` marks an inference candidate instead: a denial or an admission that made
+    no reference at all, whose ``hint`` is synthesised from its own proposition.
     """
 
     assertion_id: str
@@ -183,10 +165,8 @@ class _Pending:
 class _TraceAnswer:
     """One trace's answer, already resolved off the registry that issued its labels.
 
-    Cached per ``(fingerprint, candidate set)``: the node id and the narrowed targets are
-    resolved here rather than stored as labels, because a second reference with the same
-    seed *set* gets its own registry, and a label only means something inside the trace
-    that issued it.
+    Cached per ``(fingerprint, candidate set)``, so the ids are resolved here rather than
+    stored as labels: a label only means something inside the trace that issued it.
     """
 
     finish: TracerFinish
@@ -195,8 +175,8 @@ class _TraceAnswer:
     node_id: Optional[str]
     targets: Tuple[str, ...]
     capped: bool
-    # Why this trace came back without a node, when the cause was something more specific
-    # than "the agent looked and declined" (R24). ``None`` means a plain abstention.
+    # Why this trace came back without a node, when the cause was more specific than
+    # "the agent looked and declined". ``None`` means a plain abstention.
     negative_note: Optional[str] = None
     # The step cap this trace ran under, kept so a capped record can say what stopped it.
     max_iter: int = 0
@@ -216,8 +196,7 @@ def _count_inference(
 ) -> None:
     """Count an inference that turned into a link, once it is really in the plan.
 
-    ``None`` is an outcome the touched scope dropped, which never reached the plan and
-    so was never a link.
+    ``None`` is an outcome the touched scope dropped, so it was never a link.
     """
     if outcome is not None and entry.unstated and outcome.kind == "resolved":
         _bump(counters, "inferred_resolved")
@@ -231,11 +210,8 @@ def _default_patch_mode(strategy: str) -> str:
 def _outgrew_its_cap(record: dict, max_iter: Optional[int]) -> bool:
     """Whether a stored record was capped below the step budget this pass runs with.
 
-    R22: a trace that ran out of steps is the one negative outcome a *bigger* per-reference
-    budget can change, so the record stores the cap it was held to and stops counting as a
-    prior attempt once that cap is raised. A record from before the cap was stored has no
-    ``max_iter``; it keeps counting as an attempt, because nothing says it would fare any
-    better (``force`` re-opens it either way).
+    Running out of steps is the one negative outcome a bigger per-reference budget can
+    change, so such a record stops counting as a prior attempt once the cap is raised.
     """
     if max_iter is None or NOTE_LLM_ITERATION_CAP not in (record.get("notes") or ()):
         return False
@@ -252,10 +228,8 @@ def _prior_attempt(
     """A previous traced attempt stored on the node, whatever the backend shaped it as.
 
     Ladybug stores node properties as one JSON blob and Neo4j stores a dict property as a
-    JSON string, so a reader has to accept both.
-
-    ``max_iter`` is this pass's per-reference step cap: a record that gave up at a
-    *smaller* cap is not a prior attempt any more (R22).
+    JSON string, so a reader has to accept both. ``max_iter`` is this pass's per-reference
+    step cap: a record that gave up at a *smaller* cap is not a prior attempt any more.
     """
     raw = props.get(f"{field_name}_resolution")
     if isinstance(raw, str):
@@ -284,12 +258,8 @@ def _finalize(outcome: _Outcome, entry_notes: Tuple[str, ...], stale: bool) -> _
 def _edge_precheck(outcome: _Outcome, props: dict, view: GraphView) -> _Outcome:
     """Drop a patching resolution whose edges the graph already holds.
 
-    Without this a backend that cannot patch nodes re-plans the same resolution on every
-    pass, and ``add_edges`` (a MERGE that overwrites the stored properties) would reset a
-    ``feedback_weight`` ``improve()`` had tuned. Two cases once every edge is present:
-    the field holds the anchor id, so there is nothing left to do (``already_resolved``);
-    or it still holds its reference, so the patch is the only outstanding half of the
-    write and the resolution goes out marked :data:`NOTE_EDGES_EXIST`.
+    Without this a backend that cannot patch nodes re-plans the same resolution every pass,
+    and the ``add_edges`` MERGE would reset a ``feedback_weight`` ``improve()`` had tuned.
     """
     resolution = outcome.resolution
     if resolution is None or resolution.patch_mode == PATCH_NONE:
@@ -321,12 +291,10 @@ def _combine_seed(*candidate_lists: Sequence[Candidate]) -> List[Candidate]:
 
 
 async def _seed_reference(entry: _Pending, view: GraphView, lexical: LexicalIndex, engine) -> None:
-    """Fill ``entry.seed``/``entry.registry``: one retrieval pair, no LLM (§6, R10).
+    """Fill ``entry.seed``/``entry.registry``: one retrieval pair, no LLM.
 
-    Two calls on one registry: the general shortlist over the reference's wording *and*
-    the statement's own proposition, plus a documents-only shortlist over the wording, so
-    the agent has a document label to hand ``open_document``/``locate_paragraph`` on its
-    very first step.
+    Two calls on one registry: the general shortlist, plus a documents-only shortlist, so
+    the agent has a document label to hand ``open_document`` on its very first step.
     """
     registry = LabelRegistry()
     own_chunk_id = str(entry.props.get("source_chunk_id") or "")
@@ -334,9 +302,8 @@ async def _seed_reference(entry: _Pending, view: GraphView, lexical: LexicalInde
     exclude_ids = {entry.assertion_id}
     if own_chunk_id:
         exclude_ids.add(own_chunk_id)
-    # A denial realleging its own pleading's paragraphs is real, so the referring
-    # document is weighed down rather than filtered out; an attribution names whoever it
-    # names, so it is not weighed at all.
+    # A denial realleging its own pleading's paragraphs is real, so the referring document
+    # is weighed down rather than filtered out; an attribution is not weighed at all.
     penalize_own_document = entry.field_name == "responds_to"
 
     entry.registry = registry
@@ -365,7 +332,7 @@ async def _seed_reference(entry: _Pending, view: GraphView, lexical: LexicalInde
 
 
 def _order_key(entry: _Pending) -> tuple:
-    """Budget order (§5): denials and admissions, then the most specific hints, then seed."""
+    """Budget order: denials and admissions, then the most specific hints, then seed."""
     statement_type = (_text_of(entry.props.get("statement_type")) or "").strip().casefold()
     priority = 0 if statement_type in _PRIORITY_STATEMENT_TYPES else 1
 
@@ -406,11 +373,8 @@ async def _narrow_to_quoted_assertions(
 ) -> Tuple[str, ...]:
     """The statements the trace's own ``locate_paragraph`` listed for the picked passage.
 
-    The agent picked a passage after locating a numbered paragraph, so the answer is the
-    statements quoted *inside that span* -- today's narrowing, reached through the trace
-    rather than through a guess. The lookup is replayed from the arguments the trace
-    recorded (the document text is already cached), which is exactly the output the agent
-    saw; nothing else in the trace can widen it.
+    Replayed from the arguments the trace recorded, so the narrowing is exactly the output
+    the agent saw; nothing else in the trace can widen it.
     """
     for record in reversed(list(records)):
         if record.tool != _NARROWING_TOOL or not record.ok:
@@ -462,10 +426,9 @@ async def _build_answer(
 ) -> _TraceAnswer:
     """Resolve a finish off its own registry, while that registry still means something.
 
-    ``negative_note`` is the cause the tracer reported for a trace that came back without
-    a label (R24); it travels on the answer so the record names the cause rather than
-    filing every empty trace as an abstention. The cache stores the answer, so a second
-    reference answered from it records the same cause.
+    ``negative_note`` is the cause the tracer reported for a trace that came back without a
+    label; it travels on the answer so the record names the cause rather than filing every
+    empty trace as an abstention.
     """
     node_id = entry.registry.resolve(finish.candidate_label)
     targets: Tuple[str, ...] = ()
@@ -492,17 +455,9 @@ async def _build_answer(
 def _unstated_hint(proposition: str) -> ReferenceHint:
     """The synthetic hint an unstated inference is fingerprinted and seeded by.
 
-    An inference has no reference wording, so the statement's own proposition stands in
-    for it: it is what the seed searches and what the fingerprint keys on, which is
-    exactly the input that decides whether re-running the pass would ask the same
-    question. ``basis="unstated"`` names the kind of attempt.
-
-    Stable and distinct from any stated hint: ``reference_fingerprint`` hashes the
-    document hint, the locator, the date and the legacy text, so what separates an
-    inference from a stated reference here is the document hint itself -- a stated hint
-    holds the words the document used to name a document ("the Complaint"), a legacy one
-    also fills ``legacy_text``, and neither is ever the statement's own proposition.
-    (``basis`` is not hashed, so it is documentation rather than a discriminator.)
+    An inference has no reference wording, so the statement's own proposition stands in for
+    it. That keeps the fingerprint distinct from any stated hint's, whose ``document_hint``
+    holds the words a document was named by. ``basis`` is not hashed.
     """
     return ReferenceHint(document_hint=proposition, basis=UNSTATED_BASIS, legacy_text=None)
 
@@ -516,21 +471,16 @@ def _unstated_pending(
     counters: Dict[str, Any],
     max_iter: Optional[int] = None,
 ) -> List[_Pending]:
-    """The statements worth asking about although they reference nothing (decision D2).
+    """The statements worth asking about although they reference nothing.
 
-    Eligible: the statement answers something by its nature (a denial, an admission); it
-    records no reference of its own -- ``responds_to`` blank **and** no
-    ``responds_to_ref``, so a reference the stated loop owns is never answered twice; it
-    quotes the document, which is what makes an inferred link checkable afterwards; and
-    it has a proposition to search on. A field the stated loop already handled is skipped
-    whatever its shape, and so is a proposition a previous pass already inferred from
-    (``force`` bypasses -- the guard is for propositions that have had their chance).
+    Eligible: a denial or an admission that records no reference of its own (``responds_to``
+    blank **and** no ``responds_to_ref``, so a reference the stated loop owns is never
+    answered twice), quotes the document, which is what makes an inferred link checkable,
+    and has a proposition to search on.
 
-    The two guards the stated loop gained apply here as well (R31): an inference that
-    already wrote its edge is not made again -- which is the *only* record of it on a
-    backend that cannot patch nodes, since an inference never writes the field -- and a
-    ``touched`` scope spends on the statements that ingestion produced and leaves the rest
-    to the whole-graph pass.
+    The stated loop's two guards apply here as well: an inference that already wrote its
+    edge is not made again -- that edge is its *only* record on a backend that cannot patch
+    nodes -- and a ``touched`` scope leaves the rest to the whole-graph pass.
     """
     entries: List[_Pending] = []
 
@@ -546,8 +496,7 @@ def _unstated_pending(
             continue
         if _text_of(props.get(UNSTATED_FIELD)):
             continue
-        # No fallback text: a structured reference is the stated loop's, and an empty or
-        # unreadable ``_ref`` is no reference at all.
+        # No fallback text: a structured reference is the stated loop's.
         if parse_reference_hint(props.get(f"{UNSTATED_FIELD}_ref")) is not None:
             continue
         if not _text_of(props.get("source_quote")):
@@ -574,15 +523,14 @@ def _unstated_pending(
                 field_name=UNSTATED_FIELD,
                 props=props,
                 hint=hint,
-                # No reference was made, so there is no reference text. The seed falls
-                # back to the proposition alone (which is what the ruling asks for), and
-                # the edge records no wording it could not honestly quote.
+                # No reference was made, so there is no reference text: the seed falls
+                # back to the proposition, and the edge quotes no wording it cannot.
                 reference_text="",
                 fingerprint=fingerprint,
                 entry_notes=(),
                 stale=False,
-                # Always true now that the scope filter runs above, and kept explicit so
-                # the field means the same thing on every ``_Pending``.
+                # Always true given the scope filter above; kept explicit so the field
+                # means the same thing on every ``_Pending``.
                 own_chunk_touched=(
                     touched is None or str(props.get("source_chunk_id") or "") in touched[0]
                 ),
@@ -602,8 +550,7 @@ def _patch_mode_of(entry: _Pending) -> str:
     """An inferred link never writes the field.
 
     Moving the anchor's id into ``responds_to`` would make the graph claim the document
-    stated a reference it never wrote, and nothing downstream could tell the two apart.
-    The link is an edge (marked ``inferred``) plus the audit blob, and no more.
+    stated a reference it never wrote. The link is an edge plus the audit blob, no more.
     """
     return PATCH_RESOLUTION_ONLY if entry.unstated else _default_patch_mode(STRATEGY_LLM_TRACE)
 
@@ -627,13 +574,9 @@ def inferred_edge_properties(strategy: str) -> Optional[Dict[str, Any]]:
 def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> _Outcome:
     """An answer worth remembering but never worth linking.
 
-    Written ``resolution_only``: the reference the extraction recorded stays exactly as
-    the document made it, and the fingerprint means the next pass spends nothing
-    reconsidering an unchanged reference.
-
-    A record that hit the step cap also stores the cap it was held to, because that is
-    the one negative outcome a *bigger* budget can change (R22): raising
-    ``tracer_max_iter`` retries it, leaving it where it is does not.
+    Written ``resolution_only``: the reference stays as the document made it, and the
+    fingerprint means the next pass spends nothing reconsidering it. A record that hit the
+    step cap also stores the cap, the one negative outcome a bigger budget can change.
     """
     return _Outcome(
         "unresolved",
@@ -671,10 +614,9 @@ def _answer_to_outcome(
         return _negative_record(entry, answer, note)
 
     if answer.node_id == entry.assertion_id:
-        # Nothing responds to itself. A fresh trace can be shown its own statement by
-        # ``read_chunk``/``locate_paragraph`` (they list every assertion in the span), and
-        # the in-pass cache is keyed on a fingerprint that deliberately excludes the
-        # asking assertion (R21), so a twin's answer can come back naming this one.
+        # Nothing responds to itself, and a trace really can reach this statement: the
+        # tools list every assertion in a span, and the in-pass cache is keyed on a
+        # fingerprint that excludes the asking assertion, so a twin's answer can name it.
         logger.debug(
             "Trace for %s.%s named the asking statement itself.",
             entry.assertion_id,
@@ -749,8 +691,8 @@ def _record_outcome(
 ) -> bool:
     """Fold one outcome into the summary and the plan, honouring the touched scope.
 
-    Returns whether the outcome was recorded, so a caller counting a particular kind of
-    answer counts only the ones that really reached the plan.
+    Returns whether it was recorded, so a caller counting a kind of answer counts only the
+    ones that really reached the plan.
     """
     if not own_chunk_touched:
         # Out of scope unless it points at a document this ingestion wrote.
@@ -789,14 +731,9 @@ async def _trace_pending(
 ) -> None:
     """Seed every candidate, order them, then trace them one at a time.
 
-    Two groups run, in this order and never interleaved: the references the documents
-    actually made, then -- when ``infer_unstated`` asked for them -- the unstated
-    inferences (decision D2). They share one budget, one seed retrieval pass, one
-    in-pass cache and one circuit breaker, so an inference can only ever spend what the
-    stated references left, and every stated reference was offered a trace first.
-
-    ``scanned`` and ``unresolved`` count both groups; ``inferred_scanned`` /
-    ``inferred_resolved`` / ``llm_calls_inferred`` are the inference-only figures.
+    Two groups run, never interleaved: the references the documents made, then -- when
+    ``infer_unstated`` asked for them -- the unstated inferences. They share one budget, so
+    an inference can only ever spend what the stated references left.
     """
 
     def record(entry: _Pending, outcome: _Outcome) -> Optional[_Outcome]:
@@ -824,8 +761,7 @@ async def _trace_pending(
     candidates = list(pending) + list(unstated)
 
     if not view.documents:
-        # Nothing to search and nothing to read: an agent asked to pick a document out of
-        # an empty set can only hallucinate one.
+        # An agent asked to pick a document out of an empty set can only invent one.
         logger.info(
             "Skipping %d reference trace(s): the graph view holds no documents.", len(candidates)
         )
@@ -837,8 +773,7 @@ async def _trace_pending(
     from cognee.tasks.graph import reference_retrieval
 
     vector_engine = await reference_retrieval.get_vector_engine_async()
-    # One index per pass: both BM25 corpora are the whole view, and rebuilding them per
-    # reference would dominate the pass.
+    # One index per pass: rebuilding the BM25 corpora per reference would dominate it.
     lexical = LexicalIndex(view)
 
     seeded: List[_Pending] = []
@@ -903,8 +838,7 @@ async def _trace_pending(
         try:
             finish, records, iterations = await trace_reference(
                 # The unstated variant shares the contract and differs on the task: it
-                # asks what this statement answers, at a higher bar, and is shown no
-                # reference block because there is no reference to show.
+                # asks what this statement answers, and is shown no reference block.
                 system_prompt_path=(
                     INFER_UNSTATED_SYSTEM_PROMPT if entry.unstated else TRACE_SYSTEM_PROMPT
                 ),
@@ -921,8 +855,8 @@ async def _trace_pending(
             )
         except (FileNotFoundError, ValueError):
             # A missing or blank system prompt is a deployment bug, not a per-reference
-            # failure (R11): swallowing it would turn one bad file into a pass full of
-            # silent abstentions.
+            # failure: swallowing it would turn one bad file into a pass of silent
+            # abstentions.
             raise
         except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
             fail(entry, error)
@@ -932,15 +866,15 @@ async def _trace_pending(
         exhausted = counters.get("llm_budget_exhausted", 0) > before[1]
         capped = counters.get("traces_iteration_capped", 0) > before[2]
         # The counters the tracer bumped are the only report of *why* an empty trace was
-        # empty; read them as a delta here, before ``_build_answer`` bumps its own.
+        # empty; read them as a delta, before ``_build_answer`` bumps its own.
         negative_note = None
         if counters.get("llm_unknown_label", 0) > before[4]:
             negative_note = NOTE_LLM_UNKNOWN_LABEL
         elif counters.get("llm_malformed_step", 0) > before[5]:
             negative_note = NOTE_LLM_MALFORMED_STEP
         if entry.unstated:
-            # ``trace_reference`` counts every successful call in ``llm_calls``; the
-            # split between stated and inferred spend is the caller's to keep.
+            # ``trace_reference`` counts every successful call in ``llm_calls``; the split
+            # between stated and inferred spend is the caller's to keep.
             _bump(counters, "llm_calls_inferred", counters.get("llm_calls", 0) - before[3])
 
         consecutive_failures = consecutive_failures + 1 if failed else 0
@@ -954,16 +888,15 @@ async def _trace_pending(
             )
 
         if exhausted or failed:
-            # Neither got a real answer, so neither writes a record: a reference that
-            # never had its trace must stay retryable.
+            # Neither got a real answer, so neither writes a record: a reference that never
+            # had its trace must stay retryable.
             exhausted_references += 1 if exhausted else 0
             record(entry, _Outcome("unresolved"))
             continue
 
         _bump(counters, "traces_finished")
-        # Mapping the finish onto a Resolution runs inside the guard as well: it reads
-        # the view and replays the trace's own locator lookup, and a bug in either must
-        # cost this one reference rather than abort a pass that has already been paid for.
+        # Mapping the finish onto a Resolution runs inside the guard too: a bug in it must
+        # cost this one reference rather than abort a pass already paid for.
         try:
             answer = await _build_answer(
                 entry,
@@ -989,8 +922,7 @@ async def _trace_pending(
 
     if budget.max_calls == 0:
         # Estimate mode: the pass was never given a call to spend, so nothing was
-        # exhausted. ``traces_started`` is the estimate of what a real budget would cost,
-        # and reporting the exhaustion flag (or its WARNING) here would be a lie.
+        # exhausted and ``traces_started`` is the estimate of what a budget would cost.
         summary["notes"].append(NOTE_LLM_ESTIMATE_ONLY)
     elif exhausted_references:
         summary["notes"].append(NOTE_LLM_BUDGET_EXHAUSTED)
@@ -1005,11 +937,9 @@ async def _trace_pending(
 def _keep_prior_on_force(entry: _Pending, outcome: _Outcome, summary: Dict[str, Any]) -> _Outcome:
     """Leave a forced re-check's live answer alone when the re-check came back empty.
 
-    ``force`` re-opens a reference whose field already holds a node id, and the trace it
-    pays for may abstain, run out of steps or land below the threshold. Recording that as
-    a negative would replace a positive audit blob with an abstention while the field --
-    and its edge -- still hold the earlier answer, leaving the node contradicting itself.
-    So the earlier answer stands, and the pass says so once in its notes.
+    Recording it as a negative would replace a positive audit blob with an abstention while
+    the field and its edge still hold the earlier answer, so the node would contradict
+    itself.
     """
     if not entry.field_holds_live_id or outcome.kind != "unresolved":
         return outcome

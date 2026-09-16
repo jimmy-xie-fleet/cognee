@@ -1,43 +1,24 @@
 """Turn the references an ``Assertion`` carries into graph edges.
 
-Extraction records a reference as a structured hint --
-``responds_to_ref={"document_hint": "the Complaint", "locator_kind": "paragraph",
-"locator_value": "5", "basis": "positional"}`` -- or, on older data, as the string the
-document wrote, and no graph edge can follow either. This task reads the graph, runs the
-cascade below over every dangling reference, and writes the answer as edges plus a node
-patch recording how it was reached.
+Extraction records a reference as a structured hint (``<field>_ref``) or, on older data,
+as the string the document wrote; no graph edge can follow either. This task reads the
+graph, runs a cascade over every dangling reference, and writes the answer as edges plus a
+node patch recording how it was reached.
 
-The cascade, per ``(assertion, field)``:
+The cascade, per ``(assertion, field)``: ``existing_id`` (the field already holds a node
+id), ``entity_name`` (the reference names one ``Entity``), the attempt guard (a previous
+pass already traced this reference), the seed (one vector + BM25 retrieval, no LLM), then
+the agentic tracer. The last two run **only** in the ``improve()``/memify pass; the ingest
+tail runs with ``allow_llm=False`` and stops after ``entity_name``, so a forward reference
+stays dangling, with nothing written, until the pass picks it up. With ``infer_unstated``
+on, one more group follows: the denials and admissions that reference nothing at all.
+Nothing here parses or scores the reference's own text -- deciding which document "the
+Whitfield rebuttal appraisal" names is the agent's job, not a regex's.
 
-1. ``existing_id`` -- the field already holds a node id (or a stale one to re-resolve).
-2. ``entity_name`` -- the reference names one ``Entity`` ("Norman Fester"). Gated: a hint
-   that points *inside* a document ("the Complaint ¶5") never reaches this step, so it
-   cannot be linked to a ``Complaint`` stub entity.
-3. the **attempt guard** -- a previous pass already traced this exact reference.
-4. the **seed** -- one vector + BM25 retrieval per reference, no LLM, producing a
-   labelled shortlist.
-5. the **agentic tracer** (decision D3) -- a bounded loop of ``TracerStep``s over five
-   read-only tools, ending in a finish naming one label, or an abstention.
-
-Steps 4 and 5 run **only** in the ``improve()``/memify pass (decision D1). The ingest tail
-runs with ``allow_llm=False`` and stops after step 2: a forward reference stays dangling,
-with nothing written, until the pass picks it up. Nothing here parses or scores the
-reference's own text (decision D5) -- deciding which document "the Whitfield rebuttal
-appraisal" names is the agent's job, not a regex's.
-
-With ``infer_unstated`` on, the pass runs one more group after that residue is exhausted
-(decision D2): the denials and admissions that reference nothing at all get the same
-trace under a stricter prompt and a higher bar, and a confident answer becomes an edge
-marked ``inferred`` -- never a value in the field, because the document stated nothing.
-
-Three entry points over one pass:
-
-* :func:`resolve_assertion_references` -- the cognify tail. Appended to a pipeline it
-  resolves the references the ingestion touched, returns its input unchanged, and swallows
-  its own errors, so reference resolution can never break ingestion.
-* :func:`detect_dangling_references` / :func:`apply_reference_resolutions` -- the two-phase
-  memify pair behind the ``resolve_references`` pipeline. The apply phase deliberately does
-  **not** swallow write failures: a memify run that could not write is a visible error.
+Three entry points over one pass. :func:`resolve_assertion_references` is the cognify tail:
+it returns its input unchanged and swallows its own errors, so resolution can never break
+ingestion. :func:`detect_dangling_references` / :func:`apply_reference_resolutions` are the
+two-phase memify pair, whose apply phase deliberately does **not** swallow write failures.
 """
 
 from dataclasses import replace
@@ -102,21 +83,16 @@ __all__ = [
     "resolve_assertion_references",
 ]
 
-# The reference fields an assertion carries. ``asserted_by`` is deliberately absent: it is
-# an identity field, and rewriting it would give the assertion a new node id. The
-# structured hint lives beside each of these as ``<field>_ref`` and is never itself a
-# reference field.
+# ``asserted_by`` is deliberately absent: it is an identity field, and rewriting it would
+# give the assertion a new node id.
 REFERENCE_FIELDS = ("responds_to", "attributed_to")
 
 # Owner of record for edges written outside an ingestion, where no ``Data`` row is in
-# context. At ingest the pipeline's own data item wins, so the edges vanish with the
-# document's forget(); in memify this sentinel keeps the write attributable.
+# context. At ingest the pipeline's own data item wins instead.
 REFERENCE_RESOLUTION_DATA_ID = uuid5(NAMESPACE_URL, "cognee:reference-resolution")
 
-# Notes a resolution carries out of the cascade, into ``<field>_resolution`` and the
-# write summary.
-# The field held an id no longer in the graph -- a forgotten or re-chunked target -- so
-# the reference was re-resolved from the wording the resolver preserved.
+# The field held an id no longer in the graph -- a forgotten or re-chunked target -- so the
+# reference was re-resolved from the wording the resolver preserved.
 NOTE_STALE_ID = "stale_id"
 # ``add_edges`` succeeded but ``index_graph_edges`` did not.
 NOTE_EDGE_INDEX_FAILED = "edge_index_failed"
@@ -135,7 +111,6 @@ def _touched_ids(items: Any) -> Tuple[Set[str], Set[str]]:
 
     The cognify tail is handed ``TextSummary`` objects, which wrap their chunk in
     ``made_from``; other callers pass ``DocumentChunk`` objects (or dicts) directly.
-    Anything without an id is ignored.
     """
     chunk_ids: Set[str] = set()
     document_ids: Set[str] = set()
@@ -177,9 +152,8 @@ def _empty_summary() -> Dict[str, Any]:
         "nodes_patched": 0,
         "dry_run": False,
         "notes": [],
-        # What the pass spent, and on what. ``llm_calls`` counts the calls that came
-        # back; ``llm_calls_attempted`` is what the budget was charged (a failed call is
-        # charged too), so ``llm_calls_attempted == llm_budget`` is what exhaustion means.
+        # ``llm_calls`` counts the calls that came back; ``llm_calls_attempted`` is what
+        # the budget was charged (a failed call too), so it is what reaches ``llm_budget``.
         "llm_calls": 0,
         "llm_calls_attempted": 0,
         "llm_calls_stated": 0,
@@ -199,9 +173,8 @@ def _empty_summary() -> Dict[str, Any]:
         "tool_calls_by_name": {},
         "llm_tokens_in": 0,
         "llm_tokens_out": 0,
-        # Decision D2's unstated-inference pass: eligible statements it considered, and
-        # the ones it linked. Always reported (zero when ``infer_unstated`` is off), so a
-        # consumer never has to branch on whether the pass ran.
+        # The unstated-inference pass. Always reported (zero when it is off), so a
+        # consumer never has to branch on whether it ran.
         "inferred_scanned": 0,
         "inferred_resolved": 0,
     }
@@ -249,10 +222,9 @@ def _resolve_existing_id(
 def _entity_name_text(hint: Optional[ReferenceHint], legacy_value: Optional[str]) -> Optional[str]:
     """The text the entity-name step may look up, or None when this hint is not a name.
 
-    A reference that points inside a document is not a name: "the Complaint ¶5" names a
-    paragraph of a pleading, and linking it to a ``Complaint`` stub entity would be a
-    confident wrong answer. So a hint only reaches this step when it carries no locator
-    and was not made positionally. ``attributed_to`` hints ("Norman Fester") pass.
+    A reference that points inside a document is not a name: linking "the Complaint ¶5" to
+    a ``Complaint`` stub entity would be a confident wrong answer. So a hint only reaches
+    this step when it carries no locator and was not made positionally.
     """
     if legacy_value:
         return legacy_value
@@ -277,11 +249,10 @@ def _resolve_entity_name(
 ) -> Optional[_Outcome]:
     """Step 2: the reference names one entity. None means "not an entity name".
 
-    ``stale`` says the field holds an id that is no longer a node. Then an edge that is
-    already in the graph is not the whole answer (R33): the link stands, but the dead id
-    still has to go, so the resolution goes out marked :data:`NOTE_EDGES_EXIST` -- no edge
-    is re-emitted, and ``_replace_dead_id`` turns it into the patch that clears the field.
-    With the reference's own wording in the field there is nothing outstanding at all.
+    ``stale`` says the field holds an id that is no longer a node. Then an edge already in
+    the graph is not the whole answer: the link stands, but the dead id still has to go, so
+    the resolution goes out marked :data:`NOTE_EDGES_EXIST` -- no edge is re-emitted, and
+    ``_replace_dead_id`` turns it into the patch that clears the field.
     """
     entity_ids = view.entity_ids_by_name.get(generate_node_name(reference_text))
     if not entity_ids:
@@ -321,13 +292,12 @@ def _resolve_entity_name(
 
 
 def _replace_dead_id(outcome: _Outcome) -> _Outcome:
-    """R27: a stale id re-resolved by name has to actually replace the dead id.
+    """A stale id re-resolved by name has to actually replace the dead id.
 
     ``entity_name`` patches nothing by default -- the field keeps the words the document
     used, which is the ingest contract. A field holding an id that is no longer a node is
-    the one exception: leaving it alone would keep a dead UUID in the graph forever, so
-    this resolution writes the entity's id. The wording is not lost -- the preserved
-    ``<field>_text`` is what the re-resolution read in the first place.
+    the one exception: leaving it alone would keep a dead UUID in the graph forever. The
+    wording is not lost; the preserved ``<field>_text`` is what the re-resolution read.
     """
     resolution = outcome.resolution
     if resolution is None or resolution.patch_mode == PATCH_FULL:
@@ -347,16 +317,16 @@ def _cheap_cascade(
 ) -> Tuple[Optional[_Outcome], Optional[_Pending]]:
     """Steps 1-3 for one ``(assertion, field)``: no retrieval, no LLM, no document reads.
 
-    Returns ``(outcome, None)`` when the reference is answered (or there is nothing to
-    answer), or ``(None, pending)`` when it needs the seed and the tracer.
+    ``(outcome, None)`` when the reference is answered or there is nothing to answer;
+    ``(None, pending)`` when it needs the seed and the tracer.
     """
     value = _text_of(props.get(field_name))
     stored_text = _text_of(props.get(f"{field_name}_text"))
     holds_id = _as_uuid(value) is not None
 
-    # The planner fix (§4): build the hint FIRST and only give up when there is neither a
-    # structured reference nor anything in the field. Reading the field alone silently
-    # skipped every reference extraction recorded structurally.
+    # Build the hint FIRST, and give up only when there is neither a structured reference
+    # nor anything in the field: reading the field alone silently skips every reference
+    # the extraction recorded structurally.
     hint = parse_reference_hint(
         props.get(f"{field_name}_ref"),
         fallback_text=stored_text if holds_id else (value or stored_text),
@@ -370,9 +340,8 @@ def _cheap_cascade(
 
     if holds_id:
         # An id that is no longer a node -- the target was forgotten, or an amended
-        # document was re-chunked under new ids -- has gone dark, so it re-resolves from
-        # the preserved reference without waiting for force. With nothing preserved there
-        # is nothing to re-resolve from, and the reference stays unresolved.
+        # document re-chunked under new ids -- re-resolves from the preserved reference
+        # without waiting for force. With nothing preserved it stays unresolved.
         stale = value not in view.node_ids
         if hint is not None and (force or stale):
             entry_notes = (NOTE_STALE_ID,) if stale else ()
@@ -406,9 +375,8 @@ def _cheap_cascade(
     # the re-resolution -- the guard is for references that already had their chance.
     if not force and not stale:
         # An edge a resolver pass already wrote out of this assertion on this field is an
-        # answer, whether or not the node could be patched to remember it (R23). Without
-        # this, every pass on a backend with no ``update_node`` re-spends the whole budget
-        # tracing references it has already answered.
+        # answer, whether or not the node could be patched to remember it: without this, a
+        # backend with no ``update_node`` re-spends the whole budget on every pass.
         if (assertion_id, field_name) in view.resolver_edge_keys:
             return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
 
@@ -436,12 +404,9 @@ def _fold_counters(summary: Dict[str, Any], counters: Dict[str, Any]) -> None:
     """Merge the tracer's counters into the summary, coercing the one flag it shares.
 
     ``trace_reference`` bumps ``llm_budget_exhausted`` as a count (once per trace that
-    could not pay); the summary reports it as the pass-level flag it is, so it is true
-    exactly when at least one reference went untraced for want of a call -- not merely
-    when the last trace happened to spend the last slot. A budget of zero is the one
-    case where that count means something else: ``llm_max_calls=0`` is estimate mode, so
-    nothing was ever available to spend and nothing was exhausted (the pass reports
-    ``llm_estimate_only`` and ``traces_started`` instead).
+    could not pay); the summary reports it as the pass-level flag it is. A budget of zero
+    is the exception: ``llm_max_calls=0`` is estimate mode, so nothing was ever available
+    to spend and nothing was exhausted.
     """
     for key, value in counters.items():
         if key == "llm_budget_exhausted":
@@ -469,17 +434,12 @@ async def plan_resolutions(
     """Run the cascade over every dangling reference in the view.
 
     ``touched`` restricts the pass to one ingestion: a reference is in scope when the
-    assertion carrying it came from a touched chunk. A reference on an untouched
-    statement is left to the whole-graph pass rather than traced and then discarded
-    (R26); an earlier document's reference to the one just ingested is resolved by the
-    whole-graph pass, not here.
+    assertion carrying it came from a touched chunk, so a reference on an untouched
+    statement is left to the whole-graph pass rather than traced and then discarded.
 
-    ``allow_llm=False`` stops after the entity-name step -- the ingest tail's contract,
-    and the one setting under which the unstated inference never runs at all.
-
-    Every tunable defaults to its ``CognifyConfig`` value (``REFERENCE_LLM_MAX_CALLS``,
-    ``REFERENCE_TRACER_MAX_ITER``, ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``,
-    ``REFERENCE_INFER_UNSTATED``, ``REFERENCE_INFER_CONFIDENCE_THRESHOLD``).
+    ``allow_llm=False`` stops after the entity-name step -- the ingest tail's contract, and
+    the one setting under which the unstated inference never runs. Every tunable defaults
+    to its ``CognifyConfig`` value.
     """
     config = get_cognify_config()
     max_calls = config.reference_llm_max_calls if llm_max_calls is None else int(llm_max_calls)
@@ -541,10 +501,9 @@ async def plan_resolutions(
                     if allow_llm and (touched is None or own_chunk_touched):
                         pending.append(entry)
                     elif allow_llm:
-                        # R26: out of scope, and the seed and the trace are what this pass
-                        # spends. Tracing it and discarding the answer at record time would
-                        # charge this ingestion for the whole graph's residue. Nothing is
-                        # recorded either -- the whole-graph pass owns this reference.
+                        # Out of scope: tracing it and discarding the answer at record
+                        # time would charge this ingestion for the whole graph's residue.
+                        # Nothing is recorded -- the whole-graph pass owns this reference.
                         logger.debug(
                             "Leaving %s.%s to the whole-graph pass: its statement is "
                             "outside this ingestion.",
@@ -570,8 +529,8 @@ async def plan_resolutions(
                         own_chunk_touched=own_chunk_touched,
                     )
 
-        # Decision D2, strictly after the stated loop built its residue: the statements
-        # that reference nothing at all, and only when a caller opted in.
+        # Strictly after the stated loop built its residue: the statements that reference
+        # nothing at all, and only when a caller opted in.
         unstated = (
             _unstated_pending(
                 view,
@@ -602,9 +561,8 @@ async def plan_resolutions(
             )
 
     _fold_counters(summary, counters)
-    # Straight off the budget rather than out of the counters: it is the budget that was
-    # charged, and a report showing ``llm_calls=297/300`` beside an exhausted budget is
-    # the confusing half of that difference (R25).
+    # Straight off the budget rather than the counters: it is the budget that was charged,
+    # so an exhausted budget never reads as ``llm_calls=297/300``.
     summary["llm_calls_attempted"] = budget.used
     summary["llm_tokens_in"] = usage.tokens_in
     summary["llm_tokens_out"] = usage.tokens_out
@@ -638,19 +596,14 @@ async def write_resolutions(
 
     Edges come first because a patch points the field at a node the edges must already
     reach. ``add_edges`` upserts on ``(source, target, relationship)``, so re-emitting an
-    edge a previous pass wrote cannot duplicate it -- but the upsert also overwrites that
-    edge's stored properties, so a resolution the planner marked :data:`NOTE_EDGES_EXIST`
-    writes no edge at all and is patched only.
-
-    Each resolution's ``patch_mode`` decides the node patch: ``"none"`` (``existing_id``,
-    ``entity_name``) patches nothing, ``"resolution_only"`` writes the audit blob without
-    touching the field, and ``"full"`` moves the anchor's id into the field.
+    edge cannot duplicate it -- but the upsert also overwrites that edge's stored
+    properties, so a resolution the planner marked :data:`NOTE_EDGES_EXIST` writes no edge
+    at all and is patched only.
 
     Indexing the new edge texts is the one step allowed to fail on its own: the edges are
     already stored, so the patches still run and the failure comes back as the
-    ``edge_index_failed`` note rather than as a half-applied write. Nothing retries it --
-    a later pass finds those edges present and re-emits nothing -- so the note means an
-    operator has to re-index: ``index_graph_edges()`` with no argument rescans the graph.
+    ``edge_index_failed`` note. Nothing retries it, so the note means an operator has to
+    re-index -- ``index_graph_edges()`` with no argument rescans the graph.
     """
     summary = {
         "edges_written": 0,
@@ -760,10 +713,9 @@ async def write_resolutions(
 def _merge_write_summary(summary: Dict[str, Any], write_summary: Dict[str, Any]) -> None:
     """Fold the write phase's counters into the plan's.
 
-    Only ``already_resolved`` adds rather than replaces: the write phase reports the
-    planned resolutions that turned out to need no write, and those stop being resolutions
-    of this pass. ``notes`` concatenates, because the plan's notes (a budget that ran out,
-    a broken circuit) and the write's (an index that failed) are about different phases.
+    Only ``already_resolved`` adds rather than replaces: a planned resolution that turned
+    out to need no write stops being a resolution of this pass. ``notes`` concatenates,
+    because the plan's notes and the write's are about different phases.
     """
     written = dict(write_summary)
     already = written.pop("already_resolved", 0)
@@ -781,7 +733,7 @@ def _dataset_id(ctx, dataset_id):
 
 
 def _allow_llm(scope: str, allow_llm: Optional[bool]) -> bool:
-    """Decision D1: only the whole-graph pass may spend LLM calls, unless told otherwise."""
+    """Only the whole-graph pass may spend LLM calls, unless told otherwise."""
     return scope == "all" if allow_llm is None else bool(allow_llm)
 
 
@@ -846,11 +798,10 @@ async def detect_dangling_references(
     ``data`` is the memify seed and is ignored unless ``scope="touched"``, where it names
     the chunks and documents the current ingestion produced.
 
-    ``infer_unstated`` opts into the unstated denial/admission inference (decision D2,
-    strategy ``llm_inferred``), a second pass over the same budget that runs strictly
-    after every stated reference was offered a trace; ``infer_confidence_threshold`` is
-    the higher bar it is held to. Both default to their ``CognifyConfig`` values, and
-    neither does anything when ``allow_llm`` resolves to ``False``.
+    ``infer_unstated`` opts into the unstated denial/admission inference (strategy
+    ``llm_inferred``), which spends the same budget strictly after every stated reference
+    was offered a trace; ``infer_confidence_threshold`` is the higher bar it is held to.
+    Neither does anything when ``allow_llm`` resolves to ``False``.
     """
     _, _, resolutions, summary = await _plan(
         data,
@@ -924,16 +875,14 @@ async def resolve_assertion_references(
     """Resolve dangling assertion references, then return the input unchanged.
 
     Args:
-        data: The items the previous task produced. Only read when
-            ``scope="touched"``, where they identify the ingestion to resolve around.
-        scope: ``"touched"`` for an ingest tail (this document's references, and
-            references pointing at it), ``"all"`` for the whole graph.
-        allow_llm: Whether the agentic tracer may run. Defaults to ``scope == "all"``,
-            so the ingest tail is LLM-free (decision D1) and the memify pass is not.
-        force: Re-resolve references a previous pass already answered, from the
-            structured reference (or the ``<field>_text``) it preserved.
-        dry_run: Plan and log without writing. Traces still run, so the returned plan
-            shows what the agent would have linked.
+        data: The items the previous task produced, read only when ``scope="touched"``.
+        scope: ``"touched"`` for an ingest tail, ``"all"`` for the whole graph.
+        allow_llm: Whether the agentic tracer may run. Defaults to ``scope == "all"``, so
+            the ingest tail is LLM-free and the memify pass is not.
+        force: Re-resolve references a previous pass already answered, from the structured
+            reference (or the ``<field>_text``) it preserved.
+        dry_run: Plan and log without writing. Traces still run, so the returned plan shows
+            what the agent would have linked.
         llm_max_calls: Calls this pass may spend across every reference it traces.
             ``None`` takes ``REFERENCE_LLM_MAX_CALLS``; ``0`` seeds without spending.
         tracer_max_iter: Steps one reference's trace may take. ``None`` takes
@@ -941,13 +890,13 @@ async def resolve_assertion_references(
         llm_confidence_threshold: Below this the agent's answer is recorded but never
             linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
         infer_unstated: Also infer the link a denial or an admission that references
-            nothing is answering (decision D2). ``None`` takes
-            ``REFERENCE_INFER_UNSTATED`` (off); the tail never runs it.
+            nothing is answering. ``None`` takes ``REFERENCE_INFER_UNSTATED`` (off); the
+            tail never runs it.
         infer_confidence_threshold: The higher bar an inferred link is held to. ``None``
             takes ``REFERENCE_INFER_CONFIDENCE_THRESHOLD``.
         dataset_id: Dataset whose relational rows hold the document locations, when no
             pipeline context supplies one.
-        ctx: Pipeline context, used for provenance and the dataset's document locations.
+        ctx: Pipeline context, used for provenance and the document locations.
 
     Returns:
         ``data``, unchanged, so the task can be appended to any pipeline.
@@ -959,10 +908,9 @@ async def resolve_assertion_references(
         return data
 
     # This entry point is also the memify registry's ``resolve_references`` task, which
-    # binds scope="all" -- so it spends LLM calls, and R11 has to hold here too: a missing
-    # or blank tracer prompt must fail loudly rather than become one WARNING and a pass
-    # that wrote nothing. The tail (allow_llm=False) never reads a prompt and keeps
-    # swallowing everything, because it may not break an ingestion.
+    # binds scope="all": it spends LLM calls, so a missing or blank tracer prompt must fail
+    # loudly rather than become one WARNING and a pass that wrote nothing. The tail
+    # (allow_llm=False) never reads a prompt and keeps swallowing everything.
     spends_llm = _allow_llm(scope, allow_llm)
 
     try:

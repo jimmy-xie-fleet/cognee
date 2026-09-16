@@ -1,19 +1,9 @@
 """Read layer for the assertion-reference resolver.
 
-Everything here reads the graph and the stored text of the documents it names, and
-nothing else: no LLM, no vector search, no writes. It used to live inline in
-:mod:`cognee.tasks.graph.resolve_assertion_references`; it was split out so the seed
-retrieval and tracer-tool tasks that only need to *read* the graph do not have to import
-the resolution cascade to get at it.
-
-:func:`_load_graph_view` runs one filtered graph query and indexes the result as a
-:class:`GraphView`; :class:`DocumentTextCache` lazily reads and caches the stored text
-(and chunk offsets) of the documents a pass actually touches.
-
-``resolve_assertion_references`` imports these names back and re-exports them, so
-existing callers (``scripts/legal/resolve_references_report.py``,
-``scripts/legal/find_disputes.py``, and the resolver's own tests) keep working
-unchanged.
+Everything here reads the graph and the stored text of the documents it names, and nothing
+else: no LLM, no vector search, no writes. :func:`_load_graph_view` runs one filtered graph
+query and indexes the result as a :class:`GraphView`; :class:`DocumentTextCache` lazily
+reads and caches the stored text (and chunk offsets) of the documents a pass touches.
 """
 
 from dataclasses import dataclass, field
@@ -56,8 +46,7 @@ class GraphView:
     node_ids: Set[str] = field(default_factory=set)
     edge_keys: Set[Tuple[str, str, str]] = field(default_factory=set)
     # (source id, relationship) of every edge a resolver pass wrote. On a backend that
-    # cannot patch nodes this is the only record that a reference was already answered,
-    # so it is what stops the next pass paying for the same trace again (R23).
+    # cannot patch nodes this is the only record that a reference was already answered.
     resolver_edge_keys: Set[Tuple[str, str]] = field(default_factory=set)
     # document id -> its chunk property dicts, sorted by chunk_index.
     chunks_by_document: Dict[str, List[dict]] = field(default_factory=dict)
@@ -94,7 +83,7 @@ def _node_label(props: Any) -> Optional[str]:
     """The label an edge's text calls this node by.
 
     Named nodes use their name; a ``DocumentChunk`` has none, so it is called by a preview
-    of its text -- the same convention ``ensure_default_edge_properties`` uses.
+    of its text -- the convention ``ensure_default_edge_properties`` uses.
     """
     if not isinstance(props, dict):
         return None
@@ -123,10 +112,6 @@ async def _load_graph_view(graph_engine) -> GraphView:
     cascade asks about: ``is_part_of`` for chunk ownership and the already-written
     ``responds_to`` / ``attributed_to`` that make a second pass a no-op. Adapters without
     attribute filtering fall back to the full graph.
-
-    An edge's properties come back with it, so an edge a previous pass wrote can be told
-    from one the extraction did: it carries ``resolved_by="reference_resolver"``, and its
-    ``(source, relationship)`` pair goes into ``resolver_edge_keys``.
     """
     try:
         nodes, edges = await graph_engine.get_filtered_graph_data([{"type": list(VIEW_NODE_TYPES)}])
@@ -199,11 +184,9 @@ async def _raw_locations(dataset_id) -> Dict[str, str]:
 class DocumentTextCache:
     """The stored text (and chunk offsets) of the documents one pass actually reads.
 
-    A document is opened at most once per pass, successfully or not. A document whose
-    text cannot be read -- a PDF or image opened as UTF-8, a file that moved -- is still
-    a matched document, so the failure is cached as "no text" and the caller degrades to
-    the stored chunks. Only an error the reader was not expected to raise propagates, so
-    the ``failed`` counter keeps meaning "something is wrong here".
+    A document is opened at most once per pass, successfully or not: a document whose text
+    cannot be read is still a matched document, so the failure is cached as "no text" and
+    the caller degrades to the stored chunks. Only an unexpected error propagates.
     """
 
     def __init__(self, view: GraphView, *, dataset_id=None):

@@ -1,15 +1,12 @@
 """Memify pipeline that resolves dangling assertion references across a whole dataset.
 
-The ingest tail (``resolve_assertion_references`` with ``scope="touched"``,
-``allow_llm=False``) answers only what it can answer for free: a field that already holds
-an id, and a reference that names one entity. Everything else -- including every forward
-reference, where the document being pointed at was not in the graph yet -- is left
-dangling for this pipeline. It is the sweep that closes them: one detect (extraction)
-phase seeds and traces every remaining reference, one apply (enrichment) phase writes the
-edges and node patches.
+The ingest tail answers only what it can answer for free; everything else -- including
+every forward reference, where the document being pointed at was not in the graph yet --
+is left dangling for this pipeline. One detect (extraction) phase seeds and traces every
+remaining reference, one apply (enrichment) phase writes the edges and node patches.
 
-This is where the LLM budget is spent (decision D1), so the pipeline is also where it is
-set: ``llm_max_calls`` caps the whole run and ``tracer_max_iter`` caps one reference.
+This is where the LLM budget is spent, so it is also where it is set: ``llm_max_calls``
+caps the whole run and ``tracer_max_iter`` caps one reference.
 """
 
 from typing import Optional
@@ -72,13 +69,11 @@ async def resolve_references_pipeline(
         llm_confidence_threshold: Below this the agent's answer is recorded but never
             linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
         infer_unstated: Also infer the link a denial or an admission that references
-            nothing is answering (decision D2, strategy ``llm_inferred``). Off by
-            default; it draws on the same ``llm_max_calls`` budget, strictly after every
-            stated reference was offered a trace. ``None`` takes
-            ``REFERENCE_INFER_UNSTATED``.
-        infer_confidence_threshold: The higher bar an inferred link is held to -- below
-            it the answer is recorded and never linked. ``None`` takes
-            ``REFERENCE_INFER_CONFIDENCE_THRESHOLD``.
+            nothing is answering (strategy ``llm_inferred``). Off by default; it draws on
+            the same ``llm_max_calls`` budget, strictly after every stated reference was
+            offered a trace. ``None`` takes ``REFERENCE_INFER_UNSTATED``.
+        infer_confidence_threshold: The higher bar an inferred link is held to. ``None``
+            takes ``REFERENCE_INFER_CONFIDENCE_THRESHOLD``.
         user: Acting user; the default user is used when omitted.
         dataset: Dataset name (or id) whose graph to resolve.
         run_in_background: Forwarded to ``memify``.

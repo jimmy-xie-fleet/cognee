@@ -1,30 +1,15 @@
 """The bounded agentic loop that resolves ONE assertion reference.
 
-Decision D3: every reference that survives the cheap, deterministic steps of the cascade
-goes to this tracer -- there is no single-shot "pick the best seed candidate" stage, and
-paragraph-marker lookup is a *tool the agent may call*, never an automatic resolution.
-Decision D7: the loop is written here rather than pulled in from a framework, every call
-goes through :class:`LLMGateway` (so rate limiting, usage accounting and quota handling
-are the ones the rest of cognee already has), and the tools are private callables that
-never appear in a search path.
+Ask for the next :class:`TracerStep`; either run the tool it named and append the result to
+the context, or accept the ``finish`` it returned. Stops on a finish, at ``max_iter``
+steps, or when the pass-wide :class:`CallBudget` cannot pay for another call.
 
-One trace is: render the referring statement, the reference as it was made, the tool
-manifest and a context that starts as the seed candidate list; ask for the next
-:class:`TracerStep`; either run the tool it named and append the result to the context, or
-accept the ``finish`` it returned. It stops on a finish, at ``max_iter`` steps, or when
-the pass-wide :class:`CallBudget` cannot pay for another call.
+Two spending rules, because they are the difference between a bounded pass and an unbounded
+one: ``budget.take()`` runs **before** every call, so a trace that starts after the pass
+budget ran out costs nothing; and reaching ``max_iter`` returns an abstention **without** a
+final "just answer now" call, so a reference costs at most ``max_iter`` calls exactly.
 
-Two spending rules the tests pin, because they are the difference between a bounded pass
-and an unbounded one:
-
-* ``budget.take()`` runs **before** every call, so a trace that starts after the pass
-  budget ran out costs nothing at all.
-* reaching ``max_iter`` returns an abstention **without** a final "just answer now" call
-  (unlike ``AgenticRetriever``), so a reference costs at most ``max_iter`` calls exactly.
-
-Nothing here writes to the graph. The caller (the resolver pass) maps the returned
-:class:`TracerFinish` to a ``Resolution`` and does the writing, and the returned
-:class:`TraceRecord` list is what a ``--show-traces`` report prints.
+Nothing here writes to the graph.
 """
 
 import json
@@ -56,14 +41,14 @@ TRACE_USER_PROMPT = "trace_reference_user.txt"
 INFER_UNSTATED_SYSTEM_PROMPT = "infer_unstated_reference_system.txt"
 
 # How much of a tool result a TraceRecord keeps. A record is for a human reading a report,
-# not for the model -- the model already saw the full (truncated) result in its context.
+# not for the model, which already saw the full (truncated) result in its context.
 TRACE_PREVIEW_CHARS = 300
 
 _TRUNCATION_NOTE = "\n… [truncated]"
-# Tool output is document text, and document text is untrusted: without a delimiter it
-# can write "# Step 3: read_chunk(...)\nResult:" and forge a step the tools never ran.
-# The loop is the only writer of these two tokens -- any "<<<" run inside a result is
-# broken before it is fenced -- and the system prompt tells the model so.
+# Tool output is document text, and document text is untrusted: without a delimiter it can
+# write "# Step 3: read_chunk(...)\nResult:" and forge a step the tools never ran. The loop
+# is the only writer of these two tokens -- any "<<<" run inside a result is broken before
+# it is fenced -- and the system prompt tells the model so.
 FENCE_OPEN_TEMPLATE = "<<<tool-result step={step} tool={tool}>>>"
 FENCE_CLOSE = "<<<end-tool-result>>>"
 
@@ -75,11 +60,9 @@ FENCE_CLOSE = "<<<end-tool-result>>>"
 
 class TracerToolCall(BaseModel):
     tool_name: str = Field(..., description="A tool name from the manifest, exactly as written.")
-    # A plain object rather than a per-tool union: the tracer validates it against the
-    # named tool's own argument model and hands a validation failure back to the model as
-    # an ERROR string. Typed as Dict[str, Any] rather than `dict` so the emitted JSON
-    # schema is explicit; BAML rejects Any-valued maps, so this response model is only
-    # used with the litellm / litellm_native / instructor paths.
+    # A plain object rather than a per-tool union: the tracer validates it against the named
+    # tool's own argument model. Typed as Dict[str, Any] so the emitted JSON schema is
+    # explicit; BAML rejects Any-valued maps, so this model is litellm/instructor only.
     arguments: Dict[str, Any] = Field(
         default_factory=dict, description="Arguments for that tool, matching its schema."
     )
@@ -94,10 +77,9 @@ class TracerFinish(BaseModel):
 
 
 # The two outcomes are separate optional submodels rather than a tagged union on purpose:
-# a union makes pydantic emit the keywords several structured-output providers refuse in
-# strict mode, so the "exactly one of them" rule is enforced by the loop instead of by the
-# schema. The class docstring below is short because it is shipped to the model as the
-# schema's description.
+# a union makes pydantic emit keywords several structured-output providers refuse in strict
+# mode, so "exactly one of them" is enforced by the loop. The class docstring below is
+# short because it is shipped to the model as the schema's description.
 class TracerStep(BaseModel):
     """One step of a trace: a thought, plus either a tool call or a finish, never both."""
 
@@ -169,10 +151,7 @@ def _reference_block(hint: Optional[ReferenceHint]) -> Optional[Dict[str, str]]:
 
     None drives the user template's ``{% if reference %}`` to its "no reference recorded"
     branch, which is the shape the unstated-inference variant always runs in.
-
-    Fence-neutralised like the source block: every field here is document wording the
-    extraction copied into the hint, so it is no more the resolver's own text than a tool
-    result is.
+    Fence-neutralised like the source block: every field here is document wording.
     """
     if hint is None:
         return None
@@ -193,8 +172,8 @@ def _source_block(
 ) -> Dict[str, str]:
     """The referring statement as the prompt shows it -- every value fence-neutralised.
 
-    The proposition, the quote and the document name are document text the extraction
-    copied, so they can open or close a fence exactly like a tool result can.
+    The proposition, the quote and the document name are document text, so they can open or
+    close a fence exactly like a tool result can.
     """
 
     def text(value: Any, fallback: str) -> str:
@@ -216,14 +195,9 @@ def _source_block(
 def _neutralize_fences(text: str) -> str:
     """Break every ``<<`` run so borrowed text cannot open or close a fence.
 
-    Applied to everything in the prompt the resolver did not write itself: a tool result,
-    the seed preview, the referring statement's own block, and the arguments a tool call
-    is echoed with. The fence tokens are the loop's alone, which is what lets the system
-    prompt tell the model that document text can never open or close one.
-
-    A character scan rather than a regex, deliberately: the resolver takes no regex over
-    text it did not supply itself. ``"<<<"`` becomes ``"< < <"`` -- the words survive, the
-    token does not, and the result is stable under a second pass.
+    Applied to everything in the prompt the resolver did not write itself, so the fence
+    tokens stay the loop's alone. A character scan rather than a regex, deliberately: the
+    resolver takes no regex over text it did not supply itself.
     """
     if "<<" not in text:
         return text
@@ -238,8 +212,7 @@ def _neutralize_fences(text: str) -> str:
 def _render_args(arguments: Mapping[str, Any]) -> str:
     """The arguments as the echoed ``# Step N: tool(args)`` line shows them.
 
-    Neutralised too: the model chose these strings, and they are echoed above the fence
-    the loop writes for the result.
+    Neutralised too: the model chose these strings, and they are echoed above the fence.
     """
     try:
         rendered = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
@@ -271,21 +244,14 @@ async def trace_reference(
 
     Returns ``(finish, tool step records, calls actually spent)``. ``finish`` always names
     either a label this trace's ``registry`` can resolve or ``None``: a label the model
-    invented is converted to an abstention here, so the caller never has to guess whether
-    a label is real.
-
-    Counters touched (created on first use, so a plain ``{}`` works): ``llm_calls``,
-    ``llm_failed``, ``llm_budget_exhausted``, ``llm_abstained``, ``llm_unknown_label``,
-    ``llm_malformed_step``, ``traces_iteration_capped``, and the nested
-    ``tool_calls_by_name``. The last three of the abstention causes are counted apart
-    from ``llm_abstained``, so a caller can record *why* a trace came back empty.
+    invented is converted to an abstention here. Counters are created on first use, and the
+    specific abstention causes are counted apart from ``llm_abstained``.
     """
     records: List[TraceRecord] = []
     manifest = render_tool_manifest(tools)
     # A missing or blank system prompt is a deployment bug, not a per-reference failure:
-    # tracing without one would spend the whole pass budget on an unguided model that has
-    # been told nothing about labels, abstention or the fence. Raise before any slot is
-    # taken, so the pass fails loudly having spent nothing.
+    # tracing without one would spend the pass budget on a model told nothing about labels,
+    # abstention or the fence. Raise before any slot is taken, so nothing is spent.
     system_prompt = read_query_prompt(system_prompt_path)
     if system_prompt is None:
         raise FileNotFoundError(f"Reference tracer system prompt not found: {system_prompt_path}")
@@ -298,8 +264,8 @@ async def trace_reference(
     iterations = 0
 
     for step_number in range(1, max_iter + 1):
-        # Rendered before the slot is claimed: a template error is a bug in this repo, and
-        # burning a pass-wide call on it would charge every other reference for it.
+        # Rendered before the slot is claimed: burning a pass-wide call on a template bug
+        # would charge every other reference for it.
         user_prompt = render_prompt(
             TRACE_USER_PROMPT,
             {
@@ -325,8 +291,8 @@ async def trace_reference(
                 response_model=TracerStep,
             )
         except Exception as error:
-            # The slot is spent either way; a retry would spend a second one for the same
-            # reference while every other reference in the pass is still waiting.
+            # The slot is spent either way; a retry would spend a second one while every
+            # other reference in the pass is still waiting.
             _bump(counters, "llm_failed")
             logger.warning("Reference trace step %s failed: %s", step_number, error)
             return _abstain(f"tracer call failed: {error}"), records, iterations
@@ -337,8 +303,8 @@ async def trace_reference(
             label = (finish.candidate_label or "").strip()
             if not label:
                 _bump(counters, "llm_abstained")
-                # "" and "   " are abstentions the model wrote clumsily; normalise them so
-                # a caller only ever has to test `candidate_label is None`.
+                # "" and "   " are clumsily written abstentions; normalise them so a
+                # caller only ever has to test `candidate_label is None`.
                 return finish.model_copy(update={"candidate_label": None}), records, iterations
             if registry.resolve(label) is None:
                 _bump(counters, "llm_unknown_label")
@@ -347,9 +313,8 @@ async def trace_reference(
 
         tool_call = step.tool_call
         if tool_call is None:
-            # R24: counted apart from an abstention. The model did not look and decline --
-            # it returned a step the contract has no reading for, and the caller records
-            # that cause rather than hiding it behind ``llm_abstained``.
+            # Counted apart from an abstention: the model did not look and decline, it
+            # returned a step the contract has no reading for.
             _bump(counters, "llm_malformed_step")
             return _abstain("step named neither a tool nor a finish"), records, iterations
 

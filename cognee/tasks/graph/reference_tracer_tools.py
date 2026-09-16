@@ -1,29 +1,15 @@
 """The five read-only tools the agentic reference tracer may call.
 
-A trace resolves exactly one reference, and the only handle it ever has on a graph node
-is an opaque label (``A3``, ``P2``, ``D1``) issued by the trace's shared
-:class:`LabelRegistry`. These tools are what turn that constraint into something workable:
-they let the agent look around the document set -- search it, list it, page through a
-document, read one passage in full, jump to a numbered paragraph -- and every node they
-mention comes back labelled, never as an id. A finish naming a label is resolvable; a
-finish naming anything else is not, which is exactly the fence we want around an LLM
-writing edges into a graph.
+Every node these tools mention comes back as an opaque label (``A3``, ``P2``, ``D1``) issued
+by the trace's shared :class:`LabelRegistry`, never as an id, so a finish naming a label is
+resolvable and a finish naming anything else is not.
 
-Design notes:
-
-* **Read-only, always.** No handler writes a node, an edge or a file. The one filesystem
-  read (a document's stored text, for ``locate_paragraph``) goes through the pass's
-  :class:`DocumentTextCache`, which opens a document at most once and degrades to the
-  stored chunks when it cannot.
-* **Private callables, not registry ``Tool``s** (decision D7): nothing here is
-  discoverable by ``AGENTIC_COMPLETION`` or any other search path, and nothing here
-  needs a permission check of its own -- the view it closes over was already read under
-  the caller's dataset scope.
-* **No regex over reference text.** ``locate_paragraph`` takes an already-split
-  ``(kind, value)`` pair from the agent and hands it to :func:`build_locator`; the marker
-  regexes then run over *document* text only.
-* ``search`` is the same :func:`search_candidates` that produced the trace's seed, so the
-  agent and the seed see one ranking rather than two.
+No handler writes a node, an edge or a file, and none is a registry ``Tool``: nothing here
+is discoverable by ``AGENTIC_COMPLETION`` or any other search path, and nothing here needs
+a permission check of its own -- the view it closes over was read under the caller's
+dataset scope. ``locate_paragraph`` takes an already-split ``(kind, value)`` pair from the
+agent, so the marker regexes run over *document* text only, and ``search`` is the same
+:func:`search_candidates` that produced the seed, so both see one ranking.
 """
 
 import json
@@ -65,23 +51,20 @@ from cognee.tasks.graph.reference_retrieval import KINDS, LexicalIndex, search_c
 
 logger = get_logger("reference_tracer_tools")
 
-# The ceiling on a single tool's output. The loop truncates to it as well; ``read_chunk``
-# applies it to the passage body before it appends the assertion list, so a huge passage
-# cannot squeeze the assertions out of the result entirely.
+# The ceiling on a single tool's output; the loop truncates to it as well.
 MAX_TOOL_OUTPUT_CHARS = 6_000
 # ``list_documents`` is a whole-corpus listing; past this many documents the agent should
 # be searching, not reading a catalogue.
 DOCUMENT_LIST_CAP = 80
-# A list row's preview. Much shorter than a search result's, because a catalogue is for
-# picking a document, not for reading one: 80 rows of 240-char previews are ~23k chars,
-# four times the output cap, and the overflow silently eats the "and N more" line.
+# A list row's preview. Much shorter than a search result's: 80 rows of 240-char previews
+# are four times the output cap, and the overflow silently eats the "and N more" line.
 LIST_PREVIEW_CHARS = 100
 LIST_TAIL_TEMPLATE = '… and {} more (use search kind="documents")'
 # Floor on the passage body read_chunk returns, so a pathological assertion list cannot
 # squeeze the passage out entirely (and vice versa: the body is capped so the labels fit).
 READ_CHUNK_MIN_BODY_CHARS = 500
-# How much of a located span to show. Smaller than MAX_TOOL_OUTPUT_CHARS because a span
-# is one paragraph and the passages/assertions under it are the point of the call.
+# How much of a located span to show. Smaller than MAX_TOOL_OUTPUT_CHARS because the
+# passages and assertions under the span are the point of the call.
 LOCATOR_SPAN_CHARS = 2_000
 # "[D80] " + " — NN passages — " + the two quotes + the joining newline.
 _LIST_ROW_OVERHEAD = 40
@@ -115,9 +98,8 @@ if set(get_args(SearchKind)) != set(KINDS):  # pragma: no cover - drift guard
 class ToolSpec:
     """One callable tool: what the model is told about it, and what runs.
 
-    ``handler`` takes the *validated* ``args_model`` instance, so a handler never sees a
-    raw dict off the wire -- :func:`run_tool` validates first and turns a rejection into
-    an ``ERROR:`` string the agent can read and correct.
+    ``handler`` takes the *validated* ``args_model`` instance: :func:`run_tool` validates
+    first and turns a rejection into an ``ERROR:`` string the agent can correct.
     """
 
     name: str
@@ -242,10 +224,8 @@ def build_tracer_tools(
 ) -> Dict[str, ToolSpec]:
     """The five tools, closed over one trace's view, text cache, index and registry.
 
-    ``exclude_ids`` / ``own_document_id`` / ``penalize_own_document`` are the trace's own
-    scoping (drop the referring assertion and its chunk; weigh the referring document
-    down for a ``responds_to``), passed straight through to :func:`search_candidates` so
-    the agent's ``search`` ranks exactly the way the seed did.
+    The scoping arguments are passed straight through to :func:`search_candidates`, so the
+    agent's ``search`` ranks exactly the way the seed did.
     """
 
     async def _search(args: SearchArgs) -> str:
@@ -272,8 +252,7 @@ def build_tracer_tools(
 
         # Two bounds, and the tail line survives both: a row cap, and a character budget
         # that reserves room for the tail up front. Without the second, the loop's own
-        # truncation cuts the list mid-row and takes "and N more" with it, so the agent
-        # cannot tell a complete catalogue from a clipped one.
+        # truncation takes "and N more" with it and a clipped catalogue reads as complete.
         reserve = len(LIST_TAIL_TEMPLATE.format(len(ordered))) + 1
         lines: List[str] = []
         used = 0
@@ -282,8 +261,7 @@ def build_tracer_tools(
             chunks = view.chunks_by_document.get(document_id, [])
             first = _preview(chunks[0].get("text") if chunks else "", LIST_PREVIEW_CHARS)
             # Bound the row before labelling it, so a row that does not fit never burns a
-            # label the agent will never see. _LIST_ROW_OVERHEAD covers "[D80] " and the
-            # separators, and over-estimating only makes the budget stricter.
+            # label the agent will never see. Over-estimating only tightens the budget.
             projected = len(name) + len(first) + _LIST_ROW_OVERHEAD
             if lines and used + projected + reserve > MAX_TOOL_OUTPUT_CHARS:
                 break
@@ -305,8 +283,7 @@ def build_tracer_tools(
 
         chunks = view.chunks_by_document.get(document_id, [])
         # from_chunk is the stored chunk_index the agent read off a previous result, not a
-        # position in this list: the two coincide for a normally ingested document, and
-        # when they do not it is the printed number the agent is answering.
+        # position in this list: when the two differ, the printed number is what it meant.
         start = next(
             (
                 position
@@ -343,9 +320,8 @@ def build_tracer_tools(
             [assertion_id for assertion_id, _ in quoted],
         )
         # The WHOLE result has to fit MAX_TOOL_OUTPUT_CHARS, because the loop truncates to
-        # the same number: capping only the body hands the agent a long passage with every
-        # [A…] label cut off the end -- and those labels are the only way it can name what
-        # it just read.
+        # the same number: capping only the body would cut every [A…] label off the end,
+        # and those labels are the only way the agent can name what it just read.
         section = _cut(section, MAX_TOOL_OUTPUT_CHARS - READ_CHUNK_MIN_BODY_CHARS)
         text = _cut(
             view.chunks[node_id].get("text") or "", MAX_TOOL_OUTPUT_CHARS - len(section) - 2
@@ -476,15 +452,9 @@ async def _locate(
 ) -> Optional[Tuple[str, List[int], Optional[int], Tuple[str, ...]]]:
     """``(span text, chunk positions, anchor position, notes)`` for a locator, or None.
 
-    Two paths, in the order the resolver has always used them: the document's stored text
-    with chunk offsets when both are available, and a chunk-by-chunk scan when they are
-    not (a PDF that cannot be read as text, chunks that no longer tile the document).
-    ``chunk positions`` index ``chunks``, not the stored ``chunk_index``.
-
-    ``notes`` carries every reason the answer is weaker than it looks --
-    ``find_locator_span``'s own ``ambiguous_marker`` and, on the degraded path,
-    ``chunk_scan``. The caller renders them, because a scan result formatted exactly like
-    an authoritative one invites the model to treat a guess as a quotation.
+    ``chunk positions`` index ``chunks``, not the stored ``chunk_index``. ``notes`` carries
+    every reason the answer is weaker than it looks; the caller renders them, because a scan
+    result formatted like an authoritative one invites treating a guess as a quotation.
     """
     text = await texts.text(document_id)
     offsets = await texts.offsets(document_id, chunks) if text is not None else None
@@ -513,8 +483,8 @@ async def _locate(
 def render_tool_manifest(tools: Mapping[str, ToolSpec]) -> str:
     """The tool list the agent sees: name, description and full argument JSON schema.
 
-    The schema is what makes the manifest usable -- types, required fields and the ``kind``
-    enum reach the model instead of being described in prose it has to guess at.
+    The schema is what makes the manifest usable: types, required fields and the ``kind``
+    enum reach the model instead of prose it has to guess at.
     """
     if not tools:
         return "(no tools)"
@@ -531,9 +501,8 @@ def render_tool_manifest(tools: Mapping[str, ToolSpec]) -> str:
 async def run_tool(tools: Mapping[str, ToolSpec], name: str, arguments: Any) -> str:
     """Validate and run one tool call, turning every failure into an ``ERROR:`` string.
 
-    Never raises: an unknown tool, arguments the model got wrong, and a handler that blew
-    up all come back as text the agent can read on its next step. That is the whole
-    contract the loop relies on -- a tool step is never fatal to a trace.
+    Never raises: an unknown tool, wrong arguments and a handler that blew up all come back
+    as text the agent can read on its next step. A tool step is never fatal to a trace.
     """
     spec = tools.get(name)
     if spec is None:
