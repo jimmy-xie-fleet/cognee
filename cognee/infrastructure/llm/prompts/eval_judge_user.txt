@@ -1,0 +1,55 @@
+# Question
+
+{{ question }}
+
+# Gold facts
+
+These are hand-written from the source documents. They are the ground truth.
+{% for gold in gold_facts %}
+{{ loop.index }}. {{ gold.fact }}
+   (source: {{ gold.source }})
+{%- endfor %}
+
+{% if must_not_claim %}
+# Must not claim
+
+Each line below is a known trap: a plausible-sounding claim that the documents
+do not support. If the answer makes one of these claims, it is a fabricated
+claim.
+{% for trap in must_not_claim %}
+- {{ trap }}
+{%- endfor %}
+{% endif %}
+{% if notes %}
+# Grading notes for this question
+
+{{ notes }}
+{% endif %}
+# Answer under evaluation
+
+{{ answer if answer else "(the system returned no answer)" }}
+
+# Retrieved context
+
+This is what the system retrieved before answering. Use it to decide whether a
+specific claim is supported or fabricated.
+
+{{ context if context else "(no context was retrieved)" }}
+
+# Output
+
+Return the structured verdict:
+
+- `gold_facts_covered`: the gold facts the answer states or states an equivalent
+  of, copied verbatim from the list above.
+- `gold_facts_missed`: the remaining gold facts, copied verbatim. Together the
+  two lists must account for all {{ gold_facts | length }} gold fact(s), with no
+  fact in both and none invented.
+- `wrong_claims`: claims in the answer that contradict a gold fact or the
+  retrieved context.
+- `fabricated_claims`: specific claims in the answer supported by neither the
+  retrieved context nor the gold facts.
+- `stance_errors`: places where the answer asserts as true something the
+  documents negate, dispute, or merely allege, or reports as negated something
+  the documents establish.
+- `notes`: at most three sentences for a human reviewer.

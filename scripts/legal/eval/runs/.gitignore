@@ -1,0 +1,5 @@
+# Run output is evidence, not source: answers, verdicts and reports are written
+# here per run and are never committed. The directory itself is tracked so a
+# fresh checkout can run the harness without creating it first.
+*
+!.gitignore
