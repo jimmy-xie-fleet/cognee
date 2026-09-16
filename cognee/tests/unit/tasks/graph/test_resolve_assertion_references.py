@@ -33,6 +33,7 @@ import pytest
 from cognee.modules.graph.utils.reference_resolution import (
     STRATEGY_ENTITY_NAME,
     STRATEGY_EXISTING_ID,
+    STRATEGY_LLM_INFERRED,
     STRATEGY_LLM_TRACE,
     ReferenceHint,
     reference_fingerprint,
@@ -42,6 +43,7 @@ from cognee.modules.pipelines.tasks.task import Task
 from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES
 from cognee.tasks.graph.reference_tracer import TracerFinish, TracerStep, TracerToolCall
 from cognee.tasks.graph.reference_pass import (
+    INFERRED_EDGE_FEEDBACK_WEIGHT,
     NOTE_FORCE_KEPT_PRIOR,
     NOTE_LLM_ABSTAINED,
     NOTE_LLM_BELOW_THRESHOLD,
@@ -52,6 +54,8 @@ from cognee.tasks.graph.reference_pass import (
     NOTE_LLM_MALFORMED_STEP,
     NOTE_LLM_SELF_REFERENCE,
     NOTE_LLM_UNKNOWN_LABEL,
+    NOTE_UNSTATED,
+    UNSTATED_BASIS,
 )
 from cognee.tasks.graph.resolve_assertion_references import (
     NOTE_STALE_ID,
@@ -1297,6 +1301,338 @@ async def test_no_documents_in_the_view_skips_the_tracer_entirely():
 
 
 # --------------------------------------------------------------------------- #
+# unstated denial inference (decision D2, strategy llm_inferred)
+# --------------------------------------------------------------------------- #
+A_UNSTATED = _nid("assertion-unstated-denial")
+UNSTATED_PROPOSITION = "Clifton owns 10 Main Street"
+
+
+def _add_unstated_denial(graph, node_id=A_UNSTATED, **overrides):
+    """A denial that records no reference at all -- the inference pass's only candidate."""
+    props = {
+        "id": node_id,
+        "type": "Assertion",
+        "name": UNSTATED_PROPOSITION,
+        "statement_type": "denial",
+        "polarity": "negative",
+        "source_chunk_id": ANSWER_CHUNK_0,
+        "source_quote": "Defendant denies that Clifton owns the property.",
+    }
+    props.update(overrides)
+    graph.nodes[node_id] = props
+    return node_id
+
+
+def _unstated_fingerprint(proposition=UNSTATED_PROPOSITION):
+    return reference_fingerprint(
+        ReferenceHint(document_hint=proposition, basis=UNSTATED_BASIS, legacy_text=None),
+        "responds_to",
+    )
+
+
+# The stated references of ``_base_graph`` in budget order, so a test can spend the two
+# stated traces before the unstated one and say which came first.
+STATED_TRACES = [abstain(), abstain()]
+
+
+@pytest.mark.asyncio
+async def test_unstated_inference_is_off_unless_it_is_asked_for():
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+
+    _, summary, mocks = await _run(graph, steps=list(STATED_TRACES))
+
+    assert summary["inferred_scanned"] == 0
+    assert summary["inferred_resolved"] == 0
+    assert summary["llm_calls_inferred"] == 0
+    # Only the two stated references were ever traced.
+    assert mocks.llm.await_count == 2
+    assert graph.edges_of(A_UNSTATED, "responds_to") == []
+    assert A_UNSTATED not in dict(graph.update_node_calls)
+
+
+@pytest.mark.asyncio
+async def test_an_unstated_denial_is_inferred_into_a_marked_edge():
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+
+    _, summary, mocks = await _run(
+        graph,
+        steps=STATED_TRACES + [call_tool("list_documents"), finish_on(MARK_ALLEGATION, 0.8)],
+        infer_unstated=True,
+    )
+
+    assert summary["inferred_scanned"] == 1
+    assert summary["inferred_resolved"] == 1
+    assert summary["resolved_by_strategy"][STRATEGY_LLM_INFERRED] == 1
+    assert summary["llm_calls_inferred"] == 2
+    assert summary["llm_calls_stated"] == 2
+
+    edges = graph.edges_of(A_UNSTATED, "responds_to")
+    assert [edge[1] for edge in edges] == [A_1]
+    properties = _props(edges[0])
+    assert properties["inferred"] is True
+    assert properties["feedback_weight"] == INFERRED_EDGE_FEEDBACK_WEIGHT == 0.2
+    assert properties["resolution_strategy"] == STRATEGY_LLM_INFERRED
+
+    # The graph must never claim the document stated a reference it did not: only the
+    # audit blob is written back, never the field itself.
+    patched = dict(graph.update_node_calls)[A_UNSTATED]
+    assert set(patched) == {"responds_to_resolution"}
+    blob = patched["responds_to_resolution"]
+    assert blob["strategy"] == STRATEGY_LLM_INFERRED
+    assert blob["fingerprint"] == _unstated_fingerprint()
+    assert blob["notes"] == [NOTE_UNSTATED]
+    assert blob["anchor_id"] == A_1
+    assert [record["tool"] for record in blob["trace"]] == ["list_documents"]
+    assert blob["iterations"] == 2
+    assert mocks.llm.await_count == 4
+
+    # A stated reference's edge is untouched by any of this: no mark, and the storage
+    # default weight ``ensure_default_edge_properties`` fills in.
+    stated = _props(graph.edges_of(A_ATTRIBUTED, "attributed_to")[0])
+    assert "inferred" not in stated
+    assert stated["feedback_weight"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_an_inferred_link_is_never_re_inferred_without_update_node():
+    """R31: an inference never writes the field, so on a backend that cannot patch nodes
+    the edge it wrote is the only record it ran -- without that guard every pass infers
+    the same link again and re-upserts the edge, resetting its tuned properties."""
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+    graph.update_node_supported = False
+
+    # Every reference in the graph is answered on the first pass, so the second pass has
+    # nothing left to do but re-do it -- which is what the guards have to prevent.
+    _, first, first_mocks = await _run(
+        graph,
+        steps=[
+            finish_on(MARK_ALLEGATION, 0.9),
+            finish_on(MARK_STIPULATION_PASSAGE, 0.9),
+            finish_on(MARK_ALLEGATION, 0.8),
+        ],
+        infer_unstated=True,
+    )
+    assert first["inferred_resolved"] == 1
+    assert [edge[1] for edge in graph.edges_of(A_UNSTATED, "responds_to")] == [A_1]
+    assert first_mocks.llm.await_count == 3
+    graph.add_edges_calls.clear()
+
+    _, summary, mocks = await _run(
+        graph, default=finish_on(MARK_ALLEGATION, 0.8), infer_unstated=True
+    )
+
+    assert mocks.llm.await_count == 0
+    assert summary["inferred_scanned"] == 0
+    assert graph.add_edges_calls == []
+
+
+@pytest.mark.asyncio
+async def test_touched_scope_infers_only_for_the_statements_it_touched():
+    """R31(b): the inference is seeded and traced only for touched statements, the same
+    rule the stated loop follows (R26)."""
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+    untouched = _add_unstated_denial(
+        graph,
+        node_id=_nid("assertion-unstated-elsewhere"),
+        source_chunk_id=STIPULATION_CHUNK_0,
+        name="The boundary was never agreed",
+        source_quote="Defendant denies the boundary was agreed.",
+    )
+    touched = [SimpleNamespace(made_from=SimpleNamespace(id=ANSWER_CHUNK_0))]
+
+    _, summary, mocks = await _run(
+        graph,
+        scope="touched",
+        allow_llm=True,
+        data=touched,
+        default=finish_on(MARK_ALLEGATION, 0.8),
+        infer_unstated=True,
+    )
+
+    assert summary["inferred_scanned"] == 1
+    assert [edge[1] for edge in graph.edges_of(A_UNSTATED, "responds_to")] == [A_1]
+    assert graph.edges_of(untouched, "responds_to") == []
+    assert untouched not in dict(graph.update_node_calls)
+
+
+@pytest.mark.asyncio
+async def test_a_statement_that_states_its_own_reference_is_never_inferred_over():
+    """``A_DENIAL`` carries a ``responds_to_ref``, so the stated loop owns it."""
+    graph = _base_graph()
+
+    _, summary, _ = await _run(graph, steps=list(STATED_TRACES), infer_unstated=True)
+
+    assert summary["inferred_scanned"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"statement_type": "finding"},
+        {"source_quote": ""},
+        {"responds_to_ref": {"document_hint": "the Complaint"}},
+        {"responds_to": "Complaint paragraph 5"},
+    ],
+    ids=["not-a-denial", "no-source-quote", "has-a-structured-reference", "has-reference-text"],
+)
+async def test_only_an_unreferenced_denial_or_admission_is_eligible(overrides):
+    graph = _base_graph()
+    _add_unstated_denial(graph, **overrides)
+
+    _, summary, _ = await _run(
+        graph, steps=list(STATED_TRACES), default=abstain(), infer_unstated=True
+    )
+
+    assert summary["inferred_scanned"] == 0
+    assert graph.edges_of(A_UNSTATED, "responds_to") == []
+
+
+@pytest.mark.asyncio
+async def test_an_admission_is_eligible_too():
+    graph = _base_graph()
+    _add_unstated_denial(graph, statement_type="admission", polarity="positive")
+
+    _, summary, _ = await _run(
+        graph,
+        steps=STATED_TRACES + [finish_on(MARK_ALLEGATION, 0.9)],
+        infer_unstated=True,
+    )
+
+    assert summary["inferred_scanned"] == 1
+    assert [edge[1] for edge in graph.edges_of(A_UNSTATED, "responds_to")] == [A_1]
+
+
+def test_a_field_the_stated_loop_answered_is_never_inferred_over():
+    """The pass owns each ``(assertion, field)`` once, whichever loop got there first."""
+    props = {
+        "id": A_UNSTATED,
+        "type": "Assertion",
+        "name": UNSTATED_PROPOSITION,
+        "statement_type": "denial",
+        "source_quote": "Defendant denies it.",
+    }
+    view = SimpleNamespace(assertions={A_UNSTATED: props}, resolver_edge_keys=set())
+
+    eligible = pass_module._unstated_pending(
+        view, handled=set(), force=False, touched=None, counters={}
+    )
+    assert [entry.assertion_id for entry in eligible] == [A_UNSTATED]
+    assert eligible[0].unstated is True
+    assert eligible[0].field_name == "responds_to"
+
+    assert (
+        pass_module._unstated_pending(
+            view,
+            handled={(A_UNSTATED, "responds_to")},
+            force=False,
+            touched=None,
+            counters={},
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_unstated_pass_waits_for_every_stated_reference():
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+
+    # Two calls in the budget and three candidates: the two stated references spend it,
+    # and the inference gets nothing -- which is only true if it runs last.
+    _, summary, mocks = await _run(
+        graph, steps=list(STATED_TRACES), llm_max_calls=2, infer_unstated=True
+    )
+
+    assert mocks.llm.await_count == 2
+    assert summary["llm_calls_stated"] == 2
+    assert summary["llm_calls_inferred"] == 0
+    assert summary["traces_started"] == 3
+    assert summary["inferred_scanned"] == 1
+    assert summary["inferred_resolved"] == 0
+    # Nothing at all is written for the inference that never got its trace.
+    assert A_UNSTATED not in dict(graph.update_node_calls)
+    assert graph.edges_of(A_UNSTATED, "responds_to") == []
+
+
+@pytest.mark.asyncio
+async def test_an_inference_below_the_higher_bar_is_recorded_but_never_linked():
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+
+    # 0.7 clears the stated threshold (0.6) and not the inferred one (0.75).
+    _, summary, _ = await _run(
+        graph,
+        steps=STATED_TRACES + [finish_on(MARK_ALLEGATION, 0.7, reason="same proposition")],
+        infer_unstated=True,
+    )
+
+    assert summary["llm_below_threshold"] == 1
+    assert summary["inferred_resolved"] == 0
+    assert graph.edges_of(A_UNSTATED, "responds_to") == []
+    blob = _resolution_blob(graph, A_UNSTATED)
+    assert blob["strategy"] == STRATEGY_LLM_INFERRED
+    assert blob["notes"] == [NOTE_UNSTATED, NOTE_LLM_BELOW_THRESHOLD]
+    assert blob["anchor_id"] is None
+    assert blob["reason"] == "same proposition"
+    assert set(dict(graph.update_node_calls)[A_UNSTATED]) == {"responds_to_resolution"}
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_inference_is_not_reconsidered_unless_forced():
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+    steps = STATED_TRACES + [finish_on(MARK_ALLEGATION, 0.8)]
+
+    _, first, _ = await _run(graph, steps=list(steps), infer_unstated=True)
+    assert first["inferred_resolved"] == 1
+
+    _, second, mocks = await _run(graph, steps=list(steps), default=abstain(), infer_unstated=True)
+    assert second["inferred_scanned"] == 0
+
+    _, forced, forced_mocks = await _run(
+        graph, steps=list(steps), default=abstain(), infer_unstated=True, force=True
+    )
+    assert forced["inferred_scanned"] == 1
+    assert forced_mocks.llm.await_count > mocks.llm.await_count
+
+
+@pytest.mark.asyncio
+async def test_the_tail_never_infers_anything():
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+    items = [SimpleNamespace(made_from=SimpleNamespace(id=ANSWER_CHUNK_0, is_part_of=None))]
+
+    _, summary, mocks = await _run(
+        graph, data=items, scope="touched", allow_llm=False, infer_unstated=True
+    )
+
+    assert mocks.llm.await_count == 0
+    assert summary["inferred_scanned"] == 0
+    assert graph.edges_of(A_UNSTATED, "responds_to") == []
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_inference_threshold_overrides_the_config_bar():
+    graph = _base_graph()
+    _add_unstated_denial(graph)
+
+    _, summary, _ = await _run(
+        graph,
+        steps=STATED_TRACES + [finish_on(MARK_ALLEGATION, 0.5)],
+        infer_unstated=True,
+        infer_confidence_threshold=0.4,
+    )
+
+    assert summary["inferred_resolved"] == 1
+    assert [edge[1] for edge in graph.edges_of(A_UNSTATED, "responds_to")] == [A_1]
+
+
+# --------------------------------------------------------------------------- #
 # the attempt guard
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
@@ -1949,6 +2285,8 @@ async def test_the_summary_reports_every_budget_counter():
     for key in (
         "llm_calls",
         "llm_calls_attempted",
+        "llm_calls_stated",
+        "llm_calls_inferred",
         "llm_budget",
         "traces_started",
         "traces_finished",
@@ -1961,10 +2299,14 @@ async def test_the_summary_reports_every_budget_counter():
         "llm_failed",
         "llm_tokens_in",
         "llm_tokens_out",
+        "inferred_scanned",
+        "inferred_resolved",
     ):
         assert isinstance(summary[key], int), key
     assert isinstance(summary["llm_budget_exhausted"], bool)
     assert isinstance(summary["tool_calls_by_name"], dict)
+    assert summary["llm_calls_stated"] == summary["llm_calls"]
+    assert summary["llm_calls_inferred"] == 0
     # Every attempt came back, so the two spend counters agree here.
     assert summary["llm_calls_attempted"] == summary["llm_calls"]
     assert summary["traces_finished"] == 2

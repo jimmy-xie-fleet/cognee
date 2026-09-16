@@ -49,6 +49,8 @@ async def resolve_references_pipeline(
     llm_max_calls: Optional[int] = None,
     tracer_max_iter: Optional[int] = None,
     llm_confidence_threshold: Optional[float] = None,
+    infer_unstated: Optional[bool] = None,
+    infer_confidence_threshold: Optional[float] = None,
     user: Optional[User] = None,
     dataset: str = DEFAULT_DATASET_NAME,
     run_in_background: bool = False,
@@ -66,6 +68,12 @@ async def resolve_references_pipeline(
             ``REFERENCE_TRACER_MAX_ITER``.
         llm_confidence_threshold: Below this the agent's answer is recorded but never
             linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.
+        infer_unstated: Also infer the link a denial or an admission that references
+            nothing is answering (strategy ``llm_inferred``). Off by default; it draws on
+            the same ``llm_max_calls`` budget, strictly after every stated reference was
+            offered a trace. ``None`` takes ``REFERENCE_INFER_UNSTATED``.
+        infer_confidence_threshold: The higher bar an inferred link is held to. ``None``
+            takes ``REFERENCE_INFER_CONFIDENCE_THRESHOLD``.
         user: Acting user; the default user is used when omitted.
         dataset: Dataset name (or id) whose graph to resolve.
         run_in_background: Forwarded to ``memify``.
@@ -76,6 +84,7 @@ async def resolve_references_pipeline(
     _require_count("llm_max_calls", llm_max_calls, minimum=0)
     _require_count("tracer_max_iter", tracer_max_iter, minimum=1)
     _require_threshold("llm_confidence_threshold", llm_confidence_threshold)
+    _require_threshold("infer_confidence_threshold", infer_confidence_threshold)
 
     if user is None:
         user = await get_default_user()
@@ -97,6 +106,8 @@ async def resolve_references_pipeline(
             llm_max_calls=llm_max_calls,
             tracer_max_iter=tracer_max_iter,
             llm_confidence_threshold=llm_confidence_threshold,
+            infer_unstated=infer_unstated,
+            infer_confidence_threshold=infer_confidence_threshold,
         )
     ]
     enrichment_tasks = [Task(apply_reference_resolutions, dry_run=dry_run)]
