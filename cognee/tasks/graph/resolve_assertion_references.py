@@ -15,6 +15,10 @@ on, one more group follows: the denials and admissions that reference nothing at
 Nothing here parses or scores the reference's own text -- deciding which document "the
 Whitfield rebuttal appraisal" names is the agent's job, not a regex's.
 
+This module owns the cheap cascade, the planner and the entry points;
+:mod:`cognee.tasks.graph.reference_pass` owns the seed, the trace and the outcome mapping,
+and :mod:`cognee.tasks.graph.reference_write` owns the write phase.
+
 Three entry points over one pass. :func:`resolve_assertion_references` is the cognify tail:
 it returns its input unchanged and swallows its own errors, so resolution can never break
 ingestion. :func:`detect_dangling_references` / :func:`apply_reference_resolutions` are the
@@ -22,21 +26,18 @@ two-phase memify pair, whose apply phase deliberately does **not** swallow write
 """
 
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import NAMESPACE_URL, uuid5
 
 from cognee.infrastructure.databases.graph import get_graph_engine
 from cognee.infrastructure.databases.provenance.write_context import graph_provenance_write_kwargs
 from cognee.modules.cognify.config import get_cognify_config
 from cognee.modules.engine.utils.generate_node_name import generate_node_name
-from cognee.modules.graph.utils.prepare_edges_for_storage import ensure_default_edge_properties
 from cognee.modules.graph.utils.reference_resolution import (
     STRATEGY_ENTITY_NAME,
     STRATEGY_EXISTING_ID,
     ReferenceHint,
     Resolution,
-    build_node_patch,
-    build_reference_edge,
     parse_reference_hint,
     reference_display_text,
     reference_fingerprint,
@@ -49,18 +50,13 @@ from cognee.tasks.graph.reference_graph_view import (
     GraphView,
     _as_uuid,
     _load_graph_view,
-    _node_label,
     _text_of,
 )
 from cognee.tasks.graph.reference_pass import (
-    NOTE_EDGES_EXIST,
-    PATCH_FULL,
-    PATCH_NONE,
     CallBudget,
     Outcome,
     OutcomeKind,
     PassContext,
-    _default_patch_mode,
     _empty_summary,
     _Pending,
     _prior_attempt,
@@ -68,9 +64,14 @@ from cognee.tasks.graph.reference_pass import (
     _trace_pending,
     _unresolved,
     _unstated_pending,
-    inferred_edge_properties,
 )
-from cognee.tasks.storage.index_graph_edges import index_graph_edges
+from cognee.tasks.graph.reference_write import (
+    NOTE_EDGES_EXIST,
+    PATCH_FULL,
+    _default_patch_mode,
+    _merge_write_summary,
+    write_resolutions,
+)
 
 logger = get_logger("resolve_assertion_references")
 
@@ -78,9 +79,7 @@ __all__ = [
     "REFERENCE_FIELDS",
     "REFERENCE_RESOLUTION_DATA_ID",
     "NOTE_STALE_ID",
-    "NOTE_EDGE_INDEX_FAILED",
     "plan_resolutions",
-    "write_resolutions",
     "detect_dangling_references",
     "apply_reference_resolutions",
     "resolve_assertion_references",
@@ -97,8 +96,6 @@ REFERENCE_RESOLUTION_DATA_ID = uuid5(NAMESPACE_URL, "cognee:reference-resolution
 # The field held an id no longer in the graph -- a forgotten or re-chunked target -- so the
 # reference was re-resolved from the wording the resolver preserved.
 NOTE_STALE_ID = "stale_id"
-# ``add_edges`` succeeded but ``index_graph_edges`` did not.
-NOTE_EDGE_INDEX_FAILED = "edge_index_failed"
 
 _RESOLVED_ID_CONFIDENCE = 1.0
 
@@ -507,148 +504,6 @@ async def plan_resolutions(
         summary["traces_started"],
     )
     return ctx.resolutions, summary
-
-
-async def write_resolutions(
-    graph_engine,
-    view: GraphView,
-    resolutions: Sequence[Resolution],
-    *,
-    provenance_kwargs: Optional[Dict[str, Any]] = None,
-    dry_run: bool = False,
-) -> Dict[str, Any]:
-    """Write the planned resolutions: edges first, then the node patches.
-
-    Edges come first because a patch points the field at a node the edges must already
-    reach. ``add_edges`` upserts on ``(source, target, relationship)``, so re-emitting an
-    edge cannot duplicate it -- but the upsert also overwrites that edge's stored
-    properties, so a resolution the planner marked :data:`NOTE_EDGES_EXIST` writes no edge
-    at all and is patched only.
-
-    Indexing the new edge texts is the one step allowed to fail on its own: the edges are
-    already stored, so the patches still run and the failure comes back as the
-    ``edge_index_failed`` note. Nothing retries it, so the note means an operator has to
-    re-index -- ``index_graph_edges()`` with no argument rescans the graph.
-    """
-    summary = {
-        "edges_written": 0,
-        "nodes_patched": 0,
-        "already_resolved": 0,
-        "dry_run": bool(dry_run),
-        "notes": [],
-    }
-    if not resolutions:
-        return summary
-
-    edges = []
-    endpoints: Dict[str, dict] = {}
-    for resolution in resolutions:
-        if NOTE_EDGES_EXIST in resolution.notes:
-            continue
-
-        target_ids = list(resolution.target_ids)
-        if resolution.anchor_id and resolution.anchor_id not in target_ids:
-            target_ids.append(resolution.anchor_id)
-        if not target_ids:
-            # An abstention, a below-threshold answer or an inferred-but-unlinked record:
-            # audited on the node, never an edge.
-            continue
-
-        source_props = view.assertions.get(resolution.assertion_id, {})
-        endpoints[resolution.assertion_id] = source_props
-
-        for target_id in target_ids:
-            target_props = view.node_props(target_id)
-            endpoints[target_id] = target_props
-            edges.append(
-                build_reference_edge(
-                    resolution,
-                    target_id,
-                    source_props=source_props,
-                    target_label=_node_label(target_props),
-                    target_type=target_props.get("type") or resolution.target_type or "Node",
-                    # An inferred link is marked and weighted down on the edge itself, so
-                    # a reader can tell it from a reference the document wrote.
-                    extra_properties=inferred_edge_properties(resolution.strategy),
-                )
-            )
-
-    if dry_run:
-        logger.info(
-            "Reference resolution dry_run: %d edge(s) and %d patch(es) withheld.",
-            len(edges),
-            sum(1 for r in resolutions if r.patch_mode != PATCH_NONE),
-        )
-        return summary
-
-    if edges:
-        edges = ensure_default_edge_properties(edges, nodes=list(endpoints.values()))
-        await graph_engine.add_edges(edges, **(provenance_kwargs or {}))
-        summary["edges_written"] = len(edges)
-        try:
-            await index_graph_edges(edges)
-        except Exception as error:  # noqa: BLE001 - the edges are stored; patch anyway
-            logger.warning(
-                "Wrote %d reference edge(s) but could not index their text (%s); the "
-                "edges are in the graph and remain traversable, but their text stays out "
-                "of the EdgeType_relationship_name collection until index_graph_edges "
-                "runs over them again. Nothing does that automatically -- a later "
-                "resolver pass finds the edges present and re-emits nothing, and "
-                "improve() indexes triplets rather than edge texts -- so re-index "
-                "explicitly: index_graph_edges() with no argument rescans the graph.",
-                len(edges),
-                error,
-            )
-            summary["notes"].append(NOTE_EDGE_INDEX_FAILED)
-
-    for resolution in resolutions:
-        if resolution.patch_mode == PATCH_NONE:
-            continue
-
-        values = build_node_patch(
-            resolution,
-            view.assertions.get(resolution.assertion_id, {}),
-            mode=resolution.patch_mode,
-        )
-        try:
-            await graph_engine.update_node(resolution.assertion_id, values)
-        except NotImplementedError:
-            logger.warning(
-                "Graph adapter cannot patch nodes; reference edges were written but the "
-                "assertion fields still hold their reference text."
-            )
-            summary["notes"].append("node_patch_unsupported")
-            summary["nodes_patched"] = 0
-            # Nothing was left to do for a patch-only resolution, and nothing could be
-            # done: the graph already holds its edges, so it counts as already resolved.
-            summary["already_resolved"] = sum(
-                1 for planned in resolutions if NOTE_EDGES_EXIST in planned.notes
-            )
-            break
-        summary["nodes_patched"] += 1
-
-    logger.info(
-        "Reference resolution wrote %d edge(s) and patched %d node(s).",
-        summary["edges_written"],
-        summary["nodes_patched"],
-    )
-    return summary
-
-
-def _merge_write_summary(summary: Dict[str, Any], write_summary: Dict[str, Any]) -> None:
-    """Fold the write phase's counters into the plan's.
-
-    Only ``already_resolved`` adds rather than replaces: a planned resolution that turned
-    out to need no write stops being a resolution of this pass. ``notes`` concatenates,
-    because the plan's notes and the write's are about different phases.
-    """
-    written = dict(write_summary)
-    already = written.pop("already_resolved", 0)
-    notes = list(written.pop("notes", []) or [])
-    summary["already_resolved"] = summary.get("already_resolved", 0) + already
-    summary["resolved"] = max(0, summary.get("resolved", 0) - already)
-    summary.update(written)
-    summary["notes"] = list(summary.get("notes") or []) + notes
 
 
 def _dataset_id(ctx, dataset_id):

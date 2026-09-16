@@ -5,7 +5,8 @@ Owns the pass's types (:class:`PassContext`, :class:`Outcome`, :class:`_Pending`
 :func:`finish_to_outcome` -- the one sequence that maps a
 :class:`~cognee.tasks.graph.reference_tracer.TracerFinish` onto a ``Resolution``.
 :mod:`cognee.tasks.graph.resolve_assertion_references` owns the cheap cascade and the
-entry points around it, and imports this module -- never the other way round.
+entry points around it and imports this module; this module reads what the write phase
+declares (:mod:`cognee.tasks.graph.reference_write`), never the other way round.
 """
 
 import json
@@ -48,14 +49,15 @@ from cognee.tasks.graph.reference_tracer import (
     trace_reference,
 )
 from cognee.tasks.graph.reference_tracer_tools import _locate, build_tracer_tools
+from cognee.tasks.graph.reference_write import (
+    NOTE_EDGES_EXIST,
+    PATCH_NONE,
+    PATCH_RESOLUTION_ONLY,
+    _default_patch_mode,
+)
 
 # The resolver's logger name, so splitting the code did not move its log output.
 logger = get_logger("resolve_assertion_references")
-
-
-# Every edge this resolution would write is already in the graph; only the node patch is
-# still outstanding, so the write phase patches and skips the edge upsert.
-NOTE_EDGES_EXIST = "edges_exist"
 
 
 # The agent looked and found nothing it would link.
@@ -83,13 +85,6 @@ NOTE_UNSTATED = "unstated"
 NOTE_FORCE_KEPT_PRIOR = "force_kept_prior"
 
 
-# What the write phase may put back on the node. Only the default table: a negative record
-# overrides it to ``resolution_only``, so a field the extraction wrote is never nulled out.
-PATCH_NONE = "none"
-PATCH_FULL = "full"
-PATCH_RESOLUTION_ONLY = "resolution_only"
-_PATCHED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE})
-
 # The strategies whose stored ``<field>_resolution`` the attempt guard recognises.
 _TRACED_STRATEGIES = frozenset({STRATEGY_LLM_TRACE, STRATEGY_LLM_INFERRED})
 
@@ -115,13 +110,12 @@ _LEGACY_BASIS_ORDER = 4
 # these can narrow a picked passage to the statements quoted in a located span.
 _NARROWING_TOOL = "locate_paragraph"
 
-# The unstated inference: only on ``responds_to``, and only as an inference. The link is
-# marked ``inferred`` and weighted low so it can be told apart from a relationship the
-# document wrote (``cross_connect_entities.py`` sets the same weight for the same reason).
+# The unstated inference: only on ``responds_to``, and only as an inference. The mark and
+# the low weight the link carries into the graph are the write phase's
+# (``INFERRED_EDGE_FEEDBACK_WEIGHT``).
 UNSTATED_FIELD = "responds_to"
 UNSTATED_STATEMENT_TYPES = frozenset({"denial", "admission"})
 UNSTATED_BASIS = "unstated"
-INFERRED_EDGE_FEEDBACK_WEIGHT = 0.2
 
 
 class OutcomeKind(Enum):
@@ -303,11 +297,6 @@ def _count(counter: Dict[str, int], key: Optional[str]) -> None:
 
 def _bump(counters: Dict[str, Any], key: str, amount: int = 1) -> None:
     counters[key] = counters.get(key, 0) + amount
-
-
-def _default_patch_mode(strategy: str) -> str:
-    """What a strategy patches unless the resolution says otherwise."""
-    return PATCH_FULL if strategy in _PATCHED_STRATEGIES else PATCH_NONE
 
 
 def _outgrew_its_cap(record: dict, max_iter: Optional[int]) -> bool:
@@ -650,17 +639,6 @@ def _patch_mode_of(entry: _Pending) -> str:
 def _strategy_notes(entry: _Pending) -> Tuple[str, ...]:
     """Notes every resolution of this kind carries, before its own outcome note."""
     return (NOTE_UNSTATED,) if entry.unstated else ()
-
-
-def inferred_edge_properties(strategy: str) -> Optional[Dict[str, Any]]:
-    """The marks an inferred reference edge carries into the graph, or ``None``.
-
-    ``ensure_default_edge_properties`` only fills a ``feedback_weight`` that is *absent*,
-    so the low weight set here is what reaches storage.
-    """
-    if strategy != STRATEGY_LLM_INFERRED:
-        return None
-    return {"inferred": True, "feedback_weight": INFERRED_EDGE_FEEDBACK_WEIGHT}
 
 
 def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> Outcome:

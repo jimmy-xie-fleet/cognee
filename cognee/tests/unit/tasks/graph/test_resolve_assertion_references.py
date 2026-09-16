@@ -44,7 +44,6 @@ from cognee.modules.pipelines.tasks.task import Task
 from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES, DocumentTextCache
 from cognee.tasks.graph.reference_tracer import TracerFinish, TracerStep, TracerToolCall
 from cognee.tasks.graph.reference_pass import (
-    INFERRED_EDGE_FEEDBACK_WEIGHT,
     NOTE_FORCE_KEPT_PRIOR,
     NOTE_LLM_ABSTAINED,
     NOTE_LLM_BELOW_THRESHOLD,
@@ -58,6 +57,7 @@ from cognee.tasks.graph.reference_pass import (
     NOTE_UNSTATED,
     UNSTATED_BASIS,
 )
+from cognee.tasks.graph.reference_write import INFERRED_EDGE_FEEDBACK_WEIGHT
 from cognee.tasks.graph.resolve_assertion_references import (
     NOTE_STALE_ID,
     REFERENCE_FIELDS,
@@ -70,9 +70,10 @@ from cognee.tasks.graph.resolve_assertion_references import (
 from cognee.tests.unit.tasks.graph._reference_fakes import FakeVectorEngine, scored
 
 MODULE = "cognee.tasks.graph.resolve_assertion_references"
-# The trace pass lives in its own module, so a seam inside the pass has to be patched
-# where the pass reads it.
+# The trace pass and the write phase live in their own modules, so a seam inside either
+# has to be patched where that module reads it.
 PASS = "cognee.tasks.graph.reference_pass"
+WRITE = "cognee.tasks.graph.reference_write"
 # ``cognee/tasks/graph/__init__.py`` re-exports the task function under its own module's
 # name, so the package attribute ``resolve_assertion_references`` is the *function*. The
 # module object therefore has to come from the import machinery, and every seam inside it
@@ -81,6 +82,7 @@ PASS = "cognee.tasks.graph.reference_pass"
 # the dotted target by attribute lookup, lands on the function and raises AttributeError.
 resolve_module = import_module(MODULE)
 pass_module = import_module(PASS)
+write_module = import_module(WRITE)
 RETRIEVAL = "cognee.tasks.graph.reference_retrieval"
 TRACER = "cognee.tasks.graph.reference_tracer"
 GATEWAY = f"{TRACER}.LLMGateway.acreate_structured_output"
@@ -475,7 +477,7 @@ def _patched(graph, texts=None, *, steps=(), default=None, vector_results=None):
 
     with (
         patch.object(resolve_module, "get_graph_engine", new=AsyncMock(return_value=graph)),
-        patch.object(resolve_module, "index_graph_edges", new=AsyncMock()) as index_mock,
+        patch.object(write_module, "index_graph_edges", new=AsyncMock()) as index_mock,
         patch.object(
             resolve_module,
             "graph_provenance_write_kwargs",
