@@ -253,6 +253,10 @@ def _answer_rows(args, failed, by_id) -> list:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Before anything imports cognee: its LLMConfig is cached on first read, so a
+    # key mapped in later is never seen and every judge call fails with
+    # LLMAPIKeyNotSetError - the way the first live run graded nothing.
+    lib.configure_llm_environment()
 
     question_paths = args.questions or []
     if not question_paths:

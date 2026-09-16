@@ -735,6 +735,9 @@ class _LazyLLMGateway:
 
     @staticmethod
     async def acreate_structured_output(text_input: str, system_prompt: str, response_model: Any):
+        # The key has to be in the environment before cognee's cached LLMConfig is
+        # built, and the gateway import is the first thing here that builds it.
+        configure_llm_environment()
         from cognee.infrastructure.llm import LLMGateway as _gateway
 
         return await _gateway.acreate_structured_output(

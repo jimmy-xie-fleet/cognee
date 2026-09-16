@@ -941,6 +941,47 @@ def test_the_env_preamble_does_not_clobber_an_existing_llm_api_key(monkeypatch):
     assert __import__("os").environ["LLM_API_KEY"] == "sk-already-set"
 
 
+def test_the_gateway_maps_the_key_before_it_imports_cognee(monkeypatch):
+    """The preamble existed but nothing called it, so the judge never saw the key.
+
+    Order matters: cognee caches its LLM config on first read, so the mapping has
+    to run before the import that triggers that read, not merely before the call.
+    """
+    import types
+
+    calls: list[str] = []
+
+    class _Gateway:
+        @staticmethod
+        async def acreate_structured_output(**kwargs):
+            calls.append("gateway")
+            return kwargs["response_model"]
+
+    fake_module = types.ModuleType("cognee.infrastructure.llm")
+    fake_module.LLMGateway = _Gateway
+    monkeypatch.setitem(sys.modules, "cognee.infrastructure.llm", fake_module)
+    monkeypatch.setattr(lib, "configure_llm_environment", lambda: calls.append("configure"))
+
+    result = asyncio.run(
+        lib._LazyLLMGateway.acreate_structured_output(
+            text_input="q", system_prompt="s", response_model="model"
+        )
+    )
+
+    assert result == "model"
+    assert calls == ["configure", "gateway"]
+
+
+def test_the_cli_maps_the_key_before_doing_anything_else(tmp_path, monkeypatch):
+    calls: list[str] = []
+    # ``cli`` imported its own copy of the library through sys.path, so patch that one.
+    monkeypatch.setattr(cli.lib, "configure_llm_environment", lambda: calls.append("configure"))
+    path = write_question_file(tmp_path, question_document())
+
+    assert cli.main(["--validate-only", "--questions", str(path)]) == 0
+    assert calls == ["configure"]
+
+
 def test_resume_rejudges_a_row_whose_verdict_is_itself_an_error():
     """A verdict that failed to grade is a hole, not a grade.
 
