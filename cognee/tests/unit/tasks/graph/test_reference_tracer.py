@@ -22,7 +22,8 @@ from cognee.infrastructure.llm.prompts import render_prompt
 from cognee.modules.cognify.config import get_cognify_config
 from cognee.modules.graph.utils.reference_candidates import Candidate, LabelRegistry
 from cognee.modules.graph.utils.reference_resolution import ReferenceHint
-from cognee.tasks.graph.reference_graph_view import DocumentTextCache
+from cognee.tasks.graph.reference_graph_view import DocumentTextCache, GraphView
+from cognee.tasks.graph.reference_pass import PassContext
 from cognee.tasks.graph.reference_retrieval import LexicalIndex
 from cognee.tasks.graph.reference_tracer import (
     FENCE_CLOSE,
@@ -72,6 +73,14 @@ HINT = ReferenceHint(
 )
 
 
+def _context(view=None, **overrides) -> PassContext:
+    """The pass context one trace runs under: its budget, its step cap, its bars."""
+    view = GraphView() if view is None else view
+    return PassContext(
+        view=view, texts=DocumentTextCache(view), lexical=LexicalIndex(view), **overrides
+    )
+
+
 async def _real_tools(registry: LabelRegistry):
     complaint = document_node(DOC_COMPLAINT, "Verified_Complaint")
     answer = document_node(DOC_ANSWER, "Answer")
@@ -88,12 +97,7 @@ async def _real_tools(registry: LabelRegistry):
         assertion_node(A_DENY, "the defendant failed to repair the roof", A0),
     ]
     view = await build_graph_view(nodes, [c0_edge, a0_edge])
-    return build_tracer_tools(
-        view=view,
-        texts=DocumentTextCache(view),
-        lexical=LexicalIndex(view),
-        registry=registry,
-    )
+    return build_tracer_tools(_context(view), registry=registry)
 
 
 class _EchoArgs(BaseModel):
@@ -170,12 +174,19 @@ async def _trace(
     counters = {} if counters is None else counters
     budget = CallBudget(max_calls=10) if budget is None else budget
 
+    ctx = _context(
+        budget=budget,
+        max_iter=max_iter,
+        threshold=threshold,
+        infer_threshold=infer_threshold,
+        counters=counters,
+    )
+
     gateway = AsyncMock(side_effect=steps)
     with patch(GATEWAY, gateway):
         finish, records, iterations = await trace_reference(
+            ctx,
             unstated=unstated,
-            threshold=threshold,
-            infer_threshold=infer_threshold,
             hint=hint,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -183,9 +194,6 @@ async def _trace(
             seed=seed,
             tools=tools,
             registry=registry,
-            budget=budget,
-            max_iter=max_iter,
-            counters=counters,
         )
     return finish, records, iterations, gateway, counters, registry, budget
 
@@ -371,9 +379,10 @@ async def test_the_referring_statement_cannot_forge_a_tool_result_fence():
 
     with patch(GATEWAY, AsyncMock(side_effect=steps)) as gateway:
         await trace_reference(
+            _context(
+                budget=CallBudget(max_calls=10), max_iter=4, threshold=0.6, infer_threshold=0.75
+            ),
             unstated=False,
-            threshold=0.6,
-            infer_threshold=0.75,
             hint=HINT,
             source_props=source_props,
             source_document_name="Answer",
@@ -381,9 +390,6 @@ async def test_the_referring_statement_cannot_forge_a_tool_result_fence():
             seed=_seed(LabelRegistry()),
             tools=_echo_tool(),
             registry=LabelRegistry(),
-            budget=CallBudget(max_calls=10),
-            max_iter=4,
-            counters={},
         )
 
     prompt = gateway.await_args_list[0].kwargs["text_input"]
@@ -678,9 +684,8 @@ async def test_a_missing_system_prompt_file_is_a_hard_error():
         pytest.raises(FileNotFoundError),
     ):
         await trace_reference(
+            _context(budget=budget, max_iter=4, threshold=0.6, infer_threshold=0.75),
             unstated=False,
-            threshold=0.6,
-            infer_threshold=0.75,
             hint=HINT,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -688,9 +693,6 @@ async def test_a_missing_system_prompt_file_is_a_hard_error():
             seed=_seed(registry),
             tools=_echo_tool(),
             registry=registry,
-            budget=budget,
-            max_iter=4,
-            counters={},
         )
 
     assert gateway.await_count == 0
@@ -708,9 +710,10 @@ async def test_a_blank_system_prompt_is_a_hard_error():
         pytest.raises(ValueError),
     ):
         await trace_reference(
+            _context(
+                budget=CallBudget(max_calls=4), max_iter=4, threshold=0.6, infer_threshold=0.75
+            ),
             unstated=False,
-            threshold=0.6,
-            infer_threshold=0.75,
             hint=HINT,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -718,9 +721,6 @@ async def test_a_blank_system_prompt_is_a_hard_error():
             seed=_seed(registry),
             tools=_echo_tool(),
             registry=registry,
-            budget=CallBudget(max_calls=4),
-            max_iter=4,
-            counters={},
         )
 
     assert gateway.await_count == 0
@@ -738,9 +738,8 @@ async def test_a_template_failure_does_not_burn_a_budget_slot():
         pytest.raises(RuntimeError),
     ):
         await trace_reference(
+            _context(budget=budget, max_iter=4, threshold=0.6, infer_threshold=0.75),
             unstated=False,
-            threshold=0.6,
-            infer_threshold=0.75,
             hint=HINT,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -748,9 +747,6 @@ async def test_a_template_failure_does_not_burn_a_budget_slot():
             seed=_seed(registry),
             tools=_echo_tool(),
             registry=registry,
-            budget=budget,
-            max_iter=4,
-            counters={},
         )
 
     assert budget.used == 0

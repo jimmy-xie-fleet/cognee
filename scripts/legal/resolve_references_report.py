@@ -204,11 +204,11 @@ async def run(args: argparse.Namespace) -> int:
         reference_display_text,
     )
     from cognee.tasks.graph.reference_graph_view import DocumentTextCache, _load_graph_view
+    from cognee.tasks.graph.reference_write import write_resolutions
     from cognee.tasks.graph.resolve_assertion_references import (
         REFERENCE_FIELDS,
         REFERENCE_RESOLUTION_DATA_ID,
         plan_resolutions,
-        write_resolutions,
     )
 
     relational_engine = get_relational_engine()

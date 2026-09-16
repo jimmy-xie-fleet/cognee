@@ -41,10 +41,9 @@ from cognee.modules.graph.utils.reference_resolution import (
 )
 from cognee.modules.pipelines.models import PipelineContext
 from cognee.modules.pipelines.tasks.task import Task
-from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES
+from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES, DocumentTextCache
 from cognee.tasks.graph.reference_tracer import TracerFinish, TracerStep, TracerToolCall
 from cognee.tasks.graph.reference_pass import (
-    INFERRED_EDGE_FEEDBACK_WEIGHT,
     NOTE_FORCE_KEPT_PRIOR,
     NOTE_LLM_ABSTAINED,
     NOTE_LLM_BELOW_THRESHOLD,
@@ -58,6 +57,7 @@ from cognee.tasks.graph.reference_pass import (
     NOTE_UNSTATED,
     UNSTATED_BASIS,
 )
+from cognee.tasks.graph.reference_write import INFERRED_EDGE_FEEDBACK_WEIGHT
 from cognee.tasks.graph.resolve_assertion_references import (
     NOTE_STALE_ID,
     REFERENCE_FIELDS,
@@ -70,9 +70,10 @@ from cognee.tasks.graph.resolve_assertion_references import (
 from cognee.tests.unit.tasks.graph._reference_fakes import FakeVectorEngine, scored
 
 MODULE = "cognee.tasks.graph.resolve_assertion_references"
-# The trace pass lives in its own module, so a seam inside the pass has to be patched
-# where the pass reads it.
+# The trace pass and the write phase live in their own modules, so a seam inside either
+# has to be patched where that module reads it.
 PASS = "cognee.tasks.graph.reference_pass"
+WRITE = "cognee.tasks.graph.reference_write"
 # ``cognee/tasks/graph/__init__.py`` re-exports the task function under its own module's
 # name, so the package attribute ``resolve_assertion_references`` is the *function*. The
 # module object therefore has to come from the import machinery, and every seam inside it
@@ -81,9 +82,15 @@ PASS = "cognee.tasks.graph.reference_pass"
 # the dotted target by attribute lookup, lands on the function and raises AttributeError.
 resolve_module = import_module(MODULE)
 pass_module = import_module(PASS)
+write_module = import_module(WRITE)
 RETRIEVAL = "cognee.tasks.graph.reference_retrieval"
 TRACER = "cognee.tasks.graph.reference_tracer"
 GATEWAY = f"{TRACER}.LLMGateway.acreate_structured_output"
+
+
+def _pass_context(view, **overrides):
+    """A ``PassContext`` over a fake view, for the pass helpers called directly."""
+    return pass_module.PassContext(view=view, texts=DocumentTextCache(view), **overrides)
 
 
 def _nid(label: str) -> str:
@@ -470,7 +477,7 @@ def _patched(graph, texts=None, *, steps=(), default=None, vector_results=None):
 
     with (
         patch.object(resolve_module, "get_graph_engine", new=AsyncMock(return_value=graph)),
-        patch.object(resolve_module, "index_graph_edges", new=AsyncMock()) as index_mock,
+        patch.object(write_module, "index_graph_edges", new=AsyncMock()) as index_mock,
         patch.object(
             resolve_module,
             "graph_provenance_write_kwargs",
@@ -1519,21 +1526,13 @@ def test_a_field_the_stated_loop_answered_is_never_inferred_over():
     }
     view = SimpleNamespace(assertions={A_UNSTATED: props}, resolver_edge_keys=set())
 
-    eligible = pass_module._unstated_pending(
-        view, handled=set(), force=False, touched=None, counters={}
-    )
+    eligible = pass_module._unstated_pending(_pass_context(view), handled=set())
     assert [entry.assertion_id for entry in eligible] == [A_UNSTATED]
     assert eligible[0].unstated is True
     assert eligible[0].field_name == "responds_to"
 
     assert (
-        pass_module._unstated_pending(
-            view,
-            handled={(A_UNSTATED, "responds_to")},
-            force=False,
-            touched=None,
-            counters={},
-        )
+        pass_module._unstated_pending(_pass_context(view), handled={(A_UNSTATED, "responds_to")})
         == []
     )
 
@@ -2070,6 +2069,8 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         documents={},
         document_by_chunk={},
         node_ids={"gone"},
+        # The whole mapping runs now, and the edge pre-check reads this.
+        edge_keys=set(),
     )
     entry = pass_module._Pending(
         assertion_id="a1",
@@ -2091,9 +2092,9 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         capped=False,
     )
 
-    outcome = pass_module._answer_to_outcome(entry, answer, view, threshold=0.6, counters={})
+    outcome = pass_module.finish_to_outcome(_pass_context(view, threshold=0.6), entry, answer)
 
-    assert outcome.kind == "resolved"
+    assert outcome.kind is pass_module.OutcomeKind.RESOLVED
     assert outcome.resolution.anchor_id == "gone"
     assert outcome.resolution.anchor_type is None
 

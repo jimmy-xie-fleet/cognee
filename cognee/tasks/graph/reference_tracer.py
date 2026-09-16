@@ -1,8 +1,10 @@
 """The bounded agentic loop that resolves ONE assertion reference.
 
 Ask for the next :class:`TracerStep`; either run the tool it named and append the result to
-the context, or accept the ``finish`` it returned. Stops on a finish, at ``max_iter``
-steps, or when the pass-wide :class:`CallBudget` cannot pay for another call.
+the context, or accept the ``finish`` it returned. Stops on a finish, at the pass's step
+cap, or when the pass-wide :class:`CallBudget` cannot pay for another call. What the pass
+sets once -- both confidence bars, the budget, the step cap, the counters -- is read off
+its ``PassContext``; the arguments are this one reference.
 
 Two spending rules, because they are the difference between a bounded pass and an unbounded
 one: ``budget.take()`` runs **before** every call, so a trace that starts after the pass
@@ -14,7 +16,17 @@ Nothing here writes to the graph.
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from jinja2 import TemplateNotFound
 from pydantic import BaseModel, Field
@@ -34,6 +46,9 @@ from cognee.tasks.graph.reference_tracer_tools import (
     render_tool_manifest,
     run_tool,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - the pass imports this module, not the reverse
+    from cognee.tasks.graph.reference_pass import PassContext
 
 logger = get_logger("reference_tracer")
 
@@ -230,10 +245,9 @@ def _render_args(arguments: Mapping[str, Any]) -> str:
 
 
 async def trace_reference(
+    ctx: "PassContext",
     *,
     unstated: bool,
-    threshold: float,
-    infer_threshold: float,
     hint: Optional[ReferenceHint],
     source_props: Mapping[str, Any],
     source_document_name: Optional[str],
@@ -241,16 +255,14 @@ async def trace_reference(
     seed: Sequence[Candidate],
     tools: Mapping[str, ToolSpec],
     registry: LabelRegistry,
-    budget: CallBudget,
-    max_iter: int,
-    counters: MutableMapping[str, Any],
 ) -> Tuple[TracerFinish, List[TraceRecord], int]:
-    """Resolve one reference, or abstain, in at most ``max_iter`` LLM calls.
+    """Resolve one reference, or abstain, in at most ``ctx.max_iter`` LLM calls.
 
     ``unstated`` selects the task -- a reference the document wrote, or the statement this
-    one answers without saying so -- and, with ``threshold`` and ``infer_threshold``,
-    renders the one system template. The bar the prompt quotes is the bar the pass will
-    apply, so the model is never talked into answers the caller then throws away.
+    one answers without saying so -- and, with the context's two confidence bars, renders
+    the one system template. The bar the prompt quotes is the bar the pass will apply, so
+    the model is never talked into answers the caller then throws away. An unstated trace
+    is shown no reference block at all: there is no reference to show it.
 
     Returns ``(finish, tool step records, calls actually spent)``. ``finish`` always names
     either a label this trace's ``registry`` can resolve or ``None``: a label the model
@@ -269,8 +281,8 @@ async def trace_reference(
             TRACE_SYSTEM_PROMPT,
             {
                 "unstated": unstated,
-                "threshold": threshold,
-                "infer_threshold": infer_threshold,
+                "threshold": ctx.threshold,
+                "infer_threshold": ctx.infer_threshold,
             },
         )
     except TemplateNotFound as error:
@@ -281,11 +293,11 @@ async def trace_reference(
         raise ValueError(f"Reference tracer system prompt is empty: {TRACE_SYSTEM_PROMPT}")
     # The seed opens ``{{ context }}``, and every line of it is document text.
     context = _neutralize_fences(format_candidate_lines(seed)) or "(no seed candidates)"
-    reference = _reference_block(hint)
+    reference = None if unstated else _reference_block(hint)
     source = _source_block(source_props, source_document_name, field_name)
     iterations = 0
 
-    for step_number in range(1, max_iter + 1):
+    for step_number in range(1, ctx.max_iter + 1):
         # Rendered before the slot is claimed: burning a pass-wide call on a template bug
         # would charge every other reference for it.
         user_prompt = render_prompt(
@@ -296,12 +308,12 @@ async def trace_reference(
                 "tools": manifest,
                 "context": context,
                 "step": step_number,
-                "max_steps": max_iter,
+                "max_steps": ctx.max_iter,
             },
         )
 
-        if not budget.take():
-            _bump(counters, "llm_budget_exhausted")
+        if not ctx.budget.take():
+            _bump(ctx.counters, "llm_budget_exhausted")
             return _abstain("pass budget exhausted"), records, iterations
 
         iterations += 1
@@ -315,21 +327,21 @@ async def trace_reference(
         except Exception as error:
             # The slot is spent either way; a retry would spend a second one while every
             # other reference in the pass is still waiting.
-            _bump(counters, "llm_failed")
+            _bump(ctx.counters, "llm_failed")
             logger.warning("Reference trace step %s failed: %s", step_number, error)
             return _abstain(f"tracer call failed: {error}"), records, iterations
-        _bump(counters, "llm_calls")
+        _bump(ctx.counters, "llm_calls")
 
         finish = step.finish
         if finish is not None:
             label = (finish.candidate_label or "").strip()
             if not label:
-                _bump(counters, "llm_abstained")
+                _bump(ctx.counters, "llm_abstained")
                 # "" and "   " are clumsily written abstentions; normalise them so a
                 # caller only ever has to test `candidate_label is None`.
                 return finish.model_copy(update={"candidate_label": None}), records, iterations
             if registry.resolve(label) is None:
-                _bump(counters, "llm_unknown_label")
+                _bump(ctx.counters, "llm_unknown_label")
                 return _abstain(f"unknown candidate label {label}"), records, iterations
             return finish, records, iterations
 
@@ -337,7 +349,7 @@ async def trace_reference(
         if tool_call is None:
             # Counted apart from an abstention: the model did not look and decline, it
             # returned a step the contract has no reading for.
-            _bump(counters, "llm_malformed_step")
+            _bump(ctx.counters, "llm_malformed_step")
             return _abstain("step named neither a tool nor a finish"), records, iterations
 
         name = tool_call.tool_name.strip()
@@ -347,7 +359,7 @@ async def trace_reference(
             # Inside the fence, so the model can see that what it got was cut short.
             result = result[:MAX_TOOL_OUTPUT_CHARS] + _TRUNCATION_NOTE
 
-        _bump_tool(counters, name)
+        _bump_tool(ctx.counters, name)
         records.append(
             TraceRecord(
                 tool=name,
@@ -362,7 +374,7 @@ async def trace_reference(
             f"{fence_open}\n{result}\n{FENCE_CLOSE}"
         )
 
-    _bump(counters, "traces_iteration_capped")
+    _bump(ctx.counters, "traces_iteration_capped")
     return _abstain("iteration cap reached"), records, iterations
 
 
