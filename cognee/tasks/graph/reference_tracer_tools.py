@@ -15,6 +15,7 @@ agent, so the marker regexes run over *document* text only, and ``search`` is th
 import json
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
@@ -48,6 +49,9 @@ from cognee.modules.graph.utils.reference_resolution import (
 from cognee.shared.logging_utils import get_logger
 from cognee.tasks.graph.reference_graph_view import DocumentTextCache, GraphView, _chunk_index
 from cognee.tasks.graph.reference_retrieval import KINDS, LexicalIndex, search_candidates
+
+if TYPE_CHECKING:  # pragma: no cover - the pass imports this module, not the reverse
+    from cognee.tasks.graph.reference_pass import PassContext
 
 logger = get_logger("reference_tracer_tools")
 
@@ -212,21 +216,24 @@ def _resolve_document(
 
 
 def build_tracer_tools(
+    ctx: "PassContext",
     *,
-    view: GraphView,
-    texts: DocumentTextCache,
-    lexical: LexicalIndex,
     registry: LabelRegistry,
-    vector_engine=None,
     exclude_ids: Set[str] = frozenset(),
     own_document_id: Optional[str] = None,
     penalize_own_document: bool = False,
 ) -> Dict[str, ToolSpec]:
-    """The five tools, closed over one trace's view, text cache, index and registry.
+    """The five tools, closed over the pass's read layer and one trace's registry.
 
-    The scoping arguments are passed straight through to :func:`search_candidates`, so the
-    agent's ``search`` ranks exactly the way the seed did.
+    The view, the text cache, the lexical index and the vector engine come off the pass's
+    ``PassContext``; the arguments are what changes per trace. The scoping arguments are
+    passed straight through to :func:`search_candidates`, so the agent's ``search`` ranks
+    exactly the way the seed did.
     """
+    view = ctx.view
+    texts = ctx.texts
+    lexical = ctx.lexical
+    vector_engine = ctx.vector_engine
 
     async def _search(args: SearchArgs) -> str:
         candidates = await search_candidates(

@@ -1,7 +1,7 @@
 """The agentic trace pass: seed a dangling reference, trace it, map the answer.
 
-Owns the pass's types (:class:`_Outcome`, :class:`_Pending`, :class:`_TraceAnswer`), the
-seed, the budget order, the tracer loop and the mapping from a
+Owns the pass's types (:class:`PassContext`, :class:`_Outcome`, :class:`_Pending`,
+:class:`_TraceAnswer`), the seed, the budget order, the tracer loop and the mapping from a
 :class:`~cognee.tasks.graph.reference_tracer.TracerFinish` onto a ``Resolution``.
 :mod:`cognee.tasks.graph.resolve_assertion_references` owns the cheap cascade and the
 entry points around it, and imports this module -- never the other way round.
@@ -180,6 +180,89 @@ class _TraceAnswer:
     max_iter: int = 0
 
 
+def _empty_summary() -> Dict[str, Any]:
+    """The pass report, with every key present from the start.
+
+    A consumer reads a fixed shape whatever the pass did, so no key is ever conditional
+    (ruling R38: no nesting either -- these keys are the reported contract).
+    """
+    return {
+        "scanned": 0,
+        "already_resolved": 0,
+        "resolved": 0,
+        "resolved_by_strategy": {},
+        "anchor_types": {},
+        "unresolved": 0,
+        "ambiguous": 0,
+        "stale_ids": 0,
+        "failed": 0,
+        "edges_written": 0,
+        "nodes_patched": 0,
+        "dry_run": False,
+        "notes": [],
+        # ``llm_calls`` counts the calls that came back; ``llm_calls_attempted`` is what
+        # the budget was charged (a failed call too), so it is what reaches ``llm_budget``.
+        "llm_calls": 0,
+        "llm_calls_attempted": 0,
+        "llm_calls_stated": 0,
+        "llm_calls_inferred": 0,
+        "llm_budget": 0,
+        "llm_budget_exhausted": False,
+        "traces_started": 0,
+        "traces_finished": 0,
+        "traces_iteration_capped": 0,
+        "llm_skipped_empty_graph": 0,
+        "llm_cached": 0,
+        "llm_abstained": 0,
+        "llm_below_threshold": 0,
+        "llm_unknown_label": 0,
+        "llm_malformed_step": 0,
+        "llm_failed": 0,
+        "tool_calls_by_name": {},
+        "llm_tokens_in": 0,
+        "llm_tokens_out": 0,
+        # The unstated-inference pass. Always reported (zero when it is off), so a
+        # consumer never has to branch on whether it ran.
+        "inferred_scanned": 0,
+        "inferred_resolved": 0,
+    }
+
+
+@dataclass
+class PassContext:
+    """One resolver pass: what it loaded once, what it may spend, what it has concluded.
+
+    Built by :func:`~cognee.tasks.graph.resolve_assertion_references.plan_resolutions` and
+    handed to every step, so a step's own parameters are the reference it works on. The
+    retrieval handles are filled in by :func:`_trace_pending` rather than at construction:
+    a pass with nothing to trace must not touch the vector store.
+
+    ``summary`` and ``resolutions`` are the plan the pass returns; ``counters`` is what the
+    tracer bumps and :func:`_fold_counters` folds in at the end; ``cache`` is the in-pass
+    trace cache, keyed on ``(fingerprint, candidate set)``. The rest is read-only.
+
+    Every default is the one that spends and links nothing -- no budget, no steps, a bar
+    no confidence can clear -- so a context built without a value never resolves anything
+    by accident. :class:`LabelRegistry` is deliberately absent: a label only means
+    something inside the trace that issued it, so it stays on the :class:`_Pending`.
+    """
+
+    view: GraphView
+    texts: DocumentTextCache
+    budget: CallBudget = field(default_factory=lambda: CallBudget(0))
+    force: bool = False
+    max_iter: int = 0
+    threshold: float = 1.0
+    infer_threshold: float = 1.0
+    touched: Optional[Tuple[Set[str], Set[str]]] = None
+    lexical: Optional[LexicalIndex] = None
+    vector_engine: Any = None
+    summary: Dict[str, Any] = field(default_factory=_empty_summary)
+    resolutions: List[Resolution] = field(default_factory=list)
+    counters: Dict[str, Any] = field(default_factory=dict)
+    cache: Dict[Tuple[str, str], "_TraceAnswer"] = field(default_factory=dict)
+
+
 def _count(counter: Dict[str, int], key: Optional[str]) -> None:
     if key:
         counter[key] = counter.get(key, 0) + 1
@@ -288,7 +371,7 @@ def _combine_seed(*candidate_lists: Sequence[Candidate]) -> List[Candidate]:
     return sorted(best.values(), key=lambda candidate: (-candidate.score, candidate.node_id))
 
 
-async def _seed_reference(entry: _Pending, view: GraphView, lexical: LexicalIndex, engine) -> None:
+async def _seed_reference(ctx: PassContext, entry: _Pending) -> None:
     """Fill ``entry.seed``/``entry.registry``: one retrieval pair, no LLM.
 
     Two calls on one registry: the general shortlist, plus a documents-only shortlist, so
@@ -296,7 +379,7 @@ async def _seed_reference(entry: _Pending, view: GraphView, lexical: LexicalInde
     """
     registry = LabelRegistry()
     own_chunk_id = str(entry.props.get("source_chunk_id") or "")
-    own_document_id = view.document_by_chunk.get(own_chunk_id)
+    own_document_id = ctx.view.document_by_chunk.get(own_chunk_id)
     exclude_ids = {entry.assertion_id}
     if own_chunk_id:
         exclude_ids.add(own_chunk_id)
@@ -314,13 +397,13 @@ async def _seed_reference(entry: _Pending, view: GraphView, lexical: LexicalInde
         return
 
     scoped = {
-        "view": view,
-        "lexical": lexical,
+        "view": ctx.view,
+        "lexical": ctx.lexical,
         "registry": registry,
         "exclude_ids": exclude_ids,
         "own_document_id": own_document_id,
         "penalize_own_document": penalize_own_document,
-        "vector_engine": engine,
+        "vector_engine": ctx.vector_engine,
     }
     general = await search_candidates(queries=queries, kind="any", limit=SEED_LIMIT, **scoped)
     documents = await search_candidates(
@@ -363,11 +446,7 @@ def _trace_dicts(records: Sequence[TraceRecord]) -> Tuple[Dict[str, Any], ...]:
 
 
 async def _narrow_to_quoted_assertions(
-    entry: _Pending,
-    records: Sequence[TraceRecord],
-    chunk_id: str,
-    view: GraphView,
-    texts: DocumentTextCache,
+    ctx: PassContext, entry: _Pending, records: Sequence[TraceRecord], chunk_id: str
 ) -> Tuple[str, ...]:
     """The statements the trace's own ``locate_paragraph`` listed for the picked passage.
 
@@ -379,14 +458,14 @@ async def _narrow_to_quoted_assertions(
             continue
 
         document_id = entry.registry.resolve(record.args.get("document"))
-        if document_id is None or document_id not in view.documents:
+        if document_id is None or document_id not in ctx.view.documents:
             continue
         locator = build_locator(record.args.get("kind"), record.args.get("value"))
         if locator is None:
             continue
 
-        chunks = view.chunks_by_document.get(document_id) or []
-        located = await _locate(texts, document_id, chunks, locator)
+        chunks = ctx.view.chunks_by_document.get(document_id) or []
+        located = await _locate(ctx.texts, document_id, chunks, locator)
         if located is None:
             continue
 
@@ -400,7 +479,7 @@ async def _narrow_to_quoted_assertions(
                 span_text,
                 [
                     (candidate_id, props.get("source_quote"))
-                    for candidate_id, props in view.assertions.items()
+                    for candidate_id, props in ctx.view.assertions.items()
                     if candidate_id != entry.assertion_id
                     and str(props.get("source_chunk_id") or "") in chunk_ids
                 ],
@@ -410,17 +489,14 @@ async def _narrow_to_quoted_assertions(
 
 
 async def _build_answer(
+    ctx: PassContext,
     entry: _Pending,
     finish: TracerFinish,
     records: Sequence[TraceRecord],
     iterations: int,
     *,
     capped: bool,
-    view: GraphView,
-    texts: DocumentTextCache,
-    counters: Dict[str, Any],
     negative_note: Optional[str] = None,
-    max_iter: int = 0,
 ) -> _TraceAnswer:
     """Resolve a finish off its own registry, while that registry still means something.
 
@@ -430,11 +506,11 @@ async def _build_answer(
     """
     node_id = entry.registry.resolve(finish.candidate_label)
     targets: Tuple[str, ...] = ()
-    if node_id is not None and node_id in view.chunks:
-        targets = await _narrow_to_quoted_assertions(entry, records, node_id, view, texts)
-    if node_id is not None and node_id not in view.node_ids:
+    if node_id is not None and node_id in ctx.view.chunks:
+        targets = await _narrow_to_quoted_assertions(ctx, entry, records, node_id)
+    if node_id is not None and node_id not in ctx.view.node_ids:
         # The label resolved to something the view no longer holds.
-        _bump(counters, "llm_unknown_label")
+        _bump(ctx.counters, "llm_unknown_label")
         negative_note = NOTE_LLM_UNKNOWN_LABEL
         node_id = None
 
@@ -446,7 +522,7 @@ async def _build_answer(
         targets=targets,
         capped=capped,
         negative_note=negative_note,
-        max_iter=max_iter,
+        max_iter=ctx.max_iter,
     )
 
 
@@ -460,15 +536,7 @@ def _unstated_hint(proposition: str) -> ReferenceHint:
     return ReferenceHint(document_hint=proposition, basis=UNSTATED_BASIS, legacy_text=None)
 
 
-def _unstated_pending(
-    view: GraphView,
-    *,
-    handled: Set[Tuple[str, str]],
-    force: bool,
-    touched: Optional[Tuple[Set[str], Set[str]]],
-    counters: Dict[str, Any],
-    max_iter: Optional[int] = None,
-) -> List[_Pending]:
+def _unstated_pending(ctx: PassContext, *, handled: Set[Tuple[str, str]]) -> List[_Pending]:
     """The statements worth asking about although they reference nothing.
 
     Eligible: a denial or an admission that records no reference of its own (``responds_to``
@@ -482,12 +550,15 @@ def _unstated_pending(
     """
     entries: List[_Pending] = []
 
-    for assertion_id, props in view.assertions.items():
+    for assertion_id, props in ctx.view.assertions.items():
         if (assertion_id, UNSTATED_FIELD) in handled:
             continue
-        if touched is not None and str(props.get("source_chunk_id") or "") not in touched[0]:
+        if (
+            ctx.touched is not None
+            and str(props.get("source_chunk_id") or "") not in ctx.touched[0]
+        ):
             continue
-        if not force and (assertion_id, UNSTATED_FIELD) in view.resolver_edge_keys:
+        if not ctx.force and (assertion_id, UNSTATED_FIELD) in ctx.view.resolver_edge_keys:
             continue
         statement_type = (_text_of(props.get("statement_type")) or "").strip().casefold()
         if statement_type not in UNSTATED_STATEMENT_TYPES:
@@ -505,8 +576,8 @@ def _unstated_pending(
 
         hint = _unstated_hint(proposition)
         fingerprint = reference_fingerprint(hint, UNSTATED_FIELD)
-        if not force:
-            prior = _prior_attempt(props, UNSTATED_FIELD, max_iter=max_iter)
+        if not ctx.force:
+            prior = _prior_attempt(props, UNSTATED_FIELD, max_iter=ctx.max_iter)
             if (
                 prior is not None
                 and prior.get("strategy") == STRATEGY_LLM_INFERRED
@@ -514,7 +585,7 @@ def _unstated_pending(
             ):
                 continue
 
-        _bump(counters, "inferred_scanned")
+        _bump(ctx.counters, "inferred_scanned")
         entries.append(
             _Pending(
                 assertion_id=assertion_id,
@@ -530,7 +601,7 @@ def _unstated_pending(
                 # Always true given the scope filter above; kept explicit so the field
                 # means the same thing on every ``_Pending``.
                 own_chunk_touched=(
-                    touched is None or str(props.get("source_chunk_id") or "") in touched[0]
+                    ctx.touched is None or str(props.get("source_chunk_id") or "") in ctx.touched[0]
                 ),
                 unstated=True,
             )
@@ -595,15 +666,14 @@ def _negative_record(entry: _Pending, answer: _TraceAnswer, note: str) -> _Outco
     )
 
 
-def _answer_to_outcome(
-    entry: _Pending,
-    answer: _TraceAnswer,
-    view: GraphView,
-    *,
-    threshold: float,
-    counters: Dict[str, Any],
-) -> _Outcome:
+def _threshold_for(ctx: PassContext, entry: _Pending) -> float:
+    """The bar this answer is held to: the higher one for a link nobody wrote."""
+    return ctx.infer_threshold if entry.unstated else ctx.threshold
+
+
+def _answer_to_outcome(ctx: PassContext, entry: _Pending, answer: _TraceAnswer) -> _Outcome:
     """Map a trace's answer onto a ``Resolution``, by what the picked label turned out to be."""
+    threshold = _threshold_for(ctx, entry)
     if answer.node_id is None:
         if answer.capped:
             note = NOTE_LLM_ITERATION_CAP
@@ -623,7 +693,7 @@ def _answer_to_outcome(
         return _negative_record(entry, answer, NOTE_LLM_SELF_REFERENCE)
 
     if answer.finish.confidence < threshold:
-        _bump(counters, "llm_below_threshold")
+        _bump(ctx.counters, "llm_below_threshold")
         logger.debug(
             "Trace for %s.%s scored %.2f, below the %.2f threshold.",
             entry.assertion_id,
@@ -634,24 +704,24 @@ def _answer_to_outcome(
         return _negative_record(entry, answer, NOTE_LLM_BELOW_THRESHOLD)
 
     node_id = answer.node_id
-    if node_id in view.assertions:
+    if node_id in ctx.view.assertions:
         anchor_type = "Assertion"
         target_ids: Tuple[str, ...] = (node_id,)
         target_type = "Assertion"
-        document_id = view.document_by_chunk.get(
-            str(view.assertions[node_id].get("source_chunk_id") or "")
+        document_id = ctx.view.document_by_chunk.get(
+            str(ctx.view.assertions[node_id].get("source_chunk_id") or "")
         )
-    elif node_id in view.chunks:
+    elif node_id in ctx.view.chunks:
         anchor_type = "DocumentChunk"
         # Keep the referring statement out of its own answer even when the cached trace
         # was built for a different assertion.
         target_ids = tuple(target for target in answer.targets if target != entry.assertion_id)
         target_type = "Assertion" if target_ids else "DocumentChunk"
-        document_id = view.document_by_chunk.get(node_id)
+        document_id = ctx.view.document_by_chunk.get(node_id)
     else:
         # ``.get``: the node resolved out of this trace's own registry, but a view that no
         # longer holds it as a document must degrade to an untyped anchor, not a KeyError.
-        anchor_type = view.documents.get(node_id, {}).get("type")
+        anchor_type = ctx.view.documents.get(node_id, {}).get("type")
         target_ids = ()
         target_type = anchor_type
         document_id = node_id
@@ -679,30 +749,24 @@ def _answer_to_outcome(
     )
 
 
-def _record_outcome(
-    summary: Dict[str, Any],
-    resolutions: List[Resolution],
-    outcome: _Outcome,
-    *,
-    touched: Optional[Tuple[Set[str], Set[str]]],
-    own_chunk_touched: bool,
-) -> bool:
+def _record_outcome(ctx: PassContext, outcome: _Outcome, *, own_chunk_touched: bool) -> bool:
     """Fold one outcome into the summary and the plan, honouring the touched scope.
 
     Returns whether it was recorded, so a caller counting a kind of answer counts only the
     ones that really reached the plan.
     """
+    summary = ctx.summary
     if not own_chunk_touched:
         # Out of scope unless it points at a document this ingestion wrote.
         resolution = outcome.resolution
-        if resolution is None or resolution.document_id not in touched[1]:
+        if resolution is None or resolution.document_id not in ctx.touched[1]:
             return False
 
     summary["scanned"] += 1
     if outcome.stale:
         summary["stale_ids"] += 1
     if outcome.resolution is not None:
-        resolutions.append(outcome.resolution)
+        ctx.resolutions.append(outcome.resolution)
     if outcome.kind == "resolved" and outcome.resolution is not None:
         summary["resolved"] += 1
         _count(summary["resolved_by_strategy"], outcome.resolution.strategy)
@@ -713,19 +777,7 @@ def _record_outcome(
 
 
 async def _trace_pending(
-    pending: List[_Pending],
-    view: GraphView,
-    texts: DocumentTextCache,
-    summary: Dict[str, Any],
-    resolutions: List[Resolution],
-    *,
-    counters: Dict[str, Any],
-    budget: CallBudget,
-    max_iter: int,
-    threshold: float,
-    touched: Optional[Tuple[Set[str], Set[str]]],
-    unstated: Sequence[_Pending] = (),
-    infer_threshold: float = 1.0,
+    ctx: PassContext, pending: List[_Pending], *, unstated: Sequence[_Pending] = ()
 ) -> None:
     """Seed every candidate, order them, then trace them one at a time.
 
@@ -737,13 +789,7 @@ async def _trace_pending(
     def record(entry: _Pending, outcome: _Outcome) -> Optional[_Outcome]:
         """Fold one answer into the plan; ``None`` when the touched scope dropped it."""
         outcome = _finalize(outcome, entry.entry_notes, entry.stale)
-        recorded = _record_outcome(
-            summary,
-            resolutions,
-            outcome,
-            touched=touched,
-            own_chunk_touched=entry.own_chunk_touched,
-        )
+        recorded = _record_outcome(ctx, outcome, own_chunk_touched=entry.own_chunk_touched)
         return outcome if recorded else None
 
     def fail(entry: _Pending, error: Exception) -> None:
@@ -753,31 +799,31 @@ async def _trace_pending(
             entry.assertion_id,
             error,
         )
-        summary["scanned"] += 1
-        summary["failed"] += 1
+        ctx.summary["scanned"] += 1
+        ctx.summary["failed"] += 1
 
     candidates = list(pending) + list(unstated)
 
-    if not view.documents:
+    if not ctx.view.documents:
         # An agent asked to pick a document out of an empty set can only invent one.
         logger.info(
             "Skipping %d reference trace(s): the graph view holds no documents.", len(candidates)
         )
         for entry in candidates:
-            summary["llm_skipped_empty_graph"] += 1
+            ctx.summary["llm_skipped_empty_graph"] += 1
             record(entry, _Outcome("unresolved"))
         return
 
     from cognee.tasks.graph import reference_retrieval
 
-    vector_engine = await reference_retrieval.get_vector_engine_async()
+    ctx.vector_engine = await reference_retrieval.get_vector_engine_async()
     # One index per pass: rebuilding the BM25 corpora per reference would dominate it.
-    lexical = LexicalIndex(view)
+    ctx.lexical = LexicalIndex(ctx.view)
 
     seeded: List[_Pending] = []
     for entry in candidates:
         try:
-            await _seed_reference(entry, view, lexical, vector_engine)
+            await _seed_reference(ctx, entry)
         except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
             fail(entry, error)
             continue
@@ -788,70 +834,58 @@ async def _trace_pending(
     stated_group = sorted((e for e in seeded if not e.unstated), key=_order_key)
     unstated_group = sorted((e for e in seeded if e.unstated), key=_order_key)
 
-    cache: Dict[Tuple[str, str], _TraceAnswer] = {}
     consecutive_failures = 0
     circuit_broken = False
     exhausted_references = 0
 
     for entry in stated_group + unstated_group:
-        entry_threshold = infer_threshold if entry.unstated else threshold
         if circuit_broken:
             record(entry, _Outcome("unresolved"))
             continue
 
         cache_key = (entry.fingerprint, candidate_set_key(entry.seed))
-        cached = cache.get(cache_key)
+        cached = ctx.cache.get(cache_key)
         if cached is not None:
-            _bump(counters, "llm_cached")
+            _bump(ctx.counters, "llm_cached")
             try:
-                outcome = record(
-                    entry,
-                    _edge_precheck_outcome(entry, cached, view, entry_threshold, counters, summary),
-                )
-                _count_inference(counters, entry, outcome)
+                outcome = record(entry, _edge_precheck_outcome(ctx, entry, cached))
+                _count_inference(ctx.counters, entry, outcome)
             except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
                 fail(entry, error)
             continue
 
         tools = build_tracer_tools(
-            view=view,
-            texts=texts,
-            lexical=lexical,
+            ctx,
             registry=entry.registry,
-            vector_engine=vector_engine,
             exclude_ids=entry.exclude_ids,
             own_document_id=entry.own_document_id,
             penalize_own_document=entry.field_name == "responds_to",
         )
 
         before = (
-            counters.get("llm_failed", 0),
-            counters.get("llm_budget_exhausted", 0),
-            counters.get("traces_iteration_capped", 0),
-            counters.get("llm_calls", 0),
-            counters.get("llm_unknown_label", 0),
-            counters.get("llm_malformed_step", 0),
+            ctx.counters.get("llm_failed", 0),
+            ctx.counters.get("llm_budget_exhausted", 0),
+            ctx.counters.get("traces_iteration_capped", 0),
+            ctx.counters.get("llm_calls", 0),
+            ctx.counters.get("llm_unknown_label", 0),
+            ctx.counters.get("llm_malformed_step", 0),
         )
-        _bump(counters, "traces_started")
+        _bump(ctx.counters, "traces_started")
         try:
             finish, records, iterations = await trace_reference(
+                ctx,
                 # The unstated variant shares the contract and differs on the task: it
                 # asks what this statement answers, and is shown no reference block. Both
-                # bars go with it, so the prompt quotes the one ``entry_threshold`` will
-                # apply instead of a number written into the template.
+                # of the pass's bars go with it, so the prompt quotes the one this answer
+                # will be held to instead of a number written into the template.
                 unstated=entry.unstated,
-                threshold=threshold,
-                infer_threshold=infer_threshold,
-                hint=None if entry.unstated else entry.hint,
+                hint=entry.hint,
                 source_props=entry.props,
-                source_document_name=_document_name(view, entry.own_document_id),
+                source_document_name=_document_name(ctx.view, entry.own_document_id),
                 field_name=entry.field_name,
                 seed=entry.seed,
                 tools=tools,
                 registry=entry.registry,
-                budget=budget,
-                max_iter=max_iter,
-                counters=counters,
             )
         except (FileNotFoundError, ValueError):
             # A missing or blank system prompt is a deployment bug, not a per-reference
@@ -862,25 +896,29 @@ async def _trace_pending(
             fail(entry, error)
             continue
 
-        failed = counters.get("llm_failed", 0) > before[0]
-        exhausted = counters.get("llm_budget_exhausted", 0) > before[1]
-        capped = counters.get("traces_iteration_capped", 0) > before[2]
+        failed = ctx.counters.get("llm_failed", 0) > before[0]
+        exhausted = ctx.counters.get("llm_budget_exhausted", 0) > before[1]
+        capped = ctx.counters.get("traces_iteration_capped", 0) > before[2]
         # The counters the tracer bumped are the only report of *why* an empty trace was
         # empty; read them as a delta, before ``_build_answer`` bumps its own.
         negative_note = None
-        if counters.get("llm_unknown_label", 0) > before[4]:
+        if ctx.counters.get("llm_unknown_label", 0) > before[4]:
             negative_note = NOTE_LLM_UNKNOWN_LABEL
-        elif counters.get("llm_malformed_step", 0) > before[5]:
+        elif ctx.counters.get("llm_malformed_step", 0) > before[5]:
             negative_note = NOTE_LLM_MALFORMED_STEP
         if entry.unstated:
             # ``trace_reference`` counts every successful call in ``llm_calls``; the split
             # between stated and inferred spend is the caller's to keep.
-            _bump(counters, "llm_calls_inferred", counters.get("llm_calls", 0) - before[3])
+            _bump(
+                ctx.counters,
+                "llm_calls_inferred",
+                ctx.counters.get("llm_calls", 0) - before[3],
+            )
 
         consecutive_failures = consecutive_failures + 1 if failed else 0
         if consecutive_failures >= CIRCUIT_BREAKER_FAILURES:
             circuit_broken = True
-            summary["notes"].append(NOTE_LLM_CIRCUIT_BROKEN)
+            ctx.summary["notes"].append(NOTE_LLM_CIRCUIT_BROKEN)
             logger.warning(
                 "Reference tracing circuit broken after %d consecutive failed calls; the "
                 "remaining references are left for the next pass.",
@@ -894,47 +932,41 @@ async def _trace_pending(
             record(entry, _Outcome("unresolved"))
             continue
 
-        _bump(counters, "traces_finished")
+        _bump(ctx.counters, "traces_finished")
         # Mapping the finish onto a Resolution runs inside the guard too: a bug in it must
         # cost this one reference rather than abort a pass already paid for.
         try:
             answer = await _build_answer(
+                ctx,
                 entry,
                 finish,
                 records,
                 iterations,
                 capped=capped,
-                view=view,
-                texts=texts,
-                counters=counters,
                 negative_note=negative_note,
-                max_iter=max_iter,
             )
-            cache[cache_key] = answer
-            outcome = record(
-                entry,
-                _edge_precheck_outcome(entry, answer, view, entry_threshold, counters, summary),
-            )
-            _count_inference(counters, entry, outcome)
+            ctx.cache[cache_key] = answer
+            outcome = record(entry, _edge_precheck_outcome(ctx, entry, answer))
+            _count_inference(ctx.counters, entry, outcome)
         except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
             fail(entry, error)
             continue
 
-    if budget.max_calls == 0:
+    if ctx.budget.max_calls == 0:
         # Estimate mode: the pass was never given a call to spend, so nothing was
         # exhausted and ``traces_started`` is the estimate of what a budget would cost.
-        summary["notes"].append(NOTE_LLM_ESTIMATE_ONLY)
+        ctx.summary["notes"].append(NOTE_LLM_ESTIMATE_ONLY)
     elif exhausted_references:
-        summary["notes"].append(NOTE_LLM_BUDGET_EXHAUSTED)
+        ctx.summary["notes"].append(NOTE_LLM_BUDGET_EXHAUSTED)
         logger.warning(
             "Reference resolution ran out of its %d-call budget with %d reference(s) "
             "still untraced; nothing was written for them, so the next pass retries them.",
-            budget.max_calls,
+            ctx.budget.max_calls,
             exhausted_references,
         )
 
 
-def _keep_prior_on_force(entry: _Pending, outcome: _Outcome, summary: Dict[str, Any]) -> _Outcome:
+def _keep_prior_on_force(ctx: PassContext, entry: _Pending, outcome: _Outcome) -> _Outcome:
     """Leave a forced re-check's live answer alone when the re-check came back empty.
 
     Recording it as a negative would replace a positive audit blob with an abstention while
@@ -944,8 +976,8 @@ def _keep_prior_on_force(entry: _Pending, outcome: _Outcome, summary: Dict[str, 
     if not entry.field_holds_live_id or outcome.kind != "unresolved":
         return outcome
 
-    if NOTE_FORCE_KEPT_PRIOR not in summary["notes"]:
-        summary["notes"].append(NOTE_FORCE_KEPT_PRIOR)
+    if NOTE_FORCE_KEPT_PRIOR not in ctx.summary["notes"]:
+        ctx.summary["notes"].append(NOTE_FORCE_KEPT_PRIOR)
     logger.debug(
         "Forced re-check of %s.%s came back empty; keeping the answer already in the field.",
         entry.assertion_id,
@@ -954,19 +986,12 @@ def _keep_prior_on_force(entry: _Pending, outcome: _Outcome, summary: Dict[str, 
     return _Outcome("already_resolved", stale=outcome.stale)
 
 
-def _edge_precheck_outcome(
-    entry: _Pending,
-    answer: _TraceAnswer,
-    view: GraphView,
-    threshold: float,
-    counters: Dict[str, Any],
-    summary: Dict[str, Any],
-) -> _Outcome:
+def _edge_precheck_outcome(ctx: PassContext, entry: _Pending, answer: _TraceAnswer) -> _Outcome:
     """One trace answer, mapped and then filtered by what the graph already holds."""
-    outcome = _answer_to_outcome(entry, answer, view, threshold=threshold, counters=counters)
+    outcome = _answer_to_outcome(ctx, entry, answer)
     if outcome.kind == "resolved":
-        outcome = _edge_precheck(outcome, entry.props, view)
-    return _keep_prior_on_force(entry, outcome, summary)
+        outcome = _edge_precheck(outcome, entry.props, ctx.view)
+    return _keep_prior_on_force(ctx, entry, outcome)
 
 
 def _document_name(view: GraphView, document_id: Optional[str]) -> Optional[str]:

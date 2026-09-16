@@ -23,6 +23,7 @@ from cognee.modules.graph.utils.reference_candidates import (
     format_candidate_lines,
 )
 from cognee.tasks.graph.reference_graph_view import DocumentTextCache
+from cognee.tasks.graph.reference_pass import PassContext
 from cognee.tasks.graph.reference_retrieval import LexicalIndex
 from cognee.tasks.graph.reference_tracer_tools import (
     DOCUMENT_LIST_CAP,
@@ -108,14 +109,17 @@ def _graph():
     return nodes, [c0_edge, c1_edge, a0_edge]
 
 
+def _context(view) -> PassContext:
+    """The read layer one trace's tools close over, as the pass hands it to them."""
+    return PassContext(view=view, texts=DocumentTextCache(view), lexical=LexicalIndex(view))
+
+
 async def _tools(*, registry=None, **kwargs):
     """The five tools over the shared fixture, plus the objects they close over."""
     nodes, edges = _graph()
     view = await build_graph_view(nodes, edges)
     registry = registry if registry is not None else LabelRegistry()
-    texts = DocumentTextCache(view)
-    lexical = LexicalIndex(view)
-    tools = build_tracer_tools(view=view, texts=texts, lexical=lexical, registry=registry, **kwargs)
+    tools = build_tracer_tools(_context(view), registry=registry, **kwargs)
     return tools, view, registry
 
 
@@ -300,12 +304,7 @@ async def test_list_documents_caps_the_list():
         edges.append(edge)
 
     view = await build_graph_view(nodes, edges)
-    tools = build_tracer_tools(
-        view=view,
-        texts=DocumentTextCache(view),
-        lexical=LexicalIndex(view),
-        registry=LabelRegistry(),
-    )
+    tools = build_tracer_tools(_context(view), registry=LabelRegistry())
 
     result = await run_tool(tools, "list_documents", {})
 
@@ -331,12 +330,7 @@ async def test_list_documents_fits_the_output_cap_and_always_keeps_its_tail():
 
     view = await build_graph_view(nodes, edges)
     registry = LabelRegistry()
-    tools = build_tracer_tools(
-        view=view,
-        texts=DocumentTextCache(view),
-        lexical=LexicalIndex(view),
-        registry=registry,
-    )
+    tools = build_tracer_tools(_context(view), registry=registry)
 
     result = await run_tool(tools, "list_documents", {})
 
@@ -365,12 +359,7 @@ async def test_list_documents_previews_are_short():
 @pytest.mark.asyncio
 async def test_list_documents_on_an_empty_view():
     view = await build_graph_view([], [])
-    tools = build_tracer_tools(
-        view=view,
-        texts=DocumentTextCache(view),
-        lexical=LexicalIndex(view),
-        registry=LabelRegistry(),
-    )
+    tools = build_tracer_tools(_context(view), registry=LabelRegistry())
 
     assert await run_tool(tools, "list_documents", {}) == "No documents."
 
@@ -480,12 +469,7 @@ async def test_read_chunk_truncates_a_very_long_passage():
     chunk, edge = chunk_node(chunk_id, long_text, 0, document_id)
     view = await build_graph_view([document_node(document_id, "Long"), chunk], [edge])
     registry = LabelRegistry()
-    tools = build_tracer_tools(
-        view=view,
-        texts=DocumentTextCache(view),
-        lexical=LexicalIndex(view),
-        registry=registry,
-    )
+    tools = build_tracer_tools(_context(view), registry=registry)
     await run_tool(tools, "list_documents", {})
     await run_tool(tools, "open_document", {"document": "D1"})
 
@@ -523,12 +507,7 @@ async def test_read_chunk_keeps_its_assertion_labels_on_a_long_passage():
         [edge],
     )
     registry = LabelRegistry()
-    tools = build_tracer_tools(
-        view=view,
-        texts=DocumentTextCache(view),
-        lexical=LexicalIndex(view),
-        registry=registry,
-    )
+    tools = build_tracer_tools(_context(view), registry=registry)
     await run_tool(tools, "list_documents", {})
     await run_tool(tools, "open_document", {"document": "D1"})
 
@@ -605,12 +584,7 @@ async def test_locate_paragraph_says_when_the_marker_was_ambiguous():
         [edge],
     )
     registry = LabelRegistry()
-    tools = build_tracer_tools(
-        view=view,
-        texts=DocumentTextCache(view),
-        lexical=LexicalIndex(view),
-        registry=registry,
-    )
+    tools = build_tracer_tools(_context(view), registry=registry)
     await run_tool(tools, "list_documents", {})
 
     with _read_text_patch({"/fake/ambiguous.txt": chunk_text}):

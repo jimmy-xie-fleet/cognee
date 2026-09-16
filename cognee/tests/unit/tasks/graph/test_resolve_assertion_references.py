@@ -41,7 +41,7 @@ from cognee.modules.graph.utils.reference_resolution import (
 )
 from cognee.modules.pipelines.models import PipelineContext
 from cognee.modules.pipelines.tasks.task import Task
-from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES
+from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES, DocumentTextCache
 from cognee.tasks.graph.reference_tracer import TracerFinish, TracerStep, TracerToolCall
 from cognee.tasks.graph.reference_pass import (
     INFERRED_EDGE_FEEDBACK_WEIGHT,
@@ -84,6 +84,11 @@ pass_module = import_module(PASS)
 RETRIEVAL = "cognee.tasks.graph.reference_retrieval"
 TRACER = "cognee.tasks.graph.reference_tracer"
 GATEWAY = f"{TRACER}.LLMGateway.acreate_structured_output"
+
+
+def _pass_context(view, **overrides):
+    """A ``PassContext`` over a fake view, for the pass helpers called directly."""
+    return pass_module.PassContext(view=view, texts=DocumentTextCache(view), **overrides)
 
 
 def _nid(label: str) -> str:
@@ -1519,21 +1524,13 @@ def test_a_field_the_stated_loop_answered_is_never_inferred_over():
     }
     view = SimpleNamespace(assertions={A_UNSTATED: props}, resolver_edge_keys=set())
 
-    eligible = pass_module._unstated_pending(
-        view, handled=set(), force=False, touched=None, counters={}
-    )
+    eligible = pass_module._unstated_pending(_pass_context(view), handled=set())
     assert [entry.assertion_id for entry in eligible] == [A_UNSTATED]
     assert eligible[0].unstated is True
     assert eligible[0].field_name == "responds_to"
 
     assert (
-        pass_module._unstated_pending(
-            view,
-            handled={(A_UNSTATED, "responds_to")},
-            force=False,
-            touched=None,
-            counters={},
-        )
+        pass_module._unstated_pending(_pass_context(view), handled={(A_UNSTATED, "responds_to")})
         == []
     )
 
@@ -2091,7 +2088,7 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         capped=False,
     )
 
-    outcome = pass_module._answer_to_outcome(entry, answer, view, threshold=0.6, counters={})
+    outcome = pass_module._answer_to_outcome(_pass_context(view, threshold=0.6), entry, answer)
 
     assert outcome.kind == "resolved"
     assert outcome.resolution.anchor_id == "gone"

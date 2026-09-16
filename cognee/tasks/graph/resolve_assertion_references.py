@@ -57,7 +57,9 @@ from cognee.tasks.graph.reference_pass import (
     PATCH_FULL,
     PATCH_NONE,
     CallBudget,
+    PassContext,
     _default_patch_mode,
+    _empty_summary,
     _finalize,
     _Outcome,
     _Pending,
@@ -137,71 +139,28 @@ def _touched_ids(items: Any) -> Tuple[Set[str], Set[str]]:
     return chunk_ids, document_ids
 
 
-def _empty_summary() -> Dict[str, Any]:
-    return {
-        "scanned": 0,
-        "already_resolved": 0,
-        "resolved": 0,
-        "resolved_by_strategy": {},
-        "anchor_types": {},
-        "unresolved": 0,
-        "ambiguous": 0,
-        "stale_ids": 0,
-        "failed": 0,
-        "edges_written": 0,
-        "nodes_patched": 0,
-        "dry_run": False,
-        "notes": [],
-        # ``llm_calls`` counts the calls that came back; ``llm_calls_attempted`` is what
-        # the budget was charged (a failed call too), so it is what reaches ``llm_budget``.
-        "llm_calls": 0,
-        "llm_calls_attempted": 0,
-        "llm_calls_stated": 0,
-        "llm_calls_inferred": 0,
-        "llm_budget": 0,
-        "llm_budget_exhausted": False,
-        "traces_started": 0,
-        "traces_finished": 0,
-        "traces_iteration_capped": 0,
-        "llm_skipped_empty_graph": 0,
-        "llm_cached": 0,
-        "llm_abstained": 0,
-        "llm_below_threshold": 0,
-        "llm_unknown_label": 0,
-        "llm_malformed_step": 0,
-        "llm_failed": 0,
-        "tool_calls_by_name": {},
-        "llm_tokens_in": 0,
-        "llm_tokens_out": 0,
-        # The unstated-inference pass. Always reported (zero when it is off), so a
-        # consumer never has to branch on whether it ran.
-        "inferred_scanned": 0,
-        "inferred_resolved": 0,
-    }
-
-
 def _resolve_existing_id(
+    ctx: PassContext,
     assertion_id: str,
     field_name: str,
     value: str,
     reference_text: str,
-    view: GraphView,
 ) -> _Outcome:
     """Step 1: the field already holds an id -- make sure the edge exists.
 
     ``reference_text`` is the wording the document used when a previous pass preserved
     it, so the edge quotes the reference rather than the id that replaced it.
     """
-    if value not in view.node_ids:
+    if value not in ctx.view.node_ids:
         logger.debug(
             "Reference %s.%s points at an unknown node %s.", assertion_id, field_name, value
         )
         return _Outcome("unresolved")
 
-    if (assertion_id, value, field_name) in view.edge_keys:
+    if (assertion_id, value, field_name) in ctx.view.edge_keys:
         return _Outcome("already_resolved")
 
-    props = view.node_props(value)
+    props = ctx.view.node_props(value)
     return _Outcome(
         "resolved",
         Resolution(
@@ -240,10 +199,10 @@ def _entity_name_text(hint: Optional[ReferenceHint], legacy_value: Optional[str]
 
 
 def _resolve_entity_name(
+    ctx: PassContext,
     assertion_id: str,
     field_name: str,
     reference_text: str,
-    view: GraphView,
     *,
     stale: bool = False,
 ) -> Optional[_Outcome]:
@@ -254,7 +213,7 @@ def _resolve_entity_name(
     the resolution goes out marked :data:`NOTE_EDGES_EXIST` -- no edge is re-emitted, and
     ``_replace_dead_id`` turns it into the patch that clears the field.
     """
-    entity_ids = view.entity_ids_by_name.get(generate_node_name(reference_text))
+    entity_ids = ctx.view.entity_ids_by_name.get(generate_node_name(reference_text))
     if not entity_ids:
         return None
 
@@ -268,7 +227,7 @@ def _resolve_entity_name(
         return _Outcome("ambiguous")
 
     entity_id = entity_ids[0]
-    edges_exist = (assertion_id, entity_id, field_name) in view.edge_keys
+    edges_exist = (assertion_id, entity_id, field_name) in ctx.view.edge_keys
     if edges_exist and not stale:
         return _Outcome("already_resolved")
 
@@ -306,14 +265,12 @@ def _replace_dead_id(outcome: _Outcome) -> _Outcome:
 
 
 def _cheap_cascade(
+    ctx: PassContext,
     assertion_id: str,
     field_name: str,
     props: dict,
-    view: GraphView,
     *,
-    force: bool,
     own_chunk_touched: bool,
-    max_iter: Optional[int] = None,
 ) -> Tuple[Optional[_Outcome], Optional[_Pending]]:
     """Steps 1-3 for one ``(assertion, field)``: no retrieval, no LLM, no document reads.
 
@@ -342,14 +299,14 @@ def _cheap_cascade(
         # An id that is no longer a node -- the target was forgotten, or an amended
         # document re-chunked under new ids -- re-resolves from the preserved reference
         # without waiting for force. With nothing preserved it stays unresolved.
-        stale = value not in view.node_ids
-        if hint is not None and (force or stale):
+        stale = value not in ctx.view.node_ids
+        if hint is not None and (ctx.force or stale):
             entry_notes = (NOTE_STALE_ID,) if stale else ()
         else:
             return (
                 _finalize(
                     _resolve_existing_id(
-                        assertion_id, field_name, value, stored_text or value, view
+                        ctx, assertion_id, field_name, value, stored_text or value
                     ),
                     entry_notes,
                     stale,
@@ -360,7 +317,7 @@ def _cheap_cascade(
     entity_text = _entity_name_text(hint, None if holds_id else value)
     if entity_text:
         entity_outcome = _resolve_entity_name(
-            assertion_id, field_name, entity_text, view, stale=stale
+            ctx, assertion_id, field_name, entity_text, stale=stale
         )
         if entity_outcome is not None:
             if stale:
@@ -373,14 +330,14 @@ def _cheap_cascade(
     fingerprint = reference_fingerprint(hint, field_name)
     # A stale id means the stored answer is dark, so a matching fingerprint must not stop
     # the re-resolution -- the guard is for references that already had their chance.
-    if not force and not stale:
+    if not ctx.force and not stale:
         # An edge a resolver pass already wrote out of this assertion on this field is an
         # answer, whether or not the node could be patched to remember it: without this, a
         # backend with no ``update_node`` re-spends the whole budget on every pass.
-        if (assertion_id, field_name) in view.resolver_edge_keys:
+        if (assertion_id, field_name) in ctx.view.resolver_edge_keys:
             return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
 
-        prior = _prior_attempt(props, field_name, max_iter=max_iter)
+        prior = _prior_attempt(props, field_name, max_iter=ctx.max_iter)
         if prior is not None and prior.get("fingerprint") == fingerprint:
             return _finalize(_Outcome("already_resolved"), entry_notes, stale), None
 
@@ -394,13 +351,13 @@ def _cheap_cascade(
         entry_notes=entry_notes,
         stale=stale,
         own_chunk_touched=own_chunk_touched,
-        # Only ``force`` reaches here with a live id in the field; a negative trace must
-        # then leave that answer (and its audit blob) exactly where it is.
+        # Only ``ctx.force`` reaches here with a live id in the field; a negative trace
+        # must then leave that answer (and its audit blob) exactly where it is.
         field_holds_live_id=holds_id and not stale,
     )
 
 
-def _fold_counters(summary: Dict[str, Any], counters: Dict[str, Any]) -> None:
+def _fold_counters(ctx: PassContext) -> None:
     """Merge the tracer's counters into the summary, coercing the one flag it shares.
 
     ``trace_reference`` bumps ``llm_budget_exhausted`` as a count (once per trace that
@@ -408,12 +365,13 @@ def _fold_counters(summary: Dict[str, Any], counters: Dict[str, Any]) -> None:
     is the exception: ``llm_max_calls=0`` is estimate mode, so nothing was ever available
     to spend and nothing was exhausted.
     """
-    for key, value in counters.items():
+    summary = ctx.summary
+    for key, value in ctx.counters.items():
         if key == "llm_budget_exhausted":
             continue
         summary[key] = value
     summary["llm_budget_exhausted"] = (
-        bool(counters.get("llm_budget_exhausted")) and summary["llm_budget"] > 0
+        bool(ctx.counters.get("llm_budget_exhausted")) and summary["llm_budget"] > 0
     )
     summary["llm_calls_stated"] = summary["llm_calls"] - summary["llm_calls_inferred"]
 
@@ -443,28 +401,33 @@ async def plan_resolutions(
     """
     config = get_cognify_config()
     max_calls = config.reference_llm_max_calls if llm_max_calls is None else int(llm_max_calls)
-    max_iter = config.reference_tracer_max_iter if tracer_max_iter is None else int(tracer_max_iter)
-    threshold = (
-        config.reference_llm_confidence_threshold
-        if llm_confidence_threshold is None
-        else float(llm_confidence_threshold)
-    )
     infer = config.reference_infer_unstated if infer_unstated is None else bool(infer_unstated)
-    infer_threshold = (
-        config.reference_infer_confidence_threshold
-        if infer_confidence_threshold is None
-        else float(infer_confidence_threshold)
+    ctx = PassContext(
+        view=view,
+        texts=texts,
+        budget=CallBudget(max_calls),
+        force=force,
+        max_iter=(
+            config.reference_tracer_max_iter if tracer_max_iter is None else int(tracer_max_iter)
+        ),
+        threshold=(
+            config.reference_llm_confidence_threshold
+            if llm_confidence_threshold is None
+            else float(llm_confidence_threshold)
+        ),
+        infer_threshold=(
+            config.reference_infer_confidence_threshold
+            if infer_confidence_threshold is None
+            else float(infer_confidence_threshold)
+        ),
+        touched=touched,
     )
-
-    summary = _empty_summary()
+    summary = ctx.summary
     summary["llm_budget"] = max_calls
-    resolutions: List[Resolution] = []
     pending: List[_Pending] = []
     # Every (assertion, field) the stated loop took an interest in, so the unstated
     # inference never offers a second answer for a field that already has one.
     handled: Set[Tuple[str, str]] = set()
-    counters: Dict[str, Any] = {}
-    budget = CallBudget(max_calls)
 
     with operation_usage_scope() as usage:
         for assertion_id, props in view.assertions.items():
@@ -475,13 +438,7 @@ async def plan_resolutions(
             for field_name in REFERENCE_FIELDS:
                 try:
                     outcome, entry = _cheap_cascade(
-                        assertion_id,
-                        field_name,
-                        props,
-                        view,
-                        force=force,
-                        own_chunk_touched=own_chunk_touched,
-                        max_iter=max_iter,
+                        ctx, assertion_id, field_name, props, own_chunk_touched=own_chunk_touched
                     )
                 except Exception as error:  # noqa: BLE001 - one bad reference, not the pass
                     logger.warning(
@@ -514,56 +471,24 @@ async def plan_resolutions(
                         # The tail writes nothing for a reference it cannot answer, so
                         # the pass retries it from scratch.
                         _record_outcome(
-                            summary,
-                            resolutions,
+                            ctx,
                             _finalize(_Outcome("unresolved"), entry.entry_notes, entry.stale),
-                            touched=touched,
                             own_chunk_touched=own_chunk_touched,
                         )
                 elif outcome is not None:
-                    _record_outcome(
-                        summary,
-                        resolutions,
-                        outcome,
-                        touched=touched,
-                        own_chunk_touched=own_chunk_touched,
-                    )
+                    _record_outcome(ctx, outcome, own_chunk_touched=own_chunk_touched)
 
         # Strictly after the stated loop built its residue: the statements that reference
         # nothing at all, and only when a caller opted in.
-        unstated = (
-            _unstated_pending(
-                view,
-                handled=handled,
-                force=force,
-                touched=touched,
-                counters=counters,
-                max_iter=max_iter,
-            )
-            if allow_llm and infer
-            else []
-        )
+        unstated = _unstated_pending(ctx, handled=handled) if allow_llm and infer else []
 
         if pending or unstated:
-            await _trace_pending(
-                pending,
-                view,
-                texts,
-                summary,
-                resolutions,
-                counters=counters,
-                budget=budget,
-                max_iter=max_iter,
-                threshold=threshold,
-                touched=touched,
-                unstated=unstated,
-                infer_threshold=infer_threshold,
-            )
+            await _trace_pending(ctx, pending, unstated=unstated)
 
-    _fold_counters(summary, counters)
+    _fold_counters(ctx)
     # Straight off the budget rather than the counters: it is the budget that was charged,
     # so an exhausted budget never reads as ``llm_calls=297/300``.
-    summary["llm_calls_attempted"] = budget.used
+    summary["llm_calls_attempted"] = ctx.budget.used
     summary["llm_tokens_in"] = usage.tokens_in
     summary["llm_tokens_out"] = usage.tokens_out
 
@@ -581,7 +506,7 @@ async def plan_resolutions(
         summary["llm_budget"],
         summary["traces_started"],
     )
-    return resolutions, summary
+    return ctx.resolutions, summary
 
 
 async def write_resolutions(
