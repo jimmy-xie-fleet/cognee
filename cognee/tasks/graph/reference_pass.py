@@ -40,8 +40,6 @@ from cognee.tasks.graph.reference_retrieval import (
     search_candidates,
 )
 from cognee.tasks.graph.reference_tracer import (
-    INFER_UNSTATED_SYSTEM_PROMPT,
-    TRACE_SYSTEM_PROMPT,
     CallBudget,
     TraceRecord,
     TracerFinish,
@@ -838,10 +836,12 @@ async def _trace_pending(
         try:
             finish, records, iterations = await trace_reference(
                 # The unstated variant shares the contract and differs on the task: it
-                # asks what this statement answers, and is shown no reference block.
-                system_prompt_path=(
-                    INFER_UNSTATED_SYSTEM_PROMPT if entry.unstated else TRACE_SYSTEM_PROMPT
-                ),
+                # asks what this statement answers, and is shown no reference block. Both
+                # bars go with it, so the prompt quotes the one ``entry_threshold`` will
+                # apply instead of a number written into the template.
+                unstated=entry.unstated,
+                threshold=threshold,
+                infer_threshold=infer_threshold,
                 hint=None if entry.unstated else entry.hint,
                 source_props=entry.props,
                 source_document_name=_document_name(view, entry.own_document_id),

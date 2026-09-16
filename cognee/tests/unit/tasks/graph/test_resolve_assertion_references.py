@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
+from jinja2 import TemplateNotFound
 
 from cognee.modules.graph.utils.reference_resolution import (
     STRATEGY_ENTITY_NAME,
@@ -1958,7 +1959,7 @@ async def test_a_missing_system_prompt_aborts_the_pass():
     graph = _base_graph()
 
     with _patched(graph) as mocks:
-        with patch(f"{TRACER}.read_query_prompt", return_value=None):
+        with patch(f"{TRACER}.render_prompt", side_effect=TemplateNotFound("gone.txt")):
             with pytest.raises(FileNotFoundError):
                 await detect_dangling_references(None)
 
@@ -1970,7 +1971,7 @@ async def test_a_blank_system_prompt_aborts_the_pass():
     graph = _base_graph()
 
     with _patched(graph):
-        with patch(f"{TRACER}.read_query_prompt", return_value="   "):
+        with patch(f"{TRACER}.render_prompt", return_value="   "):
             with pytest.raises(ValueError):
                 await detect_dangling_references(None)
 
@@ -1983,7 +1984,7 @@ async def test_a_missing_system_prompt_fails_the_task_on_the_pass_path():
     graph = _base_graph()
 
     with _patched(graph) as mocks:
-        with patch(f"{TRACER}.read_query_prompt", return_value=None):
+        with patch(f"{TRACER}.render_prompt", side_effect=TemplateNotFound("gone.txt")):
             with pytest.raises(FileNotFoundError):
                 await resolve_assertion_references(["item"])
 
@@ -1996,7 +1997,7 @@ async def test_a_blank_system_prompt_fails_the_task_on_the_pass_path():
     graph = _base_graph()
 
     with _patched(graph):
-        with patch(f"{TRACER}.read_query_prompt", return_value="   "):
+        with patch(f"{TRACER}.render_prompt", return_value="   "):
             with pytest.raises(ValueError):
                 await resolve_assertion_references(["item"])
 
@@ -2009,7 +2010,7 @@ async def test_the_tail_never_fails_its_pipeline_over_a_prompt_it_does_not_read(
     items = ["unchanged"]
 
     with _patched(graph) as mocks:
-        with patch(f"{TRACER}.read_query_prompt", return_value=None):
+        with patch(f"{TRACER}.render_prompt", side_effect=TemplateNotFound("gone.txt")):
             result = await resolve_assertion_references(items, scope="touched", allow_llm=False)
 
     assert result is items

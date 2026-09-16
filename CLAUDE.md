@@ -898,7 +898,8 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   - **Unstated inference** (`REFERENCE_INFER_UNSTATED=true`, off by default) runs from the same
     budget, strictly after every stated reference was offered a trace: a `denial` or `admission`
     with a blank `responds_to`, no `responds_to_ref` and a `source_quote` is seeded on its
-    proposition alone and traced with `infer_unstated_reference_system.txt`. An answer above
+    proposition alone and traced with `trace_reference_system.txt` rendered with
+    `unstated=True`, which appends the higher-bar block to the same prompt. An answer above
     `reference_infer_confidence_threshold` writes an `llm_inferred` edge carrying `inferred=True`
     and `feedback_weight=0.2`, and patches **only** `<field>_resolution` — the graph never claims
     the document wrote a reference it did not write.
@@ -941,9 +942,7 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   which degrades to the stored chunks when the derived text file is missing or unreadable; a
   legacy free-text reference from a pre-structured dataset reaches the tracer as a `legacy_text`
   hint, its own words unparsed, and an old `<field>_resolution` blob with no `fingerprint` is
-  reconsidered once, so the first pass over such a dataset spends budget on it; the `0.75`
-  unstated bar is stated both in `reference_infer_confidence_threshold` and in
-  `infer_unstated_reference_system.txt`, two sources of truth that have to move together; an
+  reconsidered once, so the first pass over such a dataset spends budget on it; an
   inferred link can land on a sibling assertion in the same pleading rather than the one it
   answers (the same-document discount is a penalty, not a filter), which is why
   `REFERENCE_INFER_UNSTATED` is false by default and wants a spot-check before it is turned on;

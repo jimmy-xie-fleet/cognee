@@ -15,16 +15,17 @@ from typing import Any, Dict, List
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from jinja2 import TemplateNotFound
 from pydantic import BaseModel
 
-from cognee.infrastructure.llm.prompts import read_query_prompt
+from cognee.infrastructure.llm.prompts import render_prompt
+from cognee.modules.cognify.config import get_cognify_config
 from cognee.modules.graph.utils.reference_candidates import Candidate, LabelRegistry
 from cognee.modules.graph.utils.reference_resolution import ReferenceHint
 from cognee.tasks.graph.reference_graph_view import DocumentTextCache
 from cognee.tasks.graph.reference_retrieval import LexicalIndex
 from cognee.tasks.graph.reference_tracer import (
     FENCE_CLOSE,
-    INFER_UNSTATED_SYSTEM_PROMPT,
     MAX_TOOL_OUTPUT_CHARS,
     TRACE_PREVIEW_CHARS,
     TRACE_SYSTEM_PROMPT,
@@ -130,6 +131,25 @@ def _seed(registry: LabelRegistry) -> List[Candidate]:
     ]
 
 
+def _system_prompt(unstated: bool, *, threshold=None, infer_threshold=None) -> str:
+    """The merged template as ``trace_reference`` renders it, defaults straight from config."""
+    config = get_cognify_config()
+    return render_prompt(
+        TRACE_SYSTEM_PROMPT,
+        {
+            "unstated": unstated,
+            "threshold": (
+                config.reference_llm_confidence_threshold if threshold is None else threshold
+            ),
+            "infer_threshold": (
+                config.reference_infer_confidence_threshold
+                if infer_threshold is None
+                else infer_threshold
+            ),
+        },
+    )
+
+
 async def _trace(
     steps,
     *,
@@ -140,7 +160,9 @@ async def _trace(
     max_iter=4,
     counters=None,
     hint=HINT,
-    system_prompt_path=TRACE_SYSTEM_PROMPT,
+    unstated=False,
+    threshold=0.6,
+    infer_threshold=0.81,
 ):
     registry = registry if registry is not None else LabelRegistry()
     seed = _seed(registry) if seed is None else seed
@@ -151,7 +173,9 @@ async def _trace(
     gateway = AsyncMock(side_effect=steps)
     with patch(GATEWAY, gateway):
         finish, records, iterations = await trace_reference(
-            system_prompt_path=system_prompt_path,
+            unstated=unstated,
+            threshold=threshold,
+            infer_threshold=infer_threshold,
             hint=hint,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -347,7 +371,9 @@ async def test_the_referring_statement_cannot_forge_a_tool_result_fence():
 
     with patch(GATEWAY, AsyncMock(side_effect=steps)) as gateway:
         await trace_reference(
-            system_prompt_path=TRACE_SYSTEM_PROMPT,
+            unstated=False,
+            threshold=0.6,
+            infer_threshold=0.75,
             hint=HINT,
             source_props=source_props,
             source_document_name="Answer",
@@ -640,14 +666,21 @@ async def test_the_user_prompt_counts_the_steps_it_has_left():
 @pytest.mark.asyncio
 async def test_a_missing_system_prompt_file_is_a_hard_error():
     # Finding 4: an empty system prompt is a deployment bug, and silently tracing without
-    # one spends the whole pass budget on an unguided model.
+    # one spends the whole pass budget on an unguided model. Jinja signals the missing
+    # template its own way; the tracer still owes the caller a FileNotFoundError.
     gateway = AsyncMock(side_effect=[TracerStep(finish=TracerFinish())])
     budget = CallBudget(max_calls=4)
     registry = LabelRegistry()
 
-    with patch(GATEWAY, gateway), pytest.raises(FileNotFoundError):
+    with (
+        patch(GATEWAY, gateway),
+        patch(f"{MODULE}.render_prompt", side_effect=TemplateNotFound(TRACE_SYSTEM_PROMPT)),
+        pytest.raises(FileNotFoundError),
+    ):
         await trace_reference(
-            system_prompt_path="no_such_tracer_prompt.txt",
+            unstated=False,
+            threshold=0.6,
+            infer_threshold=0.75,
             hint=HINT,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -671,11 +704,13 @@ async def test_a_blank_system_prompt_is_a_hard_error():
 
     with (
         patch(GATEWAY, gateway),
-        patch(f"{MODULE}.read_query_prompt", return_value="   \n  "),
+        patch(f"{MODULE}.render_prompt", return_value="   \n  "),
         pytest.raises(ValueError),
     ):
         await trace_reference(
-            system_prompt_path=TRACE_SYSTEM_PROMPT,
+            unstated=False,
+            threshold=0.6,
+            infer_threshold=0.75,
             hint=HINT,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -703,7 +738,9 @@ async def test_a_template_failure_does_not_burn_a_budget_slot():
         pytest.raises(RuntimeError),
     ):
         await trace_reference(
-            system_prompt_path=TRACE_SYSTEM_PROMPT,
+            unstated=False,
+            threshold=0.6,
+            infer_threshold=0.75,
             hint=HINT,
             source_props=SOURCE_PROPS,
             source_document_name="Answer",
@@ -754,50 +791,74 @@ async def test_without_a_hint_the_reference_block_is_omitted():
 
 
 @pytest.mark.asyncio
-async def test_the_system_prompt_is_read_from_the_given_path():
+async def test_a_stated_trace_renders_the_system_prompt_without_the_unstated_block():
     steps = [TracerStep(finish=TracerFinish(candidate_label=None))]
 
-    _, _, _, gateway, _, _, _ = await _trace(steps, system_prompt_path=INFER_UNSTATED_SYSTEM_PROMPT)
+    _, _, _, gateway, _, _, _ = await _trace(steps)
 
     system_prompt = gateway.await_args_list[0].kwargs["system_prompt"]
-    assert system_prompt == read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
-    assert system_prompt
+    assert system_prompt == _system_prompt(False, threshold=0.6, infer_threshold=0.81)
+    assert "This trace has no stated reference" not in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_an_unstated_trace_renders_the_unstated_block_and_its_bar():
+    # The pass no longer picks a file: it says which task this is, and the bar it will
+    # judge the answer against travels with it into the template.
+    steps = [TracerStep(finish=TracerFinish(candidate_label=None))]
+
+    _, _, _, gateway, _, _, _ = await _trace(steps, unstated=True, hint=None)
+
+    system_prompt = gateway.await_args_list[0].kwargs["system_prompt"]
+    assert "This trace has no stated reference" in system_prompt
     assert "answering" in system_prompt
+    assert "below `0.81` abstain" in system_prompt
 
 
-def test_both_system_prompts_exist_and_state_the_contract():
-    stated = read_query_prompt(TRACE_SYSTEM_PROMPT)
-    unstated = read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
+def test_both_renderings_state_the_contract():
+    stated = _system_prompt(False)
+    unstated = _system_prompt(True)
 
     for prompt in (stated, unstated):
         assert prompt
         assert "tool_call" in prompt
         assert "finish" in prompt
         assert "abstention" in prompt
-    # The unstated variant is the stated prompt plus its own paragraph.
+    # The unstated rendering is the stated prompt plus its own paragraph.
     assert len(unstated) > len(stated)
 
 
-def test_the_unstated_prompt_states_the_higher_confidence_bar():
+def test_the_unstated_block_states_the_configured_confidence_bar():
     # Finding 6: results of this variant are judged against
-    # reference_infer_confidence_threshold (0.75), so telling the model 0.6 is enough
-    # manufactures answers the pass then throws away.
-    unstated = read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
+    # reference_infer_confidence_threshold, so a prompt that names a lower number
+    # manufactures answers the pass then throws away. One template, one source of truth.
+    bar = get_cognify_config().reference_infer_confidence_threshold
 
-    assert "below `0.75` abstain" in unstated
+    unstated = _system_prompt(True)
+    stated = _system_prompt(False)
+
+    assert f"below `{bar}` abstain" in unstated
+    assert "This trace has no stated reference" not in stated
+    assert f"below `{bar}` abstain" not in stated
 
 
-def test_neither_prompt_offers_a_summary_label():
+def test_the_stated_calibration_states_the_configured_confidence_bar():
+    bar = get_cognify_config().reference_llm_confidence_threshold
+
+    for prompt in (_system_prompt(False), _system_prompt(True)):
+        assert f"Below `{bar}`: abstain" in prompt
+
+
+def test_neither_rendering_offers_a_summary_label():
     # Task 7 maps a summary hit to its chunk, so an S label is never issued; inviting the
     # model to name one costs a whole trace.
-    for name in (TRACE_SYSTEM_PROMPT, INFER_UNSTATED_SYSTEM_PROMPT):
-        prompt = read_query_prompt(name)
+    for prompt in (_system_prompt(False), _system_prompt(True)):
         assert "`S…`" not in prompt
         assert "summary" not in prompt.lower()
 
 
 def test_the_system_prompt_explains_the_fence_and_where_labels_come_from():
-    prompt = read_query_prompt(TRACE_SYSTEM_PROMPT)
+    prompt = _system_prompt(False)
 
     assert "<<<tool-result" in prompt
     assert "<<<end-tool-result>>>" in prompt
