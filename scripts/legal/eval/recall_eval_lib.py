@@ -39,8 +39,20 @@ from pydantic import BaseModel, Field
 # --------------------------------------------------------------------------------------
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8011"
-DEFAULT_TIMEOUT_SECONDS = 180.0
+# 600 s, not the 180 s the first live run used. A HYBRID_COMPLETION over a 5k-node
+# graph on a server that is also serving the UI and the memory plugin genuinely
+# takes minutes, and the first run lost rows to ReadTimeout that the server would
+# have answered. Efficiency is explicitly not a constraint for this evaluation:
+# a slow answer is data, a timed-out answer is a hole in the table.
+DEFAULT_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOP_K = 15
+
+#: Three attempts for a transient failure, sleeping between them. The first live
+#: run retried once and lost rows anyway - a shared server under load needs to be
+#: given real time to recover, not hammered twice in a row.
+DEFAULT_RETRY_ATTEMPTS = 3
+DEFAULT_BACKOFF_SECONDS = (2.0, 8.0)
+DEFAULT_JITTER = 0.25
 
 # The local stack's documented defaults. Override with COGNEE_EVAL_USER /
 # COGNEE_EVAL_PASSWORD; neither value is ever printed.
@@ -92,7 +104,14 @@ def configure_llm_environment() -> None:
     os.environ.setdefault("SYSTEM_ROOT_DIRECTORY", str(cognee_home / "system"))
     os.environ.setdefault("DATA_ROOT_DIRECTORY", str(cognee_home / "data"))
     os.environ.setdefault("CACHE_ROOT_DIRECTORY", str(cognee_home / "cache"))
-    os.environ.setdefault("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+    # Only ever *add* a key, never blank one out. The sibling scripts use
+    # ``setdefault("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))``, which
+    # with neither variable set exports the empty string - and an empty env var
+    # wins over the value in .env, so cognee raises LLMAPIKeyNotSetError. That is
+    # how the first live run answered 77 questions and graded none of them.
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key and not os.environ.get("LLM_API_KEY"):
+        os.environ["LLM_API_KEY"] = openai_key
 
 
 # --------------------------------------------------------------------------------------
@@ -303,7 +322,16 @@ class HttpError(RuntimeError):
 
 
 class TransientHttpError(HttpError):
-    """A request failed in a way that one retry might fix (timeout, connection, 5xx)."""
+    """A request failed in a way that a retry might fix (timeout, connection, 5xx)."""
+
+
+class AuthError(HttpError):
+    """The server rejected the bearer token (401).
+
+    Its own class because the cure is different from both other cases: not a
+    retry and not a dead row, but a fresh login. The first live run lost 84 of
+    171 rows to a token that expired about an hour in.
+    """
 
 
 _TRANSIENT_EXCEPTION_NAMES = frozenset(
@@ -323,6 +351,29 @@ _TRANSIENT_EXCEPTION_NAMES = frozenset(
 )
 
 
+#: Error classes for the report histogram. Derived from the recorded message so
+#: a run answered by an older version of this harness still classifies.
+ERROR_CLASSES = ("401", "timeout", "5xx", "other")
+
+
+def classify_error_message(message: Optional[str]) -> str:
+    """Bucket a recorded error into one of :data:`ERROR_CLASSES` (or ``""``).
+
+    401 is checked first: an expired token that surfaces as ``HTTP 401`` must not
+    be counted as "other" just because the word appears late in the string.
+    """
+    if not message:
+        return ""
+    lowered = message.lower()
+    if "401" in lowered or "unauthorized" in lowered:
+        return "401"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if re.search(r"http 5\d\d", lowered):
+        return "5xx"
+    return "other"
+
+
 def is_transient(error: BaseException) -> bool:
     """Whether ``error`` is worth one retry.
 
@@ -332,7 +383,7 @@ def is_transient(error: BaseException) -> bool:
     """
     if isinstance(error, TransientHttpError):
         return True
-    if isinstance(error, HttpError):
+    if isinstance(error, HttpError):  # includes AuthError, which is handled separately
         return False
     return type(error).__name__ in _TRANSIENT_EXCEPTION_NAMES
 
@@ -375,6 +426,8 @@ class HttpxClient:
 
         if response.status_code >= 500:
             raise TransientHttpError(f"HTTP {response.status_code}: {response.text[:400]}")
+        if response.status_code == 401:
+            raise AuthError(f"HTTP 401: {response.text[:400]}")
         if response.status_code >= 400:
             raise HttpError(f"HTTP {response.status_code}: {response.text[:400]}")
         try:
@@ -496,7 +549,16 @@ class AnswerRow:
     answer: str = ""
     context: str = ""
     elapsed_seconds: float = 0.0
+    top_k: Optional[int] = None
     error: Optional[str] = None
+    error_class: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        # Derived, never hand-set: a run written by an older version of this
+        # harness carries an error string but no class, and --resume and the
+        # report histogram both need one.
+        if self.error and not self.error_class:
+            self.error_class = classify_error_message(self.error)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -507,32 +569,97 @@ class AnswerRow:
         return cls(**known)
 
 
-def post_with_retry(
-    client: HttpClient,
-    path: str,
-    body: dict,
-    headers: dict,
-    retries: int = 1,
-) -> Any:
-    """POST once, then retry ``retries`` times but only for transient failures."""
-    attempt = 0
-    while True:
-        try:
-            return client.post(path, json=body, headers=headers)
-        except Exception as error:  # noqa: BLE001 - re-raised below once retries run out
-            if attempt >= retries or not is_transient(error):
-                raise
-            attempt += 1
+def row_key(row: Any) -> tuple[str, str, str]:
+    """Identity of one evaluation cell, shared by answer rows and verdict rows."""
+    return (row.dataset, row.search_type, row.question_id)
+
+
+class AuthenticatedSession:
+    """One logged-in conversation with the server, with the live-run failures handled.
+
+    Three things the first live run needed and did not have:
+
+    * **Re-authentication.** A 401 means the token expired, not that the request
+      is bad. The session logs in again and replays the request once with the
+      fresh token; only a second 401 is a real failure.
+    * **Real backoff.** Transient failures (timeouts, 5xx from the server's
+      connection pool) get up to ``attempts`` tries with exponential, jittered
+      sleeps, so a server that is briefly saturated is given time to recover
+      rather than hit again immediately.
+    * **Pacing.** ``pause_seconds`` sleeps between consecutive requests, to keep
+      a shared development server usable while a long run is going.
+
+    ``sleep`` and ``rng`` are injected so tests never actually wait. The token is
+    held in memory and never printed, logged, or written to a run directory.
+    """
+
+    def __init__(
+        self,
+        client: HttpClient,
+        username: str,
+        password: str,
+        attempts: int = DEFAULT_RETRY_ATTEMPTS,
+        backoff_seconds: Sequence[float] = DEFAULT_BACKOFF_SECONDS,
+        jitter: float = DEFAULT_JITTER,
+        pause_seconds: float = 0.0,
+        sleep: Callable[[float], None] = time.sleep,
+        rng: Optional[random.Random] = None,
+    ):
+        self.client = client
+        self.username = username
+        self._password = password
+        self.attempts = max(1, attempts)
+        self.backoff_seconds = tuple(backoff_seconds)
+        self.jitter = jitter
+        self.pause_seconds = pause_seconds
+        self._sleep = sleep
+        self._rng = rng or random.Random(0)
+        self.token: Optional[str] = None
+        self.login_count = 0
+        self._requests_made = 0
+
+    def authenticate(self) -> None:
+        """(Re)login. Counted so a run can report how often the token expired."""
+        self.token = login(self.client, self.username, self._password)
+        self.login_count += 1
+
+    def _backoff(self, attempt: int) -> float:
+        base = self.backoff_seconds[min(attempt, len(self.backoff_seconds) - 1)]
+        return base * (1.0 + self.jitter * self._rng.random())
+
+    def post(self, path: str, body: dict) -> Any:
+        """POST ``body`` to ``path``, handling token expiry and transient failure."""
+        if self.token is None:
+            self.authenticate()
+        if self.pause_seconds > 0 and self._requests_made:
+            self._sleep(self.pause_seconds)
+        self._requests_made += 1
+
+        reauthenticated = False
+        attempt = 0
+        while True:
+            try:
+                return self.client.post(path, json=body, headers=auth_headers(self.token))
+            except AuthError:
+                # The token expired mid-run. One fresh login, one replay; a second
+                # 401 with a brand new token is a real authorization failure.
+                if reauthenticated:
+                    raise
+                reauthenticated = True
+                self.authenticate()
+            except Exception as error:  # noqa: BLE001 - re-raised once the budget is gone
+                if not is_transient(error) or attempt >= self.attempts - 1:
+                    raise
+                self._sleep(self._backoff(attempt))
+                attempt += 1
 
 
 def run_answers(
-    client: HttpClient,
-    token: str,
+    session: AuthenticatedSession,
     questions: Sequence[Question],
     datasets: Sequence[str],
     search_types: Sequence[str],
     top_k: int = DEFAULT_TOP_K,
-    retries: int = 1,
     on_row: Optional[Callable[[AnswerRow], None]] = None,
 ) -> list[AnswerRow]:
     """Answer every ``dataset x search_type x question`` cell.
@@ -542,7 +669,6 @@ def run_answers(
     failure is recorded on the row and the run continues - one dead search type
     should not cost the whole matrix.
     """
-    headers = auth_headers(token)
     rows: list[AnswerRow] = []
 
     for dataset in datasets:
@@ -555,27 +681,26 @@ def run_answers(
                     category=question.category,
                     question=question.question,
                     corpus=question.corpus,
+                    top_k=top_k,
                 )
                 started = time.perf_counter()
                 try:
                     answer_path, answer_body = build_search_request(
                         question, dataset, search_type, top_k, only_context=False
                     )
-                    row.answer = extract_text(
-                        post_with_retry(client, answer_path, answer_body, headers, retries)
-                    )
+                    row.answer = extract_text(session.post(answer_path, answer_body))
                 except Exception as error:  # noqa: BLE001 - recorded, not raised
                     row.error = f"answer: {type(error).__name__}: {error}"
+                    row.error_class = classify_error_message(row.error)
                 else:
                     try:
                         context_path, context_body = build_search_request(
                             question, dataset, search_type, top_k, only_context=True
                         )
-                        row.context = extract_text(
-                            post_with_retry(client, context_path, context_body, headers, retries)
-                        )
+                        row.context = extract_text(session.post(context_path, context_body))
                     except Exception as error:  # noqa: BLE001 - recorded, not raised
                         row.error = f"context: {type(error).__name__}: {error}"
+                        row.error_class = classify_error_message(row.error)
                 row.elapsed_seconds = round(time.perf_counter() - started, 3)
                 rows.append(row)
                 if on_row is not None:
@@ -725,6 +850,11 @@ class VerdictRow:
     stance_errors: list[str] = field(default_factory=list)
     notes: str = ""
     error: Optional[str] = None
+    error_class: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.error and not self.error_class:
+            self.error_class = classify_error_message(self.error)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -751,6 +881,7 @@ def verdict_row(row: AnswerRow, verdict: JudgeVerdict) -> VerdictRow:
         stance_errors=list(verdict.stance_errors),
         notes=verdict.notes,
         error=row.error,
+        error_class=row.error_class,
     )
 
 
@@ -808,6 +939,7 @@ class Aggregate:
     dataset: str
     search_type: str
     n: int = 0
+    answered: int = 0
     mean_coverage: Optional[float] = None
     wrong_claims: int = 0
     fabricated_claims: int = 0
@@ -830,6 +962,8 @@ def aggregate(rows: Iterable[VerdictRow]) -> list[Aggregate]:
         bucket.n += 1
         if row.error:
             bucket.errors += 1
+        else:
+            bucket.answered += 1
         if row.coverage is not None:
             coverages[key].append(row.coverage)
         bucket.wrong_claims += len(row.wrong_claims)
@@ -853,29 +987,59 @@ def aggregate_answers_only(rows: Iterable[AnswerRow]) -> list[Aggregate]:
         bucket.n += 1
         if row.error:
             bucket.errors += 1
+        else:
+            bucket.answered += 1
     return list(buckets.values())
+
+
+def error_histogram(rows: Iterable[Any]) -> dict[str, int]:
+    """Count failures by class over answer rows or verdict rows.
+
+    The point of this in the report is triage: 84 rows lost to ``401`` is an
+    expired token and a re-run, 84 lost to ``timeout`` is a server that needs
+    more time or less load. The first live run could not tell you which without
+    grepping the JSONL.
+    """
+    counts = {name: 0 for name in ERROR_CLASSES}
+    for row in rows:
+        error = getattr(row, "error", None)
+        if not error:
+            continue
+        name = getattr(row, "error_class", None) or classify_error_message(error)
+        counts[name] = counts.get(name, 0) + 1
+    return {name: count for name, count in counts.items() if count}
 
 
 def _format_coverage(value: Optional[float]) -> str:
     return "-" if value is None else f"{value * 100:.1f}%"
 
 
-def render_report(aggregates: Sequence[Aggregate], title: str = "Recall evaluation") -> str:
-    """One markdown table, one row per dataset x search type."""
+def render_report(
+    aggregates: Sequence[Aggregate],
+    title: str = "Recall evaluation",
+    error_histogram: Optional[dict] = None,
+) -> str:
+    """One markdown table, one row per dataset x search type, plus error triage.
+
+    ``answered`` sits next to ``n`` deliberately: the first live run's report
+    showed plausible-looking rows while every single cell had failed, because a
+    run with no answers and a run with no gold facts both render coverage as
+    ``-``. With ``answered`` the difference is the second column.
+    """
     lines = [f"# {title}", ""]
     if not aggregates:
         lines.append("_No results._")
         return "\n".join(lines) + "\n"
 
     header = (
-        "| dataset | search type | n | mean coverage | wrong claims | "
+        "| dataset | search type | n | answered | mean coverage | wrong claims | "
         "fabricated claims | stance errors | errors |"
     )
     lines.append(header)
-    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for item in aggregates:
         lines.append(
-            f"| {item.dataset} | {item.search_type} | {item.n} | "
+            f"| {item.dataset} | {item.search_type} | {item.n} | {item.answered} | "
             f"{_format_coverage(item.mean_coverage)} | {item.wrong_claims} | "
             f"{item.fabricated_claims} | {item.stance_errors} | {item.errors} |"
         )
@@ -884,6 +1048,24 @@ def render_report(aggregates: Sequence[Aggregate], title: str = "Recall evaluati
         "Coverage is the mean over graded questions of "
         "covered / (covered + missed) gold facts. Claim counts are totals, not rates."
     )
+    if error_histogram:
+        lines.append("")
+        lines.append("## Errors by class")
+        lines.append("")
+        lines.append("| class | rows |")
+        lines.append("| --- | ---: |")
+        for name in ERROR_CLASSES:
+            if error_histogram.get(name):
+                lines.append(f"| {name} | {error_histogram[name]} |")
+        for name, count in error_histogram.items():
+            if name not in ERROR_CLASSES and count:
+                lines.append(f"| {name} | {count} |")
+        lines.append("")
+        lines.append(
+            "`401` means the token expired - re-run those rows with --resume. "
+            "`timeout` and `5xx` mean the server was slow or saturated: raise "
+            "--timeout, or slow the harness down with --pause-seconds."
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -941,6 +1123,84 @@ def format_spot_check(rows: Sequence[VerdictRow], questions: Sequence[Question])
 # --------------------------------------------------------------------------------------
 # Run directory I/O
 # --------------------------------------------------------------------------------------
+
+
+def rows_needing_answers(rows: Sequence[AnswerRow]) -> list[AnswerRow]:
+    """The rows a ``--resume`` should ask the server again: exactly the failed ones."""
+    return [row for row in rows if row.error]
+
+
+def merge_answer_rows(existing: Sequence[AnswerRow], fresh: Sequence[AnswerRow]) -> list[AnswerRow]:
+    """Replace each re-answered cell in place, keeping the original run's order.
+
+    In place rather than appended so ``answers.jsonl`` after a resume is still one
+    row per cell in the order the matrix was run - a resumed run and a clean run
+    produce the same file shape, and nothing downstream has to know a resume
+    happened.
+    """
+    replacements = {row_key(row): row for row in fresh}
+    return [replacements.get(row_key(row), row) for row in existing]
+
+
+def merge_verdict_rows(
+    existing: Sequence[VerdictRow],
+    fresh: Sequence[VerdictRow],
+    order: Sequence[AnswerRow],
+) -> list[VerdictRow]:
+    """Overlay fresh verdicts on old ones, ordered to match ``order``.
+
+    A cell with neither an old nor a new verdict is left out rather than faked:
+    a placeholder would be counted in ``n`` and silently drag the coverage mean.
+    """
+    by_key: dict[tuple[str, str, str], VerdictRow] = {row_key(row): row for row in existing}
+    by_key.update({row_key(row): row for row in fresh})
+    merged: list[VerdictRow] = []
+    for answer in order:
+        found = by_key.get(row_key(answer))
+        if found is not None:
+            merged.append(found)
+    return merged
+
+
+def rows_needing_verdicts(
+    answers: Sequence[AnswerRow],
+    existing: Sequence[VerdictRow],
+    reanswered: Sequence[AnswerRow] = (),
+) -> list[AnswerRow]:
+    """Which answer rows the judge still has to look at on a resume.
+
+    Two kinds: the cells just re-answered (their old verdict graded an error) and
+    the cells that were never graded at all - a run finished with ``--no-judge``,
+    or interrupted. A successful row that already has a verdict is never sent to
+    the judge again, so a resume costs only the calls it has to make.
+    """
+    # A verdict that carries an error graded nothing - treat it as a hole, not a
+    # grade, or a resume could never repair a run whose judging failed wholesale.
+    judged = {row_key(row) for row in existing if not row.error}
+    present = {row_key(row) for row in existing}
+    redo = {row_key(row) for row in reanswered}
+
+    pending: list[AnswerRow] = []
+    for row in answers:
+        if row.error:
+            # Still no answer, so nothing to grade. Passed through only when the
+            # cell has no verdict row at all, so the report still counts it;
+            # ``run_judge`` makes no LLM call for a failed row.
+            if row_key(row) not in present:
+                pending.append(row)
+        elif row_key(row) in redo or row_key(row) not in judged:
+            pending.append(row)
+    return pending
+
+
+def backup_file(path: str | Path, suffix: str = ".bak") -> Optional[Path]:
+    """Copy ``path`` aside before it is overwritten. Returns the backup, if any."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    backup = path.with_name(path.name + suffix)
+    backup.write_bytes(path.read_bytes())
+    return backup
 
 
 def default_run_directory(root: str | Path) -> Path:

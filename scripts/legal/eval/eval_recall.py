@@ -85,7 +85,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=float,
         default=lib.DEFAULT_TIMEOUT_SECONDS,
-        help="HTTP timeout in seconds (searches are slow).",
+        help=(
+            "HTTP timeout in seconds (default 600). Efficiency is not a goal here: "
+            "a graph search under load can take minutes, and a slow answer is data "
+            "while a timed-out one is a hole in the table."
+        ),
+    )
+    parser.add_argument(
+        "--pause-seconds",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help="Sleep this long between requests, to keep load off a shared server.",
     )
     parser.add_argument(
         "--out",
@@ -101,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="RUN_DIR",
         help="Re-judge the answers.jsonl of an existing run directory; makes no search calls.",
+    )
+    parser.add_argument(
+        "--resume",
+        default=None,
+        metavar="RUN_DIR",
+        help=(
+            "Re-run only the rows of that run's answers.jsonl that carry an error, "
+            "merge them back in place, and judge only what changed. Successful rows "
+            "and their verdicts are never re-run."
+        ),
     )
     parser.add_argument(
         "--spot-check",
@@ -140,6 +161,95 @@ def _validate_only(paths: list[str]) -> int:
     return 1 if failed else 0
 
 
+def _histogram_line(histogram: dict) -> str:
+    return ", ".join(f"{name}={count}" for name, count in histogram.items()) or "no errors"
+
+
+def _load_answers(directory: Path):
+    answers_path = directory / lib.ANSWERS_FILENAME
+    if not answers_path.exists():
+        print(f"No {lib.ANSWERS_FILENAME} in {directory}", file=sys.stderr)
+        return None
+    return [lib.AnswerRow.from_dict(row) for row in lib.read_jsonl(answers_path)]
+
+
+def _write_answers(directory: Path, rows, backup: bool) -> None:
+    path = directory / lib.ANSWERS_FILENAME
+    if backup:
+        saved = lib.backup_file(path)
+        if saved is not None:
+            _progress(f"Backed up {path.name} to {saved.name}")
+    lib.write_jsonl(path, rows)
+    _progress(f"Wrote {path}")
+
+
+def _open_session(args) -> tuple:
+    """Build a logged-in session. Returns ``(session, client)``; the caller closes."""
+    username, password = lib.credentials_from_environment()
+    client = lib.HttpxClient(base_url=args.base_url, timeout=args.timeout)
+    session = lib.AuthenticatedSession(client, username, password, pause_seconds=args.pause_seconds)
+    session.authenticate()
+    _progress(f"Logged in as {username} at {args.base_url}")
+    return session, client
+
+
+def _progress_reporter(total: int):
+    state = {"done": 0}
+
+    def report(row: lib.AnswerRow) -> None:
+        state["done"] += 1
+        status = f"ERROR[{row.error_class}]" if row.error else f"{row.elapsed_seconds:.1f}s"
+        _progress(
+            f"[{state['done']}/{total}] {row.dataset} / {row.search_type} / "
+            f"{row.question_id}: {status}"
+        )
+
+    return report
+
+
+def _run_matrix(args, questions, datasets, search_types) -> list:
+    session, client = _open_session(args)
+    total = len(datasets) * len(search_types) * len(questions)
+    try:
+        rows = lib.run_answers(
+            session,
+            questions=questions,
+            datasets=datasets,
+            search_types=search_types,
+            top_k=args.top_k,
+            on_row=_progress_reporter(total),
+        )
+    finally:
+        client.close()
+    if session.login_count > 1:
+        _progress(f"Re-authenticated {session.login_count - 1} time(s) during the run")
+    return rows
+
+
+def _answer_rows(args, failed, by_id) -> list:
+    """Re-answer exactly the failed cells, one at a time, preserving their top_k."""
+    session, client = _open_session(args)
+    report = _progress_reporter(len(failed))
+    rows = []
+    try:
+        for row in failed:
+            question = by_id[row.question_id]
+            fresh = lib.run_answers(
+                session,
+                questions=[question],
+                datasets=[row.dataset],
+                search_types=[row.search_type],
+                top_k=row.top_k or args.top_k,
+                on_row=report,
+            )
+            rows.extend(fresh)
+    finally:
+        client.close()
+    if session.login_count > 1:
+        _progress(f"Re-authenticated {session.login_count - 1} time(s) during the resume")
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -162,14 +272,57 @@ def main(argv: list[str] | None = None) -> int:
         print("No questions to run.", file=sys.stderr)
         return 1
 
+    if args.judge_only and args.resume:
+        parser.error("--judge-only and --resume are mutually exclusive")
+
+    existing_verdicts: list[lib.VerdictRow] = []
+    reanswered: list[lib.AnswerRow] = []
+
     if args.judge_only:
-        run_directory = Path(args.judge_only)
-        answers_path = run_directory / lib.ANSWERS_FILENAME
-        if not answers_path.exists():
-            print(f"No {lib.ANSWERS_FILENAME} in {run_directory}", file=sys.stderr)
+        source_directory = Path(args.judge_only)
+        answer_rows = _load_answers(source_directory)
+        if answer_rows is None:
             return 1
-        answer_rows = [lib.AnswerRow.from_dict(row) for row in lib.read_jsonl(answers_path)]
-        _progress(f"Re-judging {len(answer_rows)} saved answer(s) from {run_directory}")
+        run_directory = Path(args.out) if args.out else source_directory
+        run_directory.mkdir(parents=True, exist_ok=True)
+        _progress(f"Re-judging {len(answer_rows)} saved answer(s) from {source_directory}")
+
+    elif args.resume:
+        source_directory = Path(args.resume)
+        previous = _load_answers(source_directory)
+        if previous is None:
+            return 1
+        run_directory = Path(args.out) if args.out else source_directory
+        run_directory.mkdir(parents=True, exist_ok=True)
+
+        failed = lib.rows_needing_answers(previous)
+        _progress(
+            f"Resuming {source_directory}: {len(failed)} of {len(previous)} row(s) to re-answer "
+            f"({_histogram_line(lib.error_histogram(previous))})"
+        )
+        if not failed:
+            _progress("Nothing to resume: every row already has an answer.")
+
+        by_id = {question.id: question for question in questions}
+        missing = sorted({row.question_id for row in failed if row.question_id not in by_id})
+        if missing:
+            print(
+                "Cannot resume: no question definition for " + ", ".join(missing),
+                file=sys.stderr,
+            )
+            return 1
+
+        reanswered = _answer_rows(args, failed, by_id) if failed else []
+        answer_rows = lib.merge_answer_rows(previous, reanswered)
+
+        verdicts_path = source_directory / lib.VERDICTS_FILENAME
+        if verdicts_path.exists():
+            existing_verdicts = [
+                lib.VerdictRow.from_dict(row) for row in lib.read_jsonl(verdicts_path)
+            ]
+
+        _write_answers(run_directory, answer_rows, backup=run_directory == source_directory)
+
     else:
         datasets = [name.strip() for name in args.datasets.split(",") if name.strip()]
         if not datasets:
@@ -183,55 +336,45 @@ def main(argv: list[str] | None = None) -> int:
         run_directory = Path(args.out) if args.out else lib.default_run_directory(DEFAULT_RUNS_ROOT)
         run_directory.mkdir(parents=True, exist_ok=True)
 
-        username, password = lib.credentials_from_environment()
-        client = lib.HttpxClient(base_url=args.base_url, timeout=args.timeout)
-        total = len(datasets) * len(search_types) * len(questions)
-        done = 0
-
-        def report_row(row: lib.AnswerRow) -> None:
-            nonlocal done
-            done += 1
-            status = "ERROR" if row.error else f"{row.elapsed_seconds:.1f}s"
-            _progress(
-                f"[{done}/{total}] {row.dataset} / {row.search_type} / {row.question_id}: {status}"
-            )
-
-        try:
-            token = lib.login(client, username, password)
-            _progress(f"Logged in as {username} at {args.base_url}")
-            answer_rows = lib.run_answers(
-                client,
-                token=token,
-                questions=questions,
-                datasets=datasets,
-                search_types=search_types,
-                top_k=args.top_k,
-                on_row=report_row,
-            )
-        finally:
-            client.close()
-
-        lib.write_jsonl(run_directory / lib.ANSWERS_FILENAME, answer_rows)
-        _progress(f"Wrote {run_directory / lib.ANSWERS_FILENAME}")
+        answer_rows = _run_matrix(args, questions, datasets, search_types)
+        _write_answers(run_directory, answer_rows, backup=False)
 
     if args.no_judge:
         aggregates = lib.aggregate_answers_only(answer_rows)
         verdict_rows: list[lib.VerdictRow] = []
+        histogram = lib.error_histogram(answer_rows)
     else:
         lib.configure_llm_environment()
+        if args.resume:
+            pending = lib.rows_needing_verdicts(answer_rows, existing_verdicts, reanswered)
+            _progress(
+                f"Judging {len(pending)} of {len(answer_rows)} row(s); "
+                f"{len(answer_rows) - len(pending)} already graded"
+            )
+        else:
+            pending = list(answer_rows)
         judged = 0
 
         def report_verdict(row: lib.VerdictRow) -> None:
             nonlocal judged
             judged += 1
-            _progress(f"[judge {judged}/{len(answer_rows)}] {row.question_id} ({row.search_type})")
+            _progress(f"[judge {judged}/{len(pending)}] {row.question_id} ({row.search_type})")
 
-        verdict_rows = asyncio.run(lib.run_judge(answer_rows, questions, on_row=report_verdict))
+        fresh = asyncio.run(lib.run_judge(pending, questions, on_row=report_verdict))
+        verdict_rows = lib.merge_verdict_rows(existing_verdicts, fresh, answer_rows)
+        backup = args.resume and run_directory == Path(args.resume)
+        if backup:
+            lib.backup_file(run_directory / lib.VERDICTS_FILENAME)
         lib.write_jsonl(run_directory / lib.VERDICTS_FILENAME, verdict_rows)
         _progress(f"Wrote {run_directory / lib.VERDICTS_FILENAME}")
         aggregates = lib.aggregate(verdict_rows)
+        histogram = lib.error_histogram(verdict_rows)
 
-    report = lib.render_report(aggregates, title=f"Recall evaluation - {run_directory.name}")
+    report = lib.render_report(
+        aggregates,
+        title=f"Recall evaluation - {run_directory.name}",
+        error_histogram=histogram,
+    )
     (run_directory / lib.REPORT_FILENAME).write_text(report, encoding="utf-8")
     print(report)
 

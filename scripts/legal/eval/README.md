@@ -89,8 +89,13 @@ Credentials come from `COGNEE_EVAL_USER` / `COGNEE_EVAL_PASSWORD` and default to
 the local stack's `default_user@example.com` / `default_password`. Neither the
 password nor the bearer token is printed or written to the run directory.
 
-The judge calls go through `LLMGateway`, so it uses whatever `LLM_API_KEY`
-(falling back to `OPENAI_API_KEY`) the other `scripts/legal/*.py` use.
+The judge calls go through `LLMGateway`, so it uses whatever `LLM_API_KEY` the
+server-side configuration uses; `OPENAI_API_KEY` is mapped onto it when set. The
+harness never exports an *empty* `LLM_API_KEY` - an empty environment variable
+beats the value in `.env` and makes cognee raise `LLMAPIKeyNotSetError`, which is
+how the first live run answered 77 questions and graded none of them. If every
+verdict comes back as `judge: LLMAPIKeyNotSetError`, the key is missing from the
+environment and from `.env`; fix it and `--resume` the run.
 
 ### Flags
 
@@ -102,10 +107,12 @@ The judge calls go through `LLMGateway`, so it uses whatever `LLM_API_KEY`
 | `--top-k N` | `15` | `top_k` per search. |
 | `--limit N` | all | Only the first N questions - use it for a smoke run. |
 | `--base-url URL` | `http://127.0.0.1:8011` | The running server. |
-| `--timeout SECONDS` | `180` | HTTP timeout; searches are slow. |
+| `--timeout SECONDS` | `600` | HTTP timeout. See "Long runs" below. |
+| `--pause-seconds FLOAT` | `0` | Sleep between requests, to keep load off a shared server. |
 | `--out DIR` | `runs/<UTC timestamp>` | Run directory. |
 | `--no-judge` | off | Answers only; no LLM calls, no verdicts. |
 | `--judge-only RUN_DIR` | - | Re-grade a finished run's `answers.jsonl`; no search calls. |
+| `--resume RUN_DIR` | - | Re-run only that run's failed rows; re-judge only what changed. |
 | `--spot-check 0.2` | `0` | Print a seeded sample of verdicts for hand review. |
 | `--seed N` | `0` | Seed for that sample. |
 | `--validate-only` | off | Validate the question files and exit. |
@@ -114,8 +121,46 @@ The judge calls go through `LLMGateway`, so it uses whatever `LLM_API_KEY`
 `search_type: null` and lets the router choose. Everything else posts to
 `/api/v1/search` with the type pinned.
 
-A failed cell is recorded as a row with `error` and the run continues; transient
-failures (timeout, connection, 5xx) get one retry first.
+A failed cell is recorded as a row with `error` and the run continues.
+
+## Long runs on a shared server
+
+The first live run lost 94 of 171 rows, and the three ways it failed are the
+three things the harness now handles:
+
+- **The token expired** about an hour in and every row after that was a 401. A
+  401 is now treated as "log in again and replay this request once"; only a
+  second 401 with a fresh token is a real failure. The run reports how many times
+  it had to re-authenticate.
+- **The server timed out** on `HYBRID_COMPLETION` over a 5k-node graph. `--timeout`
+  now defaults to **600 s**. Efficiency is explicitly not a goal of this
+  evaluation: a slow answer is data, a timed-out answer is a hole in the table.
+- **The server returned 500s** from its session-cache connection pool while the UI
+  and the memory plugin were also hitting it. Transient failures (timeouts,
+  connection errors, 5xx) now get up to **three attempts** with exponential
+  jittered backoff (about 2 s then 8 s), and `--pause-seconds` slows the whole
+  harness down so a long run does not saturate a server other people are using.
+  `--pause-seconds 2` is a reasonable default when someone else is on the box.
+
+Everything else (4xx other than 401) is still permanent and fails the row
+immediately.
+
+### Resuming a partial run
+
+```bash
+python scripts/legal/eval/eval_recall.py \
+    --questions scripts/legal/eval/adams_questions.json \
+    --resume scripts/legal/eval/runs/20260916T101500Z \
+    --pause-seconds 2
+```
+
+`--resume` re-runs **only** the rows carrying an error, at the same
+dataset / search type / question / `top_k`, merges them back in place, and then
+judges only what changed: the rows it just re-answered, plus any row that was
+never graded or whose verdict is itself an error (a `judge:` error graded
+nothing, so it is a hole, not a grade). Successful rows and their verdicts are
+never re-run. `answers.jsonl` and `verdicts.jsonl` are copied to `.bak` before
+being overwritten; pass `--out` to write the merged run somewhere else instead.
 
 ### Reading the output
 
@@ -124,6 +169,7 @@ failures (timeout, connection, 5xx) get one retry first.
 | column | meaning |
 | --- | --- |
 | `n` | cells attempted |
+| `answered` | cells that came back without an error - check this first |
 | `mean coverage` | mean over graded questions of `covered / (covered + missed)` gold facts |
 | `wrong claims` | total claims contradicting a gold fact or the retrieved context |
 | `fabricated claims` | total specific claims supported by neither context nor gold facts (includes every triggered `must_not_claim`) |
@@ -131,6 +177,19 @@ failures (timeout, connection, 5xx) get one retry first.
 | `errors` | cells that failed to answer or to grade |
 
 Counts are totals, not rates - compare them at equal `n`.
+
+Read `answered` before anything else. A run where every cell failed and a run
+with no gold facts both render coverage as `-`, and the first live run's report
+looked plausible while not a single row had succeeded.
+
+Under the table is an error histogram by class:
+
+| class | what to do |
+| --- | --- |
+| `401` | the token expired mid-run - `--resume` the run |
+| `timeout` | raise `--timeout`, or `--pause-seconds` to reduce load |
+| `5xx` | the server was saturated - `--pause-seconds`, then `--resume` |
+| `other` | read the `error` field in `answers.jsonl` |
 
 `--spot-check 0.2` prints a seeded 20% of verdicts with question, gold facts,
 answer and verdict. Read them. The judge is an LLM and a coverage number you

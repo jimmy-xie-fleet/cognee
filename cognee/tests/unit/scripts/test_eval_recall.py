@@ -73,6 +73,19 @@ def make_question(question_id="adams-01", must_not_claim=()):
     )
 
 
+def make_session(client, **overrides):
+    """A session over a fake client with the clock stubbed out."""
+    slept = overrides.pop("slept", None)
+    if slept is None:
+        slept = []
+    overrides.setdefault("sleep", slept.append)
+    overrides.setdefault("jitter", 0.0)
+    session = lib.AuthenticatedSession(client, "user@example.com", "hunter2", **overrides)
+    session.slept = slept
+    session.authenticate()
+    return session
+
+
 class FakeClient:
     """Records every call and replays canned responses (or raises)."""
 
@@ -80,8 +93,18 @@ class FakeClient:
         self.calls = []
         self._responder = responder or (lambda path, body: [{"search_result": ["ok"]}])
 
+    @property
+    def login_calls(self):
+        return [call for call in self.calls if call["path"] == lib.LOGIN_PATH]
+
+    @property
+    def search_calls(self):
+        return [call for call in self.calls if call["path"] != lib.LOGIN_PATH]
+
     def post(self, path, *, json=None, data=None, headers=None):
         self.calls.append({"path": path, "json": json, "data": data, "headers": headers})
+        if path == lib.LOGIN_PATH:
+            return {"access_token": f"token-{len(self.login_calls) - 1}", "token_type": "bearer"}
         result = self._responder(path, json if json is not None else data)
         if isinstance(result, BaseException):
             raise result
@@ -166,15 +189,14 @@ def test_auto_search_type_posts_to_recall_with_null_search_type():
     client = FakeClient()
 
     rows = lib.run_answers(
-        client,
-        token="t",
+        make_session(client),
         questions=[make_question()],
         datasets=["adams"],
         search_types=[lib.AUTO_SEARCH_TYPE],
     )
 
-    assert [call["path"] for call in client.calls] == ["/api/v1/recall", "/api/v1/recall"]
-    first_body = client.calls[0]["json"]
+    assert [call["path"] for call in client.search_calls] == ["/api/v1/recall", "/api/v1/recall"]
+    first_body = client.search_calls[0]["json"]
     assert "search_type" in first_body and first_body["search_type"] is None
     assert first_body["datasets"] == ["adams"]
     assert rows[0].error is None
@@ -184,15 +206,14 @@ def test_pinned_search_type_posts_to_search():
     client = FakeClient()
 
     lib.run_answers(
-        client,
-        token="t",
+        make_session(client),
         questions=[make_question()],
         datasets=["adams"],
         search_types=["GRAPH_COMPLETION"],
     )
 
-    assert {call["path"] for call in client.calls} == {"/api/v1/search"}
-    assert client.calls[0]["json"]["search_type"] == "GRAPH_COMPLETION"
+    assert {call["path"] for call in client.search_calls} == {"/api/v1/search"}
+    assert client.search_calls[0]["json"]["search_type"] == "GRAPH_COMPLETION"
 
 
 def test_each_question_makes_an_answer_call_and_a_context_call():
@@ -201,22 +222,22 @@ def test_each_question_makes_an_answer_call_and_a_context_call():
 
     client = FakeClient(responder)
 
+    session = make_session(client)
     rows = lib.run_answers(
-        client,
-        token="token-value",
+        session,
         questions=[make_question()],
         datasets=["adams"],
         search_types=["HYBRID_COMPLETION"],
         top_k=7,
     )
 
-    assert len(client.calls) == 2
-    answer_call, context_call = client.calls
+    assert len(client.search_calls) == 2
+    answer_call, context_call = client.search_calls
     assert "only_context" not in answer_call["json"]
     assert answer_call["json"]["top_k"] == 7
     assert context_call["json"]["only_context"] is True
     assert context_call["json"]["context_format"] == "context"
-    assert answer_call["headers"] == {"Authorization": "Bearer token-value"}
+    assert answer_call["headers"] == {"Authorization": f"Bearer {session.token}"}
     assert rows[0].answer == "answer text"
     assert rows[0].context == "context text"
 
@@ -231,8 +252,7 @@ def test_transport_error_becomes_an_error_row_rather_than_an_exception():
     client = FakeClient(lambda path, body: lib.TransientHttpError("connection refused"))
 
     rows = lib.run_answers(
-        client,
-        token="t",
+        make_session(client),
         questions=[make_question()],
         datasets=["adams"],
         search_types=["HYBRID_COMPLETION"],
@@ -242,8 +262,8 @@ def test_transport_error_becomes_an_error_row_rather_than_an_exception():
     assert rows[0].error is not None
     assert "connection refused" in rows[0].error
     assert rows[0].answer == ""
-    # one original attempt plus exactly one retry
-    assert len(client.calls) == 2
+    # the default policy is three attempts in total
+    assert len(client.search_calls) == 3
 
 
 def test_a_transient_failure_is_retried_once_and_then_succeeds():
@@ -258,8 +278,7 @@ def test_a_transient_failure_is_retried_once_and_then_succeeds():
     client = FakeClient(responder)
 
     rows = lib.run_answers(
-        client,
-        token="t",
+        make_session(client),
         questions=[make_question()],
         datasets=["adams"],
         search_types=["HYBRID_COMPLETION"],
@@ -273,23 +292,22 @@ def test_a_permanent_failure_is_not_retried():
     client = FakeClient(lambda path, body: lib.HttpError("HTTP 403: forbidden"))
 
     rows = lib.run_answers(
-        client,
-        token="t",
+        make_session(client),
         questions=[make_question()],
         datasets=["adams"],
         search_types=["HYBRID_COMPLETION"],
     )
 
     assert "403" in rows[0].error
-    assert len(client.calls) == 1
+    assert len(client.search_calls) == 1
 
 
 def test_login_returns_the_token_from_the_form_post():
-    client = FakeClient(lambda path, body: {"access_token": "abc", "token_type": "bearer"})
+    client = FakeClient()
 
     token = lib.login(client, "user@example.com", "hunter2")
 
-    assert token == "abc"
+    assert token == "token-0"
     assert client.calls[0]["path"] == "/api/v1/auth/login"
     assert client.calls[0]["data"] == {"username": "user@example.com", "password": "hunter2"}
     assert client.calls[0]["json"] is None
@@ -490,9 +508,9 @@ def test_report_table_renders_every_bucket():
     report = lib.render_report(aggregates, title="Run 1")
 
     assert "# Run 1" in report
-    assert "| dataset | search type | n | mean coverage |" in report
-    assert "| adams | HYBRID_COMPLETION | 1 | 75.0% | 0 | 0 | 0 | 0 |" in report
-    assert "| adams | AUTO | 1 | 0.0% | 0 | 0 | 0 | 1 |" in report
+    assert "| dataset | search type | n | answered | mean coverage |" in report
+    assert "| adams | HYBRID_COMPLETION | 1 | 1 | 75.0% | 0 | 0 | 0 | 0 |" in report
+    assert "| adams | AUTO | 1 | 0 | 0.0% | 0 | 0 | 0 | 1 |" in report
 
 
 def test_report_handles_no_results():
@@ -583,3 +601,383 @@ def test_neither_module_imports_cognee_at_module_scope():
             if line.startswith(("import cognee", "from cognee"))
         ]
         assert top_level == [], f"{path.name} imports cognee at module scope: {top_level}"
+
+
+# ---------------------------------------------------------------------------
+# live-run hardening: auth expiry, backoff, pacing
+# ---------------------------------------------------------------------------
+
+
+def responder_sequence(*results):
+    """Replay ``results`` in order for non-login calls, repeating the last one."""
+    state = {"index": 0}
+
+    def responder(path, body):
+        index = min(state["index"], len(results) - 1)
+        state["index"] += 1
+        return results[index]
+
+    return responder
+
+
+def test_a_401_triggers_one_relogin_and_the_request_succeeds():
+    client = FakeClient(
+        responder_sequence(lib.AuthError("HTTP 401: Unauthorized"), [{"search_result": ["fine"]}])
+    )
+    session = make_session(client)
+
+    result = session.post("/api/v1/search", {"query": "q"})
+
+    assert lib.extract_text(result) == "fine"
+    # the initial login plus exactly one re-login
+    assert len(client.login_calls) == 2
+    stale, refreshed = client.search_calls
+    assert stale["headers"] != refreshed["headers"]
+    assert refreshed["headers"] == {"Authorization": f"Bearer {session.token}"}
+
+
+def test_a_second_401_after_relogin_becomes_an_error_row():
+    client = FakeClient(lambda path, body: lib.AuthError('HTTP 401: {"detail":"Unauthorized"}'))
+
+    rows = lib.run_answers(
+        make_session(client),
+        questions=[make_question()],
+        datasets=["adams"],
+        search_types=["HYBRID_COMPLETION"],
+    )
+
+    assert rows[0].error is not None
+    assert "401" in rows[0].error
+    assert rows[0].error_class == "401"
+    # one stale attempt plus one with the fresh token, and no further flailing
+    assert len(client.search_calls) == 2
+    assert len(client.login_calls) == 2
+
+
+def test_a_401_does_not_consume_the_transient_retry_budget():
+    client = FakeClient(
+        responder_sequence(
+            lib.AuthError("HTTP 401: Unauthorized"),
+            lib.TransientHttpError("ReadTimeout: timed out"),
+            lib.TransientHttpError("ReadTimeout: timed out"),
+            [{"search_result": ["recovered"]}],
+        )
+    )
+    session = make_session(client)
+
+    assert lib.extract_text(session.post("/api/v1/search", {"query": "q"})) == "recovered"
+
+
+def test_a_timeout_is_retried_three_times_then_recorded_with_its_class():
+    client = FakeClient(lambda path, body: lib.TransientHttpError("ReadTimeout: timed out"))
+    session = make_session(client)
+
+    rows = lib.run_answers(
+        session,
+        questions=[make_question()],
+        datasets=["adams"],
+        search_types=["HYBRID_COMPLETION"],
+    )
+
+    assert len(client.search_calls) == 3
+    assert rows[0].error_class == "timeout"
+    assert "timed out" in rows[0].error
+
+
+def test_a_500_then_200_succeeds_on_the_second_attempt():
+    client = FakeClient(
+        responder_sequence(
+            lib.TransientHttpError("HTTP 500: Internal Server Error"),
+            [{"search_result": ["second time lucky"]}],
+        )
+    )
+
+    rows = lib.run_answers(
+        make_session(client),
+        questions=[make_question()],
+        datasets=["adams"],
+        search_types=["HYBRID_COMPLETION"],
+    )
+
+    assert rows[0].error is None
+    assert rows[0].answer == "second time lucky"
+
+
+def test_backoff_is_exponential_jittered_and_injected():
+    client = FakeClient(lambda path, body: lib.TransientHttpError("HTTP 503: unavailable"))
+    slept = []
+    session = make_session(client, slept=slept, jitter=0.5, rng=__import__("random").Random(1))
+
+    with pytest.raises(lib.TransientHttpError):
+        session.post("/api/v1/search", {"query": "q"})
+
+    # two sleeps for three attempts, growing, each within the jitter band
+    assert len(slept) == 2
+    assert slept[0] < slept[1]
+    assert 2.0 <= slept[0] <= 3.0
+    assert 8.0 <= slept[1] <= 12.0
+
+
+def test_pause_seconds_sleeps_between_consecutive_requests():
+    client = FakeClient()
+    slept = []
+    session = make_session(client, slept=slept, pause_seconds=1.5)
+    slept.clear()  # ignore anything the initial authenticate did
+
+    lib.run_answers(
+        session,
+        questions=[make_question()],
+        datasets=["adams"],
+        search_types=["HYBRID_COMPLETION"],
+    )
+
+    # two requests, one pause between them
+    assert slept == [1.5]
+
+
+def test_error_classes_are_derived_from_the_message():
+    assert (
+        lib.classify_error_message('answer: HttpError: HTTP 401: {"detail":"Unauthorized"}')
+        == "401"
+    )
+    assert (
+        lib.classify_error_message("answer: TransientHttpError: ReadTimeout: timed out")
+        == "timeout"
+    )
+    assert (
+        lib.classify_error_message("answer: TransientHttpError: HTTP 500: Internal Server Error")
+        == "5xx"
+    )
+    assert lib.classify_error_message("answer: HttpError: HTTP 403: forbidden") == "other"
+    assert lib.classify_error_message("") == ""
+
+
+def test_a_row_loaded_without_an_error_class_is_classified_on_the_way_in():
+    row = lib.AnswerRow.from_dict(
+        {
+            "dataset": "adams",
+            "search_type": "HYBRID_COMPLETION",
+            "question_id": "q1",
+            "category": "disputes",
+            "question": "q",
+            "error": "answer: TransientHttpError: ReadTimeout: timed out",
+        }
+    )
+
+    assert row.error_class == "timeout"
+
+
+# ---------------------------------------------------------------------------
+# resume
+# ---------------------------------------------------------------------------
+
+
+def answer_row(question_id, error=None, answer="kept"):
+    return lib.AnswerRow(
+        dataset="adams",
+        search_type="HYBRID_COMPLETION",
+        question_id=question_id,
+        category="disputes",
+        question="q",
+        answer="" if error else answer,
+        error=error,
+    )
+
+
+def test_resume_reruns_only_the_error_rows(tmp_path):
+    existing = [
+        answer_row("q1"),
+        answer_row("q2", error="answer: TransientHttpError: ReadTimeout: timed out"),
+        answer_row("q3"),
+    ]
+    lib.write_jsonl(tmp_path / lib.ANSWERS_FILENAME, existing)
+    client = FakeClient(lambda path, body: [{"search_result": ["repaired"]}])
+
+    reloaded = [
+        lib.AnswerRow.from_dict(row) for row in lib.read_jsonl(tmp_path / lib.ANSWERS_FILENAME)
+    ]
+    failed = lib.rows_needing_answers(reloaded)
+    assert [row.question_id for row in failed] == ["q2"]
+
+    fresh = lib.run_answers(
+        make_session(client),
+        questions=[make_question("q2")],
+        datasets=["adams"],
+        search_types=["HYBRID_COMPLETION"],
+    )
+    merged = lib.merge_answer_rows(reloaded, fresh)
+
+    assert [row.question_id for row in merged] == ["q1", "q2", "q3"]
+    assert merged[0].answer == "kept" and merged[2].answer == "kept"
+    assert merged[1].answer == "repaired"
+    assert merged[1].error is None
+    # only the failed cell was asked again: two calls, not six
+    assert len(client.search_calls) == 2
+
+
+def test_resume_preserves_the_verdicts_of_rows_it_did_not_rerun():
+    existing_verdicts = [
+        verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], []),
+        verdict("adams", "HYBRID_COMPLETION", "q2", [], ["a"], error="answer: boom"),
+    ]
+    fresh_verdicts = [verdict("adams", "HYBRID_COMPLETION", "q2", ["a"], [])]
+    order = [answer_row("q1"), answer_row("q2")]
+
+    merged = lib.merge_verdict_rows(existing_verdicts, fresh_verdicts, order)
+
+    assert [row.question_id for row in merged] == ["q1", "q2"]
+    assert merged[0] is existing_verdicts[0]  # untouched, not re-judged
+    assert merged[1].coverage == pytest.approx(1.0)
+    assert merged[1].error is None
+
+
+def test_resume_judges_rows_that_were_never_judged():
+    answers = [answer_row("q1"), answer_row("q2")]
+    already_judged = [verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], [])]
+
+    pending = lib.rows_needing_verdicts(answers, already_judged, reanswered=[])
+
+    assert [row.question_id for row in pending] == ["q2"]
+
+
+def test_resume_rejudges_a_row_it_reanswered():
+    answers = [answer_row("q1"), answer_row("q2")]
+    already_judged = [
+        verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], []),
+        verdict("adams", "HYBRID_COMPLETION", "q2", [], ["a"], error="answer: boom"),
+    ]
+
+    pending = lib.rows_needing_verdicts(answers, already_judged, reanswered=[answers[1]])
+
+    assert [row.question_id for row in pending] == ["q2"]
+
+
+# ---------------------------------------------------------------------------
+# report: answered column and error histogram
+# ---------------------------------------------------------------------------
+
+
+def test_report_renders_the_answered_column_and_the_error_histogram():
+    rows = [
+        verdict("adams", "HYBRID_COMPLETION", "q1", ["a", "b", "c"], ["d"]),
+        verdict(
+            "adams",
+            "HYBRID_COMPLETION",
+            "q2",
+            [],
+            [],
+            error='answer: HttpError: HTTP 401: {"detail":"Unauthorized"}',
+        ),
+        verdict(
+            "adams",
+            "AUTO",
+            "q1",
+            [],
+            [],
+            error="answer: TransientHttpError: ReadTimeout: timed out",
+        ),
+    ]
+
+    aggregates = lib.aggregate(rows)
+    report = lib.render_report(aggregates, title="Run 2", error_histogram=lib.error_histogram(rows))
+
+    assert "| dataset | search type | n | answered |" in report
+    assert "| adams | HYBRID_COMPLETION | 2 | 1 |" in report
+    assert "| adams | AUTO | 1 | 0 |" in report
+    assert "401 | 1" in report
+    assert "timeout | 1" in report
+
+
+def test_an_all_error_run_reads_as_zero_answered():
+    rows = [
+        verdict("adams", "HYBRID_COMPLETION", f"q{index}", [], [], error="answer: boom")
+        for index in range(3)
+    ]
+
+    aggregates = lib.aggregate(rows)
+
+    assert aggregates[0].n == 3
+    assert aggregates[0].answered == 0
+    assert aggregates[0].errors == 3
+    assert "| adams | HYBRID_COMPLETION | 3 | 0 |" in lib.render_report(aggregates)
+
+
+# ---------------------------------------------------------------------------
+# the judge environment (the baseline run graded nothing: LLMAPIKeyNotSetError)
+# ---------------------------------------------------------------------------
+
+
+def test_the_env_preamble_never_sets_an_empty_llm_api_key(monkeypatch):
+    """An empty ``LLM_API_KEY`` overrides ``.env`` and makes cognee raise.
+
+    The first live run answered 77 questions and graded none of them for exactly
+    this reason: the preamble copied from the sibling scripts defaulted
+    ``LLM_API_KEY`` to ``os.environ.get("OPENAI_API_KEY", "")``, so with neither
+    variable set it exported the empty string over whatever ``.env`` held.
+    """
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    lib.configure_llm_environment()
+
+    assert "LLM_API_KEY" not in __import__("os").environ
+
+
+def test_the_env_preamble_maps_the_openai_key_when_there_is_one(monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-openai-var")
+
+    lib.configure_llm_environment()
+
+    assert __import__("os").environ["LLM_API_KEY"] == "sk-from-openai-var"
+
+
+def test_the_env_preamble_does_not_clobber_an_existing_llm_api_key(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "sk-already-set")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-openai-var")
+
+    lib.configure_llm_environment()
+
+    assert __import__("os").environ["LLM_API_KEY"] == "sk-already-set"
+
+
+def test_resume_rejudges_a_row_whose_verdict_is_itself_an_error():
+    """A verdict that failed to grade is a hole, not a grade.
+
+    The whole baseline run carries ``judge: LLMAPIKeyNotSetError`` verdicts over
+    perfectly good answers; a resume that treated those as "already judged" could
+    never repair the run.
+    """
+    answers = [answer_row("q1"), answer_row("q2")]
+    already_judged = [
+        verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], []),
+        verdict(
+            "adams",
+            "HYBRID_COMPLETION",
+            "q2",
+            [],
+            [],
+            error="judge: LLMAPIKeyNotSetError: LLM API key is not set.",
+        ),
+    ]
+
+    pending = lib.rows_needing_verdicts(answers, already_judged, reanswered=[])
+
+    assert [row.question_id for row in pending] == ["q2"]
+
+
+def test_resume_does_not_rejudge_a_row_whose_answer_is_still_broken():
+    """No answer, nothing to grade - do not spend a judge call on it."""
+    answers = [answer_row("q1", error="answer: TransientHttpError: ReadTimeout: timed out")]
+    already_judged = [
+        verdict(
+            "adams",
+            "HYBRID_COMPLETION",
+            "q1",
+            [],
+            [],
+            error="answer: TransientHttpError: ReadTimeout: timed out",
+        )
+    ]
+
+    assert lib.rows_needing_verdicts(answers, already_judged, reanswered=[]) == []
