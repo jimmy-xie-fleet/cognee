@@ -372,16 +372,21 @@ def build_tracer_tools(
             ],
         )
         section = _assertion_section(view, registry, "Assertions quoted in the span:", anchored)
+        # The tracer truncates long results; retain qualifications and passage labels
+        # before the potentially large span and assertion list.
         parts = [
-            _span_preview(span_text),
-            "",
-            f"Passages: {', '.join(passages) or '(none)'}",
-            section,
-        ]
-        parts.extend(
             _NOTE_TEXT[note].format(kind=args.kind, value=args.value)
             for note in notes
             if note in _NOTE_TEXT
+        ]
+        parts.extend(
+            [
+                f"Passages: {', '.join(passages) or '(none)'}",
+                "",
+                _span_preview(span_text),
+                "",
+                section,
+            ]
         )
         return "\n".join(parts)
 

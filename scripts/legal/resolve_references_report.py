@@ -6,9 +6,11 @@ phase runs seed retrieval (lexical + vector) and then a budgeted LLM tracer
 for the pass. **A dry run (the default -- no ``--apply``) still runs every trace and
 spends the LLM budget when it is greater than zero.** ``--apply`` only decides whether
 the plan gets written to the graph, not whether the LLM is called. Pass
-``--llm-max-calls 0`` for a zero-spend estimate: the pass then only seeds candidates,
-spends no calls, and ``traces_started`` in the summary is the would-be count (the
-summary's ``notes`` carries ``llm_estimate_only`` in this mode).
+``--llm-max-calls 0`` for a seed-only estimate: no tracer gateway calls, but retrieval
+may still make paid embedding requests. ``traces_started`` counts references that could
+be traced (the summary's ``notes`` carries ``llm_estimate_only`` in this mode).
+The allowance counts gateway invocations, not provider requests or monetary spend:
+adapter retries and fallbacks can issue several provider requests per invocation.
 
 Budget/behaviour flags -- leave any of these unset to let ``CognifyConfig`` decide:
 ``--llm-max-calls``, ``--tracer-max-iter``, ``--llm-confidence-threshold``,
@@ -16,8 +18,8 @@ Budget/behaviour flags -- leave any of these unset to let ``CognifyConfig`` deci
 stated loop). ``--show-traces`` prints each planned resolution's stored tracer steps --
 the model's one-sentence reason, then one indented line per tool call.
 
-Prints the summary counters (including the budget spent -- ``llm_calls`` are the calls
-that came back, ``llm_calls_attempted`` is what the budget was charged -- the trace
+Prints the summary counters (``llm_budget_unit=gateway_calls``; ``llm_calls`` are successful
+gateway invocations, ``llm_calls_attempted`` includes failed invocations -- the trace
 outcomes, the per-tool call counts, and the unstated-inference counts), one line per
 resolution the plan proposes, and one line per reference that stayed dangling (a non-UUID
 ``responds_to``/``attributed_to`` reference the plan did not touch and no edge already
@@ -227,14 +229,19 @@ async def run(args: argparse.Namespace) -> int:
         texts = DocumentTextCache(view, dataset_id=dataset.id)
 
         print(f"dataset={args.dataset} id={dataset.id}")
-        # The requested spend, before a single call is made -- an unset flag means
+        # The requested gateway allowance -- an unset flag means
         # CognifyConfig decides, so it prints as "config" rather than a guessed number.
         print(
             "requested: "
             f"llm_max_calls={_flag_or_config(args.llm_max_calls)} "
+            "llm_budget_unit=gateway_calls "
             f"tracer_max_iter={_flag_or_config(args.tracer_max_iter)} "
             f"llm_confidence_threshold={_flag_or_config(args.llm_confidence_threshold)} "
             f"infer_unstated={True if args.infer_unstated else 'config'}"
+        )
+        print(
+            "Budget counts gateway invocations; provider retries and embedding requests "
+            "are outside this limit."
         )
 
         resolutions, summary = await plan_resolutions(
@@ -260,6 +267,7 @@ async def run(args: argparse.Namespace) -> int:
         # against CognifyConfig.
         print(
             f"llm_budget={summary.get('llm_budget', 0)} llm_calls={summary.get('llm_calls', 0)} "
+            f"llm_budget_unit={summary['llm_budget_unit']} "
             f"llm_calls_attempted={summary.get('llm_calls_attempted', 0)} "
             f"llm_calls_stated={summary.get('llm_calls_stated', 0)} "
             f"llm_calls_inferred={summary.get('llm_calls_inferred', 0)} "
@@ -353,15 +361,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Cap on LLM calls this pass may spend (default: config value; "
-            "0 = seed-only, zero-spend estimate)."
+            "Cap on LLMGateway invocations, not provider requests or spend; adapters may "
+            "retry within an invocation (default: config value; 0 = seed-only, which may "
+            "still make paid embedding requests)."
         ),
     )
     parser.add_argument(
         "--tracer-max-iter",
         type=int,
         default=None,
-        help="Max tracer iterations (LLM calls) per reference (default: config value).",
+        help="Max tracer iterations (gateway invocations) per reference (default: config value).",
     )
     parser.add_argument(
         "--llm-confidence-threshold",

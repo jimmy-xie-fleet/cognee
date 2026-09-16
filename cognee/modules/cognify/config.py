@@ -18,10 +18,10 @@ class CognifyConfig(BaseSettings):
     # Opt-in audit-grade provenance ledger (env: PROVENANCE_TRACKING). Default
     # OFF so the standard cognify pipeline is unchanged.
     provenance_tracking: bool = False
-    # Assertion-reference resolution: what one resolver pass may spend and how sure the
-    # tracer has to be before a link is written. reference_llm_max_calls is the whole
-    # pass's budget (shared by every reference it traces); reference_tracer_max_iter is
-    # the per-reference cap, each iteration being one tool step or one finish. Unstated
+    # Assertion-reference resolution: gateway invocations per pass and confidence before
+    # linking. reference_llm_max_calls is shared by every reference; provider retries
+    # inside an invocation are not counted, so this is not a provider-request/spend cap.
+    # reference_tracer_max_iter caps tool/finish steps per reference. Unstated
     # denial <-> allegation inference (D2) is implemented but opt-in, and held to a
     # higher confidence bar than a reference the document actually wrote.
     reference_llm_max_calls: int = 300

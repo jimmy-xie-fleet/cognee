@@ -67,7 +67,13 @@ from cognee.tasks.graph.resolve_assertion_references import (
     detect_dangling_references,
     resolve_assertion_references,
 )
-from cognee.tests.unit.tasks.graph._reference_fakes import FakeVectorEngine, scored
+from cognee.tests.unit.tasks.graph._reference_fakes import (
+    FakeVectorEngine,
+    assertion_node,
+    chunk_node,
+    document_node,
+    scored,
+)
 
 MODULE = "cognee.tasks.graph.resolve_assertion_references"
 # The trace pass and the write phase live in their own modules, so a seam inside either
@@ -1230,24 +1236,136 @@ async def test_an_identical_reference_with_an_identical_seed_is_answered_from_th
 
 
 @pytest.mark.asyncio
-async def test_a_cached_answer_naming_the_asking_assertion_abstains():
-    """The in-pass cache is keyed on (fingerprint, seed set), which excludes the asking
-    assertion's own id (R21), so a trace that picked a twin's neighbour can hand that
-    twin itself back as its answer. A statement never responds to itself."""
+@pytest.mark.parametrize(
+    "field,first_value,second_value,second_marker",
+    [
+        ("name", "alpha widget", "beta gadget", "Proposition: beta gadget"),
+        (
+            "source_quote",
+            "Alpha statement.",
+            "Beta statement.",
+            'As written in the document: "Beta statement."',
+        ),
+        ("asserted_by", "Alice", "Bob", "Speaker: Bob"),
+        ("polarity", "negative", "positive", "stance on the proposition: positive)"),
+        ("statement_type", "denial", "admission", "Statement type: admission "),
+        ("basis", "cited", "positional", "Stated basis: positional"),
+    ],
+)
+async def test_references_with_different_source_context_do_not_share_answers(
+    field, first_value, second_value, second_marker
+):
     graph = _base_graph()
+    graph.nodes.pop(A_STIPULATION)
+    graph.nodes[A_DENIAL].pop("name")
     twin = _nid("assertion-denial-twin")
     graph.nodes[twin] = dict(graph.nodes[A_DENIAL], id=twin)
-    # Same reference, same chunk, and propositions that share no token with anything, so
-    # neither denial reaches the other's seed and both seeds are the same set.
+    for node_id, value in ((A_DENIAL, first_value), (twin, second_value)):
+        if field == "basis":
+            graph.nodes[node_id]["responds_to_ref"] = dict(DENIAL_REF, basis=value)
+        else:
+            graph.nodes[node_id][field] = value
+
+    def answer_from_context(prompt):
+        context = prompt.split("# Tools")[0]
+        marker = (
+            '"The property was acquired in 1998"' if second_marker in context else MARK_ALLEGATION
+        )
+        return finish_on(marker)(prompt)
+
+    _, summary, mocks = await _run(graph, default=answer_from_context)
+
+    assert summary["llm_cached"] == 0
+    assert mocks.llm.await_count == 2
+    assert graph.nodes[A_DENIAL]["responds_to"] == A_1
+    assert graph.nodes[twin]["responds_to"] == A_2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_source_document_name", [False, True])
+async def test_matching_references_in_different_documents_are_traced_separately(
+    same_source_document_name,
+):
+    original, amended = _nid("original-complaint"), _nid("amended-complaint")
+    answer_original, answer_amended = _nid("original-answer"), _nid("amended-answer")
+    source_one, source_two = _nid("original-denial"), _nid("amended-denial")
+    chunk_one, chunk_two = _nid("answer-1-chunk"), _nid("answer-2-chunk")
+    c1, edge1 = chunk_node(chunk_one, "Denied.", 0, answer_original)
+    c2, edge2 = chunk_node(chunk_two, "Denied.", 0, answer_amended)
+    original_name = "Answer to Original Complaint"
+    amended_name = original_name if same_source_document_name else "Answer to Amended Complaint"
+    nodes = [
+        document_node(original, "Original Complaint"),
+        document_node(amended, "Amended Complaint"),
+        document_node(answer_original, original_name),
+        document_node(answer_amended, amended_name),
+        c1,
+        c2,
+        *(
+            assertion_node(
+                source_id,
+                "Invoice settled",
+                chunk_id,
+                statement_type="denial",
+                source_quote="Denied.",
+                responds_to_ref=dict(DENIAL_REF),
+            )
+            for source_id, chunk_id in ((source_one, chunk_one), (source_two, chunk_two))
+        ),
+    ]
+    vectors = {
+        "TextDocument_name": [
+            scored(original, 0.1, "Original Complaint"),
+            scored(amended, 0.1, "Amended Complaint"),
+        ]
+    }
+
+    def answer_from_document(prompt):
+        context = prompt.split("# The reference as made")[0]
+        target = (
+            "Amended Complaint"
+            if "Answer to Amended Complaint" in context
+            else "Original Complaint"
+        )
+        return finish_on(f'Document "{target}"')(prompt)
+
+    graph = FakeGraph(nodes, [edge1, edge2])
+    _, summary, mocks = await _run(graph, vector_results=vectors, default=answer_from_document)
+
+    assert summary["llm_cached"] == 0
+    assert mocks.llm.await_count == 2
+    assert graph.nodes[source_one]["responds_to"] == original
+    assert graph.nodes[source_two]["responds_to"] == (
+        original if same_source_document_name else amended
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cached_answer_naming_the_asking_assertion_abstains():
+    """Identical source contexts can reuse an answer, but never link to themselves."""
+    graph = _base_graph()
+    twin = _nid("assertion-denial-twin")
+    graph.nodes[A_DENIAL].pop("name")
+    graph.nodes[twin] = dict(graph.nodes[A_DENIAL], id=twin)
+    # Without proposition tokens neither twin reaches the other's seed. The contexts and
+    # candidate sets are identical, while the tools can still expose either assertion.
     first, second = sorted([A_DENIAL, twin])
-    graph.nodes[first]["name"] = "alpha widget"
-    graph.nodes[second]["name"] = "beta gadget"
+
+    def finish_on_second_denial(prompt):
+        lines = [
+            line
+            for line in prompt.splitlines()
+            if line.startswith("[A") and "] denial/negative:" in line
+        ]
+        assert len(lines) == 2
+        label = lines[-1][1 : lines[-1].index("]")]
+        return TracerStep(finish=TracerFinish(candidate_label=label, confidence=0.92))
 
     # The first denial reads its own passage, is shown its twin there, and picks it.
     steps = [
         call_tool_on("open_document", "document", MARK_ANSWER_DOCUMENT),
         call_tool_on("read_chunk", "passage", MARK_ANSWER_PASSAGE_0),
-        finish_on("beta gadget", confidence=0.92),
+        finish_on_second_denial,
     ]
 
     _, summary, mocks = await _run(graph, steps=steps, default=abstain())
@@ -2306,6 +2424,7 @@ async def test_the_summary_reports_every_budget_counter():
     ):
         assert isinstance(summary[key], int), key
     assert isinstance(summary["llm_budget_exhausted"], bool)
+    assert summary["llm_budget_unit"] == "gateway_calls"
     assert isinstance(summary["tool_calls_by_name"], dict)
     assert summary["llm_calls_stated"] == summary["llm_calls"]
     assert summary["llm_calls_inferred"] == 0

@@ -46,6 +46,7 @@ from cognee.tasks.graph.reference_tracer import (
     CallBudget,
     TraceRecord,
     TracerFinish,
+    _source_block,
     trace_reference,
 )
 from cognee.tasks.graph.reference_tracer_tools import _locate, build_tracer_tools
@@ -184,11 +185,11 @@ class _Pending:
 class _TraceAnswer:
     """One trace's answer, already resolved off the registry that issued its labels.
 
-    Cached per ``(fingerprint, candidate set)``, so the ids are resolved here rather than
-    stored as labels: a label only means something inside the trace that issued it.
+    Cached per reference, source context and candidate set, so the ids are resolved here
+    rather than stored as labels: a label only means something inside its own trace.
 
-    Not an :class:`Outcome`, and deliberately so: two statements can share a reference and
-    a seed, and so share this answer, while the outcome they each get differs -- the
+    Not an :class:`Outcome`, and deliberately so: two statements can share a reference,
+    source context and seed, while the outcome they each get differs -- the
     self-reference guard, the bar an inference is held to and the edges already in the
     graph are all per statement. So the answer is what the cache holds, and
     :func:`finish_to_outcome` maps it again for every statement that reuses it.
@@ -227,13 +228,14 @@ def _empty_summary() -> Dict[str, Any]:
         "nodes_patched": 0,
         "dry_run": False,
         "notes": [],
-        # ``llm_calls`` counts the calls that came back; ``llm_calls_attempted`` is what
-        # the budget was charged (a failed call too), so it is what reaches ``llm_budget``.
+        # These count gateway invocations, not provider requests (adapters may retry).
+        # ``llm_calls`` counts successes; ``llm_calls_attempted`` also charges failures.
         "llm_calls": 0,
         "llm_calls_attempted": 0,
         "llm_calls_stated": 0,
         "llm_calls_inferred": 0,
         "llm_budget": 0,
+        "llm_budget_unit": "gateway_calls",
         "llm_budget_exhausted": False,
         "traces_started": 0,
         "traces_finished": 0,
@@ -266,7 +268,7 @@ class PassContext:
 
     ``summary`` and ``resolutions`` are the plan the pass returns; ``counters`` is what the
     tracer bumps and :func:`_fold_counters` folds in at the end; ``cache`` is the in-pass
-    trace cache, keyed on ``(fingerprint, candidate set)``. The rest is read-only.
+    trace cache, keyed on reference, source context and candidate set. The rest is read-only.
 
     Every default is the one that spends and links nothing -- no budget, no steps, a bar
     no confidence can clear -- so a context built without a value never resolves anything
@@ -287,7 +289,7 @@ class PassContext:
     summary: Dict[str, Any] = field(default_factory=_empty_summary)
     resolutions: List[Resolution] = field(default_factory=list)
     counters: Dict[str, Any] = field(default_factory=dict)
-    cache: Dict[Tuple[str, str], "_TraceAnswer"] = field(default_factory=dict)
+    cache: Dict[Tuple[str, str, str], "_TraceAnswer"] = field(default_factory=dict)
 
 
 def _count(counter: Dict[str, int], key: Optional[str]) -> None:
@@ -830,7 +832,20 @@ async def _trace_pending(
             record(entry, _unresolved(entry))
             continue
 
-        cache_key = (entry.fingerprint, candidate_set_key(entry.seed))
+        source_document_name = _document_name(ctx.view, entry.own_document_id)
+        # The same paragraph reference can answer different claims or pleadings. Reuse
+        # only the context the tracer sees, plus the IDs that scope its read-only tools.
+        source_context = json.dumps(
+            {
+                "source": _source_block(entry.props, source_document_name, entry.field_name),
+                "document_id": entry.own_document_id,
+                "source_chunk_id": str(entry.props.get("source_chunk_id") or ""),
+                "basis": entry.hint.basis,
+                "unstated": entry.unstated,
+            },
+            sort_keys=True,
+        )
+        cache_key = (entry.fingerprint, candidate_set_key(entry.seed), source_context)
         cached = ctx.cache.get(cache_key)
         if cached is not None:
             _bump(ctx.counters, "llm_cached")
@@ -867,7 +882,7 @@ async def _trace_pending(
                 unstated=entry.unstated,
                 hint=entry.hint,
                 source_props=entry.props,
-                source_document_name=_document_name(ctx.view, entry.own_document_id),
+                source_document_name=source_document_name,
                 field_name=entry.field_name,
                 seed=entry.seed,
                 tools=tools,

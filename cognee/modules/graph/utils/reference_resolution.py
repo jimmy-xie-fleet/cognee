@@ -167,7 +167,8 @@ LOCATOR_PATTERNS: Tuple[LocatorPattern, ...] = (
     ),
     LocatorPattern(
         kind="section",
-        marker=r"^[ \t]*(?:§\s*(?:{number})\b|section\s+(?:{number})\b)",
+        # A word boundary also occurs before a dot in a descendant section number.
+        marker=r"^[ \t]*(?:§\s*(?:{number})\b|section\s+(?:{number})\b)(?!\.\d)",
         any_marker=re.compile(
             r"^[ \t]*(?:§\s*(\d+(?:\.\d+)*[a-z]?)\b|section\s+(\d+(?:\.\d+)*[a-z]?)\b)",
             re.M | re.I,
@@ -318,8 +319,14 @@ def _marker_number(match: re.Match) -> Optional[str]:
     return next((group for group in match.groups() if group), None)
 
 
-def _next_marker(pattern: LocatorPattern, text: str, after: int):
-    """(start, ordinal) of the first marker of this kind strictly after ``after``."""
+def _is_child_section(number: Optional[str], parent: Optional[str]) -> bool:
+    return bool(number and parent and number.casefold().startswith(parent.casefold() + "."))
+
+
+def _next_marker(
+    pattern: LocatorPattern, text: str, after: int, section_number: Optional[str] = None
+):
+    """(start, ordinal) of the next marker, skipping the selected section's children."""
     if pattern.any_marker is None:
         return None
 
@@ -328,12 +335,16 @@ def _next_marker(pattern: LocatorPattern, text: str, after: int):
             continue
 
         number = _marker_number(match)
+        if _is_child_section(number, section_number):
+            continue
         ordinal = _ordinal_for_kind(pattern.kind, number) if number else None
         return match.start(), ordinal
     return None
 
 
-def _next_heading_start(text: str, after: int) -> Optional[int]:
+def _next_heading_start(
+    text: str, after: int, section_number: Optional[str] = None
+) -> Optional[int]:
     """Where the next ALL-CAPS heading line starts, if there is one.
 
     Legal documents head their next part in capitals ("SECOND CAUSE OF ACTION"), which is
@@ -342,6 +353,11 @@ def _next_heading_start(text: str, after: int) -> Optional[int]:
     for match in _LINE_RE.finditer(text, after):
         if match.start() <= after:
             continue
+
+        if section_number is not None:
+            section = _PATTERN_BY_KIND["section"].any_marker.match(text, match.start())
+            if section is not None and _is_child_section(_marker_number(section), section_number):
+                continue
 
         line = match.group().strip()
         if (
@@ -353,13 +369,19 @@ def _next_heading_start(text: str, after: int) -> Optional[int]:
     return None
 
 
-def _span_end(pattern: LocatorPattern, text: str, start: int, max_span: int) -> int:
+def _span_end(
+    pattern: LocatorPattern,
+    text: str,
+    start: int,
+    max_span: int,
+    section_number: Optional[str] = None,
+) -> int:
     ends = [len(text), start + max_span]
-    next_marker = _next_marker(pattern, text, start)
+    next_marker = _next_marker(pattern, text, start, section_number)
     if next_marker is not None:
         ends.append(next_marker[0])
 
-    heading = _next_heading_start(text, start)
+    heading = _next_heading_start(text, start, section_number)
     if heading is not None:
         ends.append(heading)
 
@@ -376,6 +398,7 @@ def find_locator_span(
     With several markers -- a number that also opens an unrelated list -- the one whose next
     marker of the same kind continues the sequence wins; when none does, the first is used
     and the span is noted ``ambiguous_marker`` so the caller can weigh it lower.
+    Section spans include their numbered descendants rather than ending at the first child.
     """
     if not text or locator is None:
         return None
@@ -395,11 +418,12 @@ def find_locator_span(
 
     notes: Tuple[str, ...] = ()
     start = matches[0].start()
+    section_number = locator.number.strip() if pattern.kind == "section" else None
     if len(matches) > 1:
         in_sequence = None
         if locator.ordinal is not None:
             for match in matches:
-                next_marker = _next_marker(pattern, text, match.start())
+                next_marker = _next_marker(pattern, text, match.start(), section_number)
                 if next_marker is not None and next_marker[1] == locator.ordinal + 1:
                     in_sequence = match.start()
                     break
@@ -409,7 +433,7 @@ def find_locator_span(
         else:
             start = in_sequence
 
-    return start, _span_end(pattern, text, start, max_span), notes
+    return start, _span_end(pattern, text, start, max_span, section_number), notes
 
 
 def chunks_overlapping(

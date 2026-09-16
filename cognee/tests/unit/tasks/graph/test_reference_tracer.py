@@ -6,9 +6,9 @@ tracer's own namespace with an ``AsyncMock`` whose ``side_effect`` is the exact 
 backend -- the tools the loop dispatches to are either the real read-only tools over a
 tiny in-memory ``GraphView`` or a stub ``ToolSpec``.
 
-The invariants these tests exist to hold: a trace never spends more than ``max_iter``
-calls, never spends an extra "fallback" call when it hits the cap, never spends a call the
-shared ``CallBudget`` cannot pay for, and never returns a label the registry does not know.
+The trace caps gateway invocations, including no extra finish invocation at the step cap,
+and never returns an unknown label. The native-adapter regression also demonstrates that
+provider retries inside one gateway invocation are outside this limit.
 """
 
 from typing import Any, Dict, List

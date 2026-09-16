@@ -5,8 +5,9 @@ every forward reference, where the document being pointed at was not in the grap
 is left dangling for this pipeline. One detect (extraction) phase seeds and traces every
 remaining reference, one apply (enrichment) phase writes the edges and node patches.
 
-This is where the LLM budget is spent, so it is also where it is set: ``llm_max_calls``
-caps the whole run and ``tracer_max_iter`` caps one reference.
+``llm_max_calls`` caps gateway invocations for the run and ``tracer_max_iter`` caps one
+reference's steps. Provider retries inside an invocation are not counted; neither setting
+is a provider-request or monetary cap.
 """
 
 from typing import Optional
@@ -62,9 +63,11 @@ async def resolve_references_pipeline(
             structured reference (or the ``<field>_text``) it preserved.
         dry_run: Plan and log the resolutions without writing anything. Traces still run,
             so the plan shows what the agent would have linked.
-        llm_max_calls: Calls this run may spend across every reference it traces.
-            ``None`` takes ``REFERENCE_LLM_MAX_CALLS``; ``0`` seeds without spending.
-        tracer_max_iter: Steps one reference's trace may take. ``None`` takes
+        llm_max_calls: Gateway invocations allowed across every reference in this run.
+            Provider retries inside an invocation are not counted. ``None`` takes
+            ``REFERENCE_LLM_MAX_CALLS``; ``0`` runs only seed retrieval, which may still
+            make paid embedding requests.
+        tracer_max_iter: Gateway/tool steps one reference may take. ``None`` takes
             ``REFERENCE_TRACER_MAX_ITER``.
         llm_confidence_threshold: Below this the agent's answer is recorded but never
             linked. ``None`` takes ``REFERENCE_LLM_CONFIDENCE_THRESHOLD``.

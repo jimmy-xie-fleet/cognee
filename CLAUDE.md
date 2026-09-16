@@ -856,16 +856,19 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
     `finish(candidate_label | null, confidence, reason)` can only name a label or abstain.
     Strategies: `llm_trace` for a reference the document stated, `llm_inferred` for an unstated
     denial/admission link.
-  - **Budget** (env, on `CognifyConfig`): `REFERENCE_LLM_MAX_CALLS` (300, per pass, shared by
-    every trace), `REFERENCE_TRACER_MAX_ITER` (4, per reference — each iteration is one tool
-    step or one finish, and reaching the cap costs no extra call),
+  - **Gateway-call allowance** (env, on `CognifyConfig`): `REFERENCE_LLM_MAX_CALLS` (300 gateway
+    invocations per pass, shared by every trace), `REFERENCE_TRACER_MAX_ITER` (4, per reference
+    — each iteration is one tool step or one finish, with no extra gateway invocation at the cap),
     `REFERENCE_LLM_CONFIDENCE_THRESHOLD` (0.6), `REFERENCE_INFER_UNSTATED` (false),
     `REFERENCE_INFER_CONFIDENCE_THRESHOLD` (0.75). `resolve_references_pipeline()` and
     `resolve_assertion_references()` take the same five as `llm_max_calls`, `tracer_max_iter`,
     `llm_confidence_threshold`, `infer_unstated`, `infer_confidence_threshold` (`None` = config).
-    The summary reports both halves of the spend: `llm_calls` are the calls that came back,
-    `llm_calls_attempted` is what the budget was charged (a failed call is charged too), so it
-    is `llm_calls_attempted` that reaches `llm_budget` when the budget is exhausted.
+    The summary declares `llm_budget_unit="gateway_calls"`: `llm_calls` counts successful
+    gateway invocations and `llm_calls_attempted` includes failed invocations. The latter
+    reaches `llm_budget` when exhausted. Adapters can retry validation, schema negotiation,
+    fallback models and transient errors inside one invocation, so these settings do not cap
+    provider requests or monetary spend. Seed retrieval's embedding requests are also outside
+    this allowance.
   - **What gets written.** The edge and patch plumbing is unchanged: a typed edge carrying
     `resolution_strategy`, `resolution_confidence`, `resolved_by="reference_resolver"` and a
     stance-preserving `edge_text`, and — for `llm_trace`, the one `patch_mode="full"` strategy —
@@ -881,8 +884,9 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
     `llm_self_reference` for an answer naming the asking statement itself). A budget-exhausted
     or failed trace writes **nothing**, so the next pass retries it; three consecutive traces
     whose call failed trip a circuit breaker (`llm_circuit_broken`); `llm_max_calls=0` is the
-    zero-spend estimate (`llm_estimate_only`, with `traces_started` as the count a real budget
-    would have paid for); `dry_run=True` still spends, it only withholds the writes.
+    seed-only estimate (`llm_estimate_only`, with `traces_started` counting references that
+    could be traced); it makes no tracer gateway calls but may make paid embedding requests.
+    `dry_run=True` still runs the tracer, it only withholds the writes.
     **Idempotency**: a second pass writes nothing new — a reference an edge or a matching
     `fingerprint` says was answered is not traced again, a field already holding its resolved id
     counts as `already_resolved`, and a resolution whose edges are all in the graph already is
@@ -927,8 +931,8 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   drop the profile. The reference resolver adds its own limits: the pass is budget-bounded, so a
   run can leave references unresolved and says so — `llm_budget_exhausted` in the summary's
   `notes` plus one WARNING naming the count, and nothing is written for them; traces run
-  sequentially (they share one mutable `CallBudget`), so a pass takes as long as its reference
-  count; every trace costs at least one LLM call, and seed retrieval runs for every pending
+    sequentially (they share one mutable `CallBudget`), so a pass takes as long as its reference
+    count; every uncached trace needs at least one gateway invocation, and seed retrieval runs for every pending
   reference, including the ones the budget will never reach; a `finish` naming a label this trace
   never issued is counted `llm_unknown_label` and treated as an abstain;
   `TracerToolCall.arguments` is a `Dict[str, Any]`, which not every structured-output framework
