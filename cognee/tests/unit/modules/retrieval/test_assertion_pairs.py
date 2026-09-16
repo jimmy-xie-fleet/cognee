@@ -61,6 +61,12 @@ RESPONDS_TO_PROPS = {
     "edge_object_id": "edge-responds-to",
 }
 
+# The same edge as stored by an adapter that persists neither a relationship label nor an
+# edge object id -- the two properties ``edge_identity`` would rather identify it by.
+UNLABELLED_RESPONDS_TO_PROPS = {
+    "edge_text": "Defendants denies that Adams breached the lease.",
+}
+
 
 class RecordingGraph:
     """A graph adapter that records every neighborhood call and returns canned rows."""
@@ -378,6 +384,44 @@ async def test_pair_edges_are_appended_after_the_retrieved_triplets():
     assert expanded[0] is triplets[0]
     assert expanded[1].attributes["relationship_type"] == "responds_to"
     assert triplets == [triplets[0]]
+
+
+@pytest.mark.asyncio
+async def test_a_pair_edge_is_labelled_for_the_deduper_as_well_as_the_renderer():
+    """``edge_identity`` reads ``relationship_name``; the renderers read ``relationship_type``.
+
+    The edge projection asks for ``relationship_name``, so an adapter that does not persist
+    it still fills the key -- with ``None``. An unlabelled pair edge would therefore identify
+    as ``("graph", source, "", target, True)`` and match no retrieved edge at all.
+    """
+    graph = RecordingGraph(
+        nodes=[_neighborhood_row(DENIAL_PROPS), _neighborhood_row(ALLEGATION_PROPS)],
+        edges=[("denial-1", "allegation-1", "responds_to", dict(UNLABELLED_RESPONDS_TO_PROPS))],
+    )
+
+    _nodes, edges = await expand_assertion_pairs(graph, ["denial-1"])
+
+    assert edges[0].attributes["relationship_type"] == "responds_to"
+    assert edges[0].attributes["relationship_name"] == "responds_to"
+
+
+@pytest.mark.asyncio
+async def test_an_unlabelled_pair_edge_already_retrieved_is_not_added_twice():
+    """Latent until an adapter stops persisting the label: then every render duplicates it."""
+    retrieved = _edge(
+        _node(DENIAL_PROPS),
+        _node(ALLEGATION_PROPS),
+        {"relationship_name": "responds_to", "relationship_type": "responds_to"},
+    )
+    triplets = [retrieved]
+    graph = RecordingGraph(
+        nodes=[_neighborhood_row(DENIAL_PROPS), _neighborhood_row(ALLEGATION_PROPS)],
+        edges=[("denial-1", "allegation-1", "responds_to", dict(UNLABELLED_RESPONDS_TO_PROPS))],
+    )
+
+    expanded = await append_assertion_pair_edges(graph, triplets)
+
+    assert expanded is triplets
 
 
 @pytest.mark.asyncio

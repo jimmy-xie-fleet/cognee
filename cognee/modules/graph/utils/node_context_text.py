@@ -17,14 +17,16 @@ properties, which is all the graph-projection whitelist guarantees a renderer ca
 
 import string
 from collections import Counter
+from functools import lru_cache
 from typing import Any, Mapping, Optional
 from uuid import UUID
 
 from cognee.infrastructure.engine import DataPoint
-from cognee.modules.graph.utils.convert_node_to_data_point import get_all_subclasses
 
-# Importing the stance vocabulary here also imports ``Assertion``, which is what registers
-# it as a ``DataPoint`` subclass for ``context_fields_for_datapoints``.
+# Importing ``Assertion`` is also what registers it as a ``DataPoint`` subclass, so
+# ``context_fields_for_datapoints`` sees its declared context fields.
+from cognee.modules.engine.models.Assertion import Assertion
+from cognee.modules.graph.utils.convert_node_to_data_point import get_all_subclasses
 from cognee.modules.graph.utils.reference_resolution import (
     STANCE_VERB_BY_POLARITY,
     UNNAMED_PROPOSITION,
@@ -74,22 +76,60 @@ def _scalar_text(value: Any) -> Optional[str]:
     return None
 
 
-def is_assertion_props(props: Mapping[str, Any]) -> bool:
-    """True when projected properties carry a statement type.
+def _is_true(value: Any) -> bool:
+    """A projected boolean, which may have made a round trip through a string store.
 
-    The same test ``is_assertion_node`` applies to an extracted node: one non-blank
-    ``statement_type`` decides, and the node's ``type`` is never consulted (ontology
-    canonicalization rewrites types, so reading the type would make an entity render as an
-    assertion the moment an ontology is configured).
+    Neo4j and the Postgres demo adapter serialize JSON properties, so a ``False`` can come
+    back as the string ``"false"`` -- non-empty, and therefore truthy. Only a real ``True``
+    or the word "true" counts; anything else is not a claim that something was verified.
     """
-    return _scalar_text(props.get("statement_type")) is not None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() == "true"
+    return False
+
+
+def _names_an_assertion_class(node_type: str) -> bool:
+    """Whether ``node_type`` is the class name of ``Assertion`` or of a subclass of it.
+
+    ``get_graph_from_model`` stores the DataPoint *class name* in ``type``. Deliberately
+    uncached: the overwhelmingly common answer is the first comparison, and a subclass
+    registered after a cache was warmed would be missing from it with nothing to say so.
+    The walk is only reached by a node that carries a statement type under some other
+    class, which is the case this test exists to reject.
+    """
+    if node_type == Assertion.__name__:
+        return True
+    return any(subclass.__name__ == node_type for subclass in get_all_subclasses(Assertion))
+
+
+def is_assertion_props(props: Mapping[str, Any]) -> bool:
+    """True when projected properties carry a statement type from an assertion node.
+
+    One non-blank ``statement_type`` is what decides, exactly as in ``is_assertion_node``:
+    a caller does not always have a projected node to read (the hybrid lane builds props
+    from a vector payload), so a blank or absent ``type`` falls back to that field alone.
+
+    When a ``type`` *is* present it has to name an assertion class. The type is not
+    consulted to *promote* a node -- ontology canonicalization rewrites an entity's
+    ``is_a``, and reading that would turn entities into assertions the moment an ontology
+    is configured -- but ``type`` holds the Python class name, which canonicalization never
+    touches, so it can veto. Without the veto any third-party ``DataPoint`` that happens to
+    declare a field called ``statement_type`` renders stance-first and drags a
+    ``get_neighborhood`` call behind it.
+    """
+    if _scalar_text(props.get("statement_type")) is None:
+        return False
+
+    node_type = _scalar_text(props.get("type"))
+    return node_type is None or _names_an_assertion_class(node_type)
 
 
 def node_context_text(props: Mapping[str, Any]) -> tuple[str, str]:
     """``(title, body)`` for one node: its header line and the content under it."""
-    statement_type = _scalar_text(props.get("statement_type"))
-    if statement_type is not None:
-        return _assertion_context_text(props, statement_type)
+    if is_assertion_props(props):
+        return _assertion_context_text(props, _scalar_text(props.get("statement_type")))
 
     name = _scalar_text(props.get("name"))
     text = _scalar_text(props.get("text"))
@@ -103,9 +143,9 @@ def node_context_text(props: Mapping[str, Any]) -> tuple[str, str]:
 def node_context_label(props: Mapping[str, Any]) -> str:
     """A node on one line, for an edge line or a bullet. Empty when there is nothing to show."""
     name = _scalar_text(props.get("name"))
-    statement_type = _scalar_text(props.get("statement_type"))
     node_id = _scalar_text(props.get("id"))
-    if statement_type is not None:
+    if is_assertion_props(props):
+        statement_type = _scalar_text(props.get("statement_type"))
         polarity = _scalar_text(props.get("polarity")) or UNKNOWN_POLARITY
         # The id fallback is the same one every other node gets: a nameless node still
         # has to be identifiable in the line that mentions it.
@@ -128,7 +168,7 @@ def _assertion_context_text(props: Mapping[str, Any], statement_type: str) -> tu
 
     quote = _scalar_text(props.get("source_quote"))
     if quote:
-        verified = " (verified)" if props.get("source_quote_verified") else ""
+        verified = " (verified)" if _is_true(props.get("source_quote_verified")) else ""
         lines.append(f'Quote: "{quote}"{verified}')
 
     description = _scalar_text(props.get("description"))
@@ -138,14 +178,9 @@ def _assertion_context_text(props: Mapping[str, Any], statement_type: str) -> tu
     return title, "\n".join(lines)
 
 
-def context_fields_for_datapoints() -> list[str]:
-    """Every property name a ``DataPoint`` subclass declares as needed for rendering.
-
-    A node reaches a renderer as a projection whitelist, so a property nobody asked for is
-    not merely unrendered -- it is absent. A subclass whose text cannot be rendered from
-    ``name``/``description`` alone declares the properties it needs in
-    ``metadata["context_fields"]`` and the graph projection unions them in.
-    """
+@lru_cache(maxsize=1)
+def _declared_context_fields() -> tuple:
+    """The declared context fields, computed once by walking every ``DataPoint`` subclass."""
     fields: list[str] = []
     for subclass in get_all_subclasses(DataPoint):
         metadata_field = subclass.model_fields.get("metadata")
@@ -155,4 +190,25 @@ def context_fields_for_datapoints() -> list[str]:
         for field_name in default.get("context_fields") or []:
             if isinstance(field_name, str) and field_name not in fields:
                 fields.append(field_name)
-    return fields
+    return tuple(fields)
+
+
+def context_fields_for_datapoints() -> list[str]:
+    """Every property name a ``DataPoint`` subclass declares as needed for rendering.
+
+    A node reaches a renderer as a projection whitelist, so a property nobody asked for is
+    not merely unrendered -- it is absent. A subclass whose text cannot be rendered from
+    ``name``/``description`` alone declares the properties it needs in
+    ``metadata["context_fields"]`` and the graph projection unions them in.
+
+    The subclass walk is cached, because this is on the projection path of every search
+    rather than a startup step. A caller that registers a subclass after the first call has
+    to ``context_fields_for_datapoints.cache_clear()``. The list is rebuilt per call, so a
+    caller that mutates the result cannot corrupt the cache.
+    """
+    return list(_declared_context_fields())
+
+
+# The cache lives on the private tuple-returning function so that each public call still
+# hands back a fresh list; the clearing seam is published under the name callers know.
+context_fields_for_datapoints.cache_clear = _declared_context_fields.cache_clear

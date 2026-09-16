@@ -974,8 +974,11 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
 `Assertion.name` is the proposition phrased affirmatively, so a renderer that prints only
 `name` + `description` shows a denial as the fact it denies — which is how an early legal graph
 "found" a contradiction the documents never contained. Three retrieval changes close that gap;
-all three are no-ops on a graph without assertions (golden tests pin the plain rendering
-byte-for-byte).
+all three are no-ops on a graph without assertions, with one deliberate exception to the plain
+rendering: the graph projection is a whitelist that fills every key it asks for, so a node type
+with no `description` field (a `Document`, a `NodeSet`) used to render the literal `None` as its
+body, and a nameless one used to title itself `None`. Those now render the node's name and
+`Unnamed Node`. Everything else is byte-identical, and the golden tests pin it.
 
 - **Stance-aware rendering.** One shared renderer, `node_context_text`
   (`cognee/modules/graph/utils/node_context_text.py`), is used by `resolve_edges_to_text` (the
@@ -988,7 +991,10 @@ byte-for-byte).
   `statement_type`, `polarity`, `asserted_by`, `source_quote`, `source_quote_verified` — and
   `get_memory_fragment` unions every subclass's context fields into the graph projection
   (`brute_force_triplet_search.py`, `default_node_properties_to_project()`); edges also project
-  `resolution_confidence` and `resolution_strategy`.
+  `resolution_confidence` and `resolution_strategy`. Because that union is global rather than
+  per-node-type, the assertion fields are projected onto *every* node — carrying `None` on the
+  ones that do not declare them — so they show up as null keys on plain nodes in
+  `objects_result` and in `search(verbose=True)` responses.
 - **Pair expansion.** After the lane merge, `GraphCompletionRetriever.resolve_edges_to_text`
   calls `expand_assertion_pairs` (`cognee/modules/retrieval/utils/assertion_pairs.py`): one
   `get_neighborhood(depth=1, edge_types=["responds_to", "attributed_to", "asserted_by"])` call
@@ -1002,8 +1008,9 @@ byte-for-byte).
   `↳ responds to: …`, `↳ answered by: …`, `↳ speaker: …` lines from the same pair expansion, in a
   fixed relationship order. A dataset without an `Assertion_name` collection grows no section
   and no result key. Under a NodeSet-scoped search a counterpart outside the scope is dropped
-  (untagged counts as outside, like the entity lane); in concurrent session mode the statements
-  of whichever lane found them survive the merge. Budget: `HYBRID_STATEMENTS_TOP_K` (default 20).
+  (untagged counts as outside, like the entity lane); in concurrent session mode both lanes
+  contribute statements through `merge_ranked`, primary first, under the same budget and
+  conversational reserve the other lanes use. Budget: `HYBRID_STATEMENTS_TOP_K` (default 20).
 
 Still open: statement ids are not part of `extract_context_object_ids`, access tracking or
 `include_references`, so per-turn feedback cannot attribute a rendered statement;

@@ -525,17 +525,82 @@ def test_a_context_without_statements_is_byte_identical():
     assert "Relevant statements" not in format_hybrid_context("", objects)
 
 
-def test_merge_carries_the_primary_statements_and_adds_no_channel():
+def test_merge_lets_both_lanes_contribute_statements_primary_first():
+    """Every other channel merges through ``merge_ranked``; statements were taken wholesale.
+
+    On the default concurrent session path that costs a follow-up turn its answer: the
+    conversational rewrite is the lane that understands "and what did he say about it", and
+    the statement it found was discarded whenever the raw lane found anything at all.
+    """
     merged = merge_hybrid_results(
         {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "denial-1"}]},
         {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "conversational-1"}]},
         chunks_limit=5,
         entities_limit=5,
         facts_limit=5,
+        statements_limit=5,
+    )
+
+    assert merged["statements"] == [{"id": "denial-1"}, {"id": "conversational-1"}]
+    assert set(merged) == {"chunks", "chunk_summaries", "entities", "facts", "statements"}
+
+
+def test_merged_statements_are_capped_and_hold_a_conversational_reserve():
+    """Same budget arithmetic the chunk, entity and fact lanes get, on the statements limit."""
+    primary = [{"id": f"raw{index}"} for index in range(5)]
+    # "raw3" is found by both lanes so it ranks first; every "ctx" is conversational-only.
+    secondary = [{"id": name} for name in ("ctx0", "ctx1", "raw3", "ctx2")]
+
+    merged = merge_hybrid_results(
+        {"chunks": [], "entities": [], "facts": [], "statements": primary},
+        {"chunks": [], "entities": [], "facts": [], "statements": secondary},
+        chunks_limit=1,
+        entities_limit=1,
+        facts_limit=1,
+        statements_limit=5,
+    )
+
+    # One reserved slot at limit=5, so the lowest-ranked raw statement yields to "ctx0".
+    assert [statement["id"] for statement in merged["statements"]] == [
+        "raw3",
+        "raw0",
+        "raw1",
+        "raw2",
+        "ctx0",
+    ]
+
+
+def test_a_statement_both_lanes_found_is_not_rendered_twice():
+    merged = merge_hybrid_results(
+        {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "denial-1"}]},
+        {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "denial-1"}]},
+        chunks_limit=5,
+        entities_limit=5,
+        facts_limit=5,
+        statements_limit=5,
     )
 
     assert merged["statements"] == [{"id": "denial-1"}]
-    assert set(merged) == {"chunks", "chunk_summaries", "entities", "facts", "statements"}
+
+
+def test_the_retriever_merges_statements_under_its_own_budget():
+    """``statements_top_k`` is the lane's budget, so the merge has to be handed it too.
+
+    Asserted as a pair: the same two lanes cap to one statement under a budget of one and
+    keep both under a budget of two, which no un-threaded limit can produce.
+    """
+    lanes = (
+        {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "denial-1"}]},
+        {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "conversational-1"}]},
+    )
+
+    assert HybridRetriever(statements_top_k=1).merge_retrieved_objects(*lanes)["statements"] == [
+        {"id": "denial-1"}
+    ]
+    assert HybridRetriever(statements_top_k=2).merge_retrieved_objects(*lanes)["statements"] == [
+        {"id": "denial-1"},
+        {"id": "conversational-1"},
+    ]
 
 
 def test_merge_keeps_the_statements_of_whichever_lane_found_them():

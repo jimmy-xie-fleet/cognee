@@ -329,6 +329,7 @@ class HybridRetriever(BaseRetriever):
             chunks_limit=self.chunks_top_k,
             entities_limit=self.entities_top_k,
             facts_limit=self.facts_top_k,
+            statements_limit=self.statements_top_k,
         )
 
     def extract_context_object_ids(self, retrieved_objects: Any) -> Optional[Dict[str, List[str]]]:

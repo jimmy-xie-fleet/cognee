@@ -13,9 +13,11 @@ Pins two things.
 
 import pytest
 
+from cognee.infrastructure.engine import DataPoint
 from cognee.modules.engine.models.Assertion import Assertion
 from cognee.modules.graph.cognee_graph.CogneeGraphElements import Edge, Node
 from cognee.modules.graph.utils.node_context_text import (
+    UNNAMED_NODE,
     _create_title_from_text,
     context_fields_for_datapoints,
     is_assertion_props,
@@ -64,6 +66,36 @@ def test_nameless_node_renders_unnamed_node():
     assert node_context_text({}) == ("Unnamed Node", "Unnamed Node")
 
 
+def test_a_projected_description_of_none_no_longer_renders_the_literal_none():
+    """The one intended divergence from main's plain rendering, with both strings named.
+
+    ``resolve_edges_to_text`` on main read ``attributes.get("description", name)``. The graph
+    projection is a whitelist that fills *every* key it asked for, so a node type with no
+    ``description`` field at all -- a ``Document``, a ``NodeSet`` -- arrived carrying
+    ``description: None`` and the ``.get`` default never fired. The body the prompt received
+    was the four characters ``None``. Rendering the name instead is an improvement, not a
+    regression, but it is a divergence and this is where it is recorded.
+    """
+    projected = {"name": "Adams v. Great Plains", "description": None}
+
+    # Main's formula, on main's input.
+    old_title = projected.get("name", UNNAMED_NODE)
+    old_body = projected.get("description", old_title)
+    assert old_body is None
+    assert f"Node: {old_title}\n{old_body}" == "Node: Adams v. Great Plains\nNone"
+
+    # What the shared renderer puts there instead.
+    assert node_context_text(projected) == ("Adams v. Great Plains", "Adams v. Great Plains")
+
+
+def test_a_projected_nameless_node_no_longer_titles_itself_none():
+    """The same cause on the title: ``name`` is present and ``None``, so no default fired."""
+    projected = {"name": None, "description": None}
+
+    assert projected.get("name", UNNAMED_NODE) is None  # main's title
+    assert node_context_text(projected) == (UNNAMED_NODE, UNNAMED_NODE)
+
+
 def test_text_node_title_is_the_generated_title():
     text = "Acme acquired Initech and Acme hired Alice"
 
@@ -93,6 +125,40 @@ def test_non_string_name_still_renders():
 def test_blank_statement_type_is_not_an_assertion():
     assert is_assertion_props({"name": "Alice", "statement_type": "  "}) is False
     assert node_context_text({"name": "Alice", "statement_type": None}) == ("Alice", "Alice")
+
+
+def test_an_assertion_typed_node_with_a_statement_type_is_an_assertion():
+    assert is_assertion_props({"type": "Assertion", **DENIAL}) is True
+
+
+def test_a_foreign_datapoint_with_a_statement_type_field_is_not_an_assertion():
+    """A third-party ``DataPoint`` is free to declare a field it happens to call this.
+
+    Duck-typing alone would render it stance-first and send it through pair expansion. The
+    projection stores the DataPoint *class name* in ``type`` (``get_graph_from_model``), and
+    ontology canonicalization does not touch that -- it rewrites an entity's ``is_a``, not
+    its Python class -- so when a type is present it can settle the question.
+    """
+    assert is_assertion_props({"type": "ReleaseNote", "statement_type": "draft"}) is False
+    assert node_context_text(
+        {"type": "ReleaseNote", "name": "v2 notes", "statement_type": "draft"}
+    ) == ("v2 notes", "v2 notes")
+
+
+def test_a_registered_assertion_subclass_is_still_an_assertion():
+    """``type`` holds the concrete class name, so a subclass has to be admitted by name."""
+
+    class CourtFinding(Assertion):
+        pass
+
+    assert is_assertion_props({"type": "CourtFinding", "statement_type": "finding"}) is True
+
+
+def test_a_blank_or_absent_type_falls_back_to_the_statement_type():
+    """Not every caller renders a projected node -- the hybrid lane builds props from a payload."""
+    assert is_assertion_props({"statement_type": "denial"}) is True
+    assert is_assertion_props({"type": None, "statement_type": "denial"}) is True
+    assert is_assertion_props({"type": "   ", "statement_type": "denial"}) is True
 
 
 def test_assertion_title_carries_statement_type_speaker_and_stance():
@@ -185,6 +251,36 @@ def test_unverified_quote_is_not_marked_verified():
     assert body == ('Mr. Adams affirms that the roof leaked.\nQuote: "The roof leaked all spring."')
 
 
+def test_a_stringified_false_does_not_mark_the_quote_verified():
+    """``source_quote_verified`` is a bool, but a store can hand it back as text.
+
+    Neo4j and the Postgres demo adapter round JSON properties through strings, and the
+    non-empty string ``"false"`` is truthy in Python -- so a plain truth test stamps
+    ``(verified)`` onto the one quote the extraction explicitly marked unverified.
+    """
+    props = {
+        "name": "the roof leaked",
+        "statement_type": "testimony",
+        "polarity": "positive",
+        "asserted_by": "Mr. Adams",
+        "source_quote": "The roof leaked all spring.",
+    }
+
+    _title, body = node_context_text({**props, "source_quote_verified": "false"})
+    assert body.endswith('Quote: "The roof leaked all spring."')
+
+    _title, verified = node_context_text({**props, "source_quote_verified": "True"})
+    assert verified.endswith('Quote: "The roof leaked all spring." (verified)')
+
+
+def test_a_non_boolean_verification_flag_is_not_a_verification():
+    props = {"name": "x", "statement_type": "testimony", "source_quote": "q"}
+
+    for value in (1, "yes", "1", ["true"], None):
+        _title, body = node_context_text({**props, "source_quote_verified": value})
+        assert "(verified)" not in body
+
+
 def test_quote_line_is_omitted_when_there_is_no_quote():
     _title, body = node_context_text(
         {
@@ -272,6 +368,30 @@ def test_context_fields_for_datapoints_includes_the_assertion_fields():
 
     assert set(ASSERTION_METADATA["context_fields"]).issubset(set(fields))
     assert fields == list(dict.fromkeys(fields))  # deduplicated, deterministic order
+
+
+def test_context_fields_are_cached_and_the_cache_is_clearable():
+    """The walk crosses every ``DataPoint`` subclass and runs once per projected search.
+
+    Cached, so a subclass registered after the first call is invisible until the cache is
+    cleared -- which is the contract a test that declares one relies on. Each call still
+    hands back a fresh list, so a caller that mutates the result cannot corrupt the cache.
+    """
+    first = context_fields_for_datapoints()
+
+    assert context_fields_for_datapoints() == first
+    assert context_fields_for_datapoints() is not first
+
+    class LateDataPoint(DataPoint):
+        late_field: str = ""
+        metadata: dict = {"index_fields": [], "context_fields": ["late_field"]}
+
+    try:
+        assert "late_field" not in context_fields_for_datapoints()  # still the cached walk
+        context_fields_for_datapoints.cache_clear()
+        assert "late_field" in context_fields_for_datapoints()
+    finally:
+        context_fields_for_datapoints.cache_clear()
 
 
 def test_assertion_context_fields_are_the_stance_properties():

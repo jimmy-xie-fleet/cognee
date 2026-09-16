@@ -89,8 +89,10 @@ def _node_id(node: Any) -> str:
 def assertion_ids_in(nodes: Iterable[Any]) -> list[str]:
     """Ids of the nodes that are assertions, in encounter order, deduplicated.
 
-    Same test as everywhere else: one non-blank ``statement_type`` decides
-    (``is_assertion_props``), never the node's ``type``.
+    Same test as everywhere else (``is_assertion_props``): one non-blank ``statement_type``
+    decides, and a ``type`` that names some other DataPoint class vetoes -- so a foreign
+    node that happens to declare a ``statement_type`` field does not cost a neighborhood
+    call.
     """
     ids: list[str] = []
     for node in nodes or []:
@@ -172,6 +174,15 @@ def _pair_edges_from_rows(
         # The edge label the store returned, stamped over the projection the way
         # ``_process_nodes_and_edges`` stamps it; renderers read it first.
         attributes["relationship_type"] = relationship_type
+        # ``edge_identity`` dedupes on ``relationship_name``, not on the
+        # ``relationship_type`` the renderers read, so an unlabelled pair edge would
+        # identify as ``("graph", source, "", target, True)`` and match no retrieved edge --
+        # the same edge would then be appended to every rendered context that already had
+        # it. ``setdefault`` cannot do this: the projection asks for ``relationship_name``,
+        # so the key is always *present*, filled with ``None`` by a store that does not
+        # persist it.
+        if not attributes.get("relationship_name"):
+            attributes["relationship_name"] = relationship_type
         edges.append(Edge(source, target, attributes=attributes))
     return edges
 
