@@ -454,7 +454,7 @@ class FakeTracerLLM:
 
 
 @contextmanager
-def _patched(graph, texts=None, *, locations=None, steps=(), default=None, vector_results=None):
+def _patched(graph, texts=None, *, steps=(), default=None, vector_results=None):
     """Patch every I/O seam the pass reaches through."""
     texts = DEFAULT_TEXTS if texts is None else texts
 
@@ -477,7 +477,7 @@ def _patched(graph, texts=None, *, locations=None, steps=(), default=None, vecto
         ) as provenance_mock,
         patch(
             "cognee.tasks.graph.reference_graph_view._raw_locations",
-            new=AsyncMock(return_value=locations or {}),
+            new=AsyncMock(return_value={}),
         ),
         patch(
             "cognee.tasks.graph.reference_graph_view._read_processed_text",
@@ -502,7 +502,6 @@ async def _run(
     graph,
     texts=None,
     *,
-    locations=None,
     ctx=None,
     dry_run=False,
     steps=(),
@@ -515,7 +514,6 @@ async def _run(
     with _patched(
         graph,
         texts,
-        locations=locations,
         steps=steps,
         default=default,
         vector_results=vector_results,

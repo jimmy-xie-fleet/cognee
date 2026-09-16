@@ -29,7 +29,6 @@ CANDIDATE_PREVIEW_CHARS = 240
 _LABEL_PREFIX_BY_TYPE = {
     "Assertion": "A",
     "DocumentChunk": "P",
-    "TextSummary": "S",
 }
 _DEFAULT_LABEL_PREFIX = "N"
 _DOCUMENT_LABEL_PREFIX = "D"

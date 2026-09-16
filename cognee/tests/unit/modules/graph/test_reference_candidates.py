@@ -76,9 +76,11 @@ def test_label_registry_prefixes_by_type():
     registry = LabelRegistry()
     assert registry.label("n1", "Assertion") == "A1"
     assert registry.label("n2", "DocumentChunk") == "P1"
-    assert registry.label("n3", "TextSummary") == "S1"
-    assert registry.label("n4", "Document") == "D1"
-    assert registry.label("n5", "SomeWeirdType") == "N1"
+    assert registry.label("n3", "Document") == "D1"
+    # A summary never reaches the registry (seed retrieval folds it onto its chunk), so
+    # it has no prefix of its own and takes the fallback like any unlisted type.
+    assert registry.label("n4", "TextSummary") == "N1"
+    assert registry.label("n5", "SomeWeirdType") == "N2"
 
 
 def test_label_registry_document_subtype_prefix():
@@ -365,7 +367,7 @@ def test_format_candidate_lines_renders_an_unlisted_type_as_a_document():
     """Only assertions and passages have a type word; a summary never reaches a candidate
     (seed retrieval folds it onto its chunk), so it falls through with everything else."""
     candidate = Candidate(
-        label="S1",
+        label="N1",
         node_id="n1",
         node_type="TextSummary",
         score=0.9,
@@ -374,7 +376,7 @@ def test_format_candidate_lines_renders_an_unlisted_type_as_a_document():
         chunk_index=0,
     )
     lines = format_candidate_lines([candidate])
-    assert lines == '[S1] Document "Complaint": "summary text"'
+    assert lines == '[N1] Document "Complaint": "summary text"'
 
 
 def test_format_candidate_lines_document():

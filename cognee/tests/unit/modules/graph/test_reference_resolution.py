@@ -13,15 +13,11 @@ from cognee.modules.chunking.incremental_chunking import chunk_offsets
 from cognee.modules.engine.models.Assertion import Assertion
 from cognee.modules.graph.utils.reference_resolution import (
     DEFAULT_MAX_SPAN,
-    LEGACY_STRATEGIES,
     RESOLVED_BY,
-    STRATEGY_DOCUMENT_LOCATOR,
-    STRATEGY_DOCUMENT_ONLY,
     STRATEGY_ENTITY_NAME,
     STRATEGY_EXISTING_ID,
     STRATEGY_LLM_INFERRED,
     STRATEGY_LLM_TRACE,
-    STRATEGY_PROSE_LOOKUP,
     Locator,
     ReferenceHint,
     Resolution,
@@ -299,7 +295,7 @@ def _resolution(**overrides):
         assertion_id="a-denial",
         field="responds_to",
         reference_text="Complaint ¶5",
-        strategy=STRATEGY_DOCUMENT_LOCATOR,
+        strategy=STRATEGY_LLM_TRACE,
         confidence=0.9,
         anchor_id="chunk-1",
         anchor_type="chunk",
@@ -325,7 +321,7 @@ def test_build_reference_edge_carries_the_resolution_provenance():
     assert props["source_node_id"] == "a-denial"
     assert props["target_node_id"] == "a-1"
     assert props["reference_text"] == "Complaint ¶5"
-    assert props["resolution_strategy"] == STRATEGY_DOCUMENT_LOCATOR
+    assert props["resolution_strategy"] == STRATEGY_LLM_TRACE
     assert props["resolution_confidence"] == 0.9
     assert props["resolved_target_type"] == "assertion"
     assert props["resolved_by"] == RESOLVED_BY == "reference_resolver"
@@ -337,7 +333,7 @@ def test_build_node_patch_records_the_resolution():
     assert patch["responds_to"] == "chunk-1"
     assert patch["responds_to_text"] == "Complaint ¶5"
     assert patch["responds_to_resolution"] == {
-        "strategy": STRATEGY_DOCUMENT_LOCATOR,
+        "strategy": STRATEGY_LLM_TRACE,
         "confidence": 0.9,
         "target_type": "assertion",
         "target_ids": ["a-1", "a-2"],
@@ -372,21 +368,6 @@ def test_strategy_names_are_the_documented_values():
         "llm_trace",
         "llm_inferred",
     )
-
-
-def test_legacy_strategy_names_stay_readable():
-    """Stored edges still carry them, so the names must resolve -- but nothing writes them."""
-    assert LEGACY_STRATEGIES == frozenset({"document_locator", "document_only", "prose_lookup"})
-    assert (
-        STRATEGY_DOCUMENT_LOCATOR,
-        STRATEGY_DOCUMENT_ONLY,
-        STRATEGY_PROSE_LOOKUP,
-    ) == ("document_locator", "document_only", "prose_lookup")
-    assert LEGACY_STRATEGIES == {
-        STRATEGY_DOCUMENT_LOCATOR,
-        STRATEGY_DOCUMENT_ONLY,
-        STRATEGY_PROSE_LOOKUP,
-    }
 
 
 def test_resolution_carries_the_tracer_fields_with_defaults():

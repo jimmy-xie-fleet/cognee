@@ -855,9 +855,7 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
     becomes a candidate), never as a node id, so
     `finish(candidate_label | null, confidence, reason)` can only name a label or abstain.
     Strategies: `llm_trace` for a reference the document stated, `llm_inferred` for an unstated
-    denial/admission link; `LEGACY_STRATEGIES` (`document_locator`, `document_only`,
-    `prose_lookup`) are read-only names nothing produces any more, which a dataset resolved
-    before this branch may still carry in a `resolution_strategy` breakdown.
+    denial/admission link.
   - **Budget** (env, on `CognifyConfig`): `REFERENCE_LLM_MAX_CALLS` (300, per pass, shared by
     every trace), `REFERENCE_TRACER_MAX_ITER` (4, per reference — each iteration is one tool
     step or one finish, and reaching the cap costs no extra call),

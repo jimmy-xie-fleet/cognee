@@ -44,17 +44,6 @@ STRATEGY_ENTITY_NAME = "entity_name"
 STRATEGY_LLM_TRACE = "llm_trace"
 STRATEGY_LLM_INFERRED = "llm_inferred"
 
-# The deterministic name-scoring cascade this resolver used to run. Nothing produces
-# these any more (decision D5 deleted the parsing/scoring half), but edges and
-# ``<field>_resolution`` blobs written by earlier passes still carry them, so the names
-# stay readable and a consumer can tell a legacy answer from a traced one.
-STRATEGY_DOCUMENT_LOCATOR = "document_locator"
-STRATEGY_DOCUMENT_ONLY = "document_only"
-STRATEGY_PROSE_LOOKUP = "prose_lookup"
-LEGACY_STRATEGIES = frozenset(
-    {STRATEGY_DOCUMENT_LOCATOR, STRATEGY_DOCUMENT_ONLY, STRATEGY_PROSE_LOOKUP}
-)
-
 RESOLVED_BY = "reference_resolver"
 
 DEFAULT_MAX_SPAN = 4000
