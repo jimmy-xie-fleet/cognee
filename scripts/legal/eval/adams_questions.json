@@ -1,0 +1,420 @@
+{
+  "corpus": "adams-family-redevelopment/v0.0.2",
+  "questions": [
+    {
+      "id": "adams-01",
+      "category": "summary",
+      "question": "what's going on in this case?",
+      "gold_facts": [
+        {"fact": "Adams Family Properties, LLC sued the City of Clifton, the City of Clifton Planning Board, and the City of Clifton Municipal Council.", "source": "Verified_Complaint_Adams_v_Clifton.docx — caption"},
+        {"fact": "The action is a Verified Complaint in Lieu of Prerogative Writs in the Superior Court of New Jersey, Law Division, Passaic County, Docket No. PAS-L-001884-26.", "source": "Verified_Complaint_Adams_v_Clifton.docx — caption"},
+        {"fact": "The Complaint was filed June 18, 2026.", "source": "Verified_Complaint_Adams_v_Clifton.docx — signature block, 'Dated: June 18, 2026'"},
+        {"fact": "The Complaint challenges Resolution No. 2026-118, which the Council adopted May 5, 2026 designating Block 2601, Lots 12 through 16 as a Condemnation Redevelopment Area.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraph 17"},
+        {"fact": "The property at issue is 10 Main Street, Clifton, New Jersey, Block 2601, Lot 14, a 1968 mixed-use commercial and residential building with a 1981 residential addition.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraphs 1 and 8"},
+        {"fact": "By letter dated June 10, 2026 the City extended a written offer of $1,850,000.00 for the property.", "source": "Formal_Notice_of_Determination_Adams_Family.pdf — section 1, 'APPRAISED VALUE AND OFFER'"},
+        {"fact": "The Complaint pleads three counts: lack of substantial evidence, declaratory judgment on existing zoning and stated public purpose, and procedural defects under the LRHL.", "source": "Verified_Complaint_Adams_v_Clifton.docx — Count I, Count II, Count III headings"},
+        {"fact": "Defendants filed an Answer and Separate Defenses dated July 8, 2026 demanding dismissal and an order upholding Resolution No. 2026-118.", "source": "Answer_Adams_v_Clifton.docx — Prayer for Relief and 'Dated: July 8, 2026'"}
+      ],
+      "must_not_claim": [
+        "The City has already filed a condemnation complaint or already taken the property.",
+        "Adams Family Properties is the defendant and the City is the plaintiff.",
+        "Resolution No. 2026-118 adopted the Main Street Redevelopment Plan (the Plan was adopted separately by Ordinance No. 2026-21).",
+        "The case is pending in federal court or before a zoning board of adjustment."
+      ],
+      "notes": "Baseline orientation question. Verbatim wording required by the eval spec; tests whether the graph can produce a correct high-level posture without conflating the designation resolution with the plan ordinance."
+    },
+    {
+      "id": "adams-02",
+      "category": "summary",
+      "question": "Who are the key people and firms in this matter, and what role does each one play?",
+      "gold_facts": [
+        {"fact": "Robert Adams and Linda Adams are the principals/members of Adams Family Properties, LLC.", "source": "Client_Intake_Memo.docx — section 1, Client Information"},
+        {"fact": "Sarah Murphy, Esq., of Murphy & Murphy LLP represents Plaintiff Adams Family Properties, LLC.", "source": "Verified_Complaint_Adams_v_Clifton.docx — signature block"},
+        {"fact": "Gerald Bianchi, Esq., Corporation Counsel, represents the City of Clifton defendants.", "source": "Answer_Adams_v_Clifton.docx — signature block"},
+        {"fact": "Norman Fester, PP, AICP, of Fester Municipal Planning Associates, LLC prepared the Preliminary Investigation Report for the Planning Board.", "source": "Fester_Preliminary_Investigation_Report.docx — title block and signature"},
+        {"fact": "Diane R. Hartwell, MAI, of Hartwell Valuation Services, LLC prepared the City's appraisal of 10 Main Street.", "source": "City_Appraisal_Report_10_Main_Street.docx — title block"},
+        {"fact": "Marcus T. Whitfield, MAI, SRA, of Whitfield & Cole Appraisal Group, LLC prepared the rebuttal appraisal for Murphy & Murphy LLP on behalf of Adams Family Properties.", "source": "Adams_Family_Rebuttal_Appraisal.pdf — letter of transmittal, page 1"},
+        {"fact": "Rebecca Nowak, AICP, is the City Planner and issued the June 10, 2026 Notice of Determination and Proposed Acquisition.", "source": "Formal_Notice_of_Determination_Adams_Family.pdf — signature block"},
+        {"fact": "Diane Kowalski is the Mayor of Clifton and corresponded with Norman Fester about the Main Street corridor.", "source": "Fester_Mayor_Email_Correspondence.pdf — email header, December 3, 2025"}
+      ],
+      "must_not_claim": [
+        "Marcus Whitfield prepared the City of Clifton's appraisal.",
+        "Diane Hartwell was retained by Murphy & Murphy LLP or by Adams Family Properties.",
+        "Norman Fester was retained by Adams Family Properties.",
+        "Gerald Bianchi represents Adams Family Properties."
+      ],
+      "notes": "Tests role attribution across documents; the two appraisers are the most common cross-attribution error."
+    },
+    {
+      "id": "adams-03",
+      "category": "disputes",
+      "question": "can you list all the contradictions detected in this case?",
+      "gold_facts": [
+        {"fact": "Council Resolution No. 2026-04 directed that the hearing notice state that a final determination would authorize the City to exercise eminent domain, but the Public Notice of Hearing dated March 10, 2026 never uses the terms 'Condemnation Redevelopment Area' or 'eminent domain'.", "source": "City_Council_Resolution_2026-04.pdf — resolved paragraph 2; Public_Hearing_Notice_April_1_2026.pdf — full text"},
+        {"fact": "The Local Redevelopment and Housing Law provision pleaded requires publication once each week for two consecutive weeks, but the hearing notice certifies a single publication in the Clifton Journal on March 12, 2026.", "source": "Public_Hearing_Notice_April_1_2026.pdf — publication footer; Verified_Complaint_Adams_v_Clifton.docx — paragraph 35"},
+        {"fact": "Robert Adams told the Planning Board on April 1, 2026 that the fire code violations were handled and 'None of that sat open', while the Bureau of Fire Prevention records for NOV-2025-0912 and NOV-2025-0935 state 'Open as of March 1, 2026'.", "source": "Planning_Board_Transcript_April_1_2026.docx — quote: 'None of that sat open — we handled it'; Fire_Notice_NOV-2025-0912.pdf — Inspection record status"},
+        {"fact": "The City's June 10, 2026 notice measures the 45-day challenge period from the May 8, 2026 publication, while the adopted Main Street Redevelopment Plan states that for a Condemnation Redevelopment Area owner, N.J.S.A. 40A:12A-6(b)(5)(e)(ii) and (h) direct a 45-day period measured from receipt.", "source": "Formal_Notice_of_Determination_Adams_Family.pdf — section 2; Main_Street_Redevelopment_Plan.docx — Section 9"},
+        {"fact": "Hartwell concluded market value of $1,850,000 and Whitfield concluded $2,900,000 for the same property as of the same May 15, 2026 effective date.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 7; Adams_Family_Rebuttal_Appraisal.pdf — letter of transmittal"},
+        {"fact": "The roll call in Planning Board Resolution No. 2026-PB-07 lists members Patel and Simmons voting yes, while the April 1 transcript and the April 15 minutes identify the seven-member Board as Brennan, Ortiz, Delgado, Wu, Reyes, Ferraro and Kim.", "source": "Planning_Board_Resolution_2026-PB-07.pdf — Roll Call table; Planning_Board_Minutes_April_15_2026.docx — Attendance and Roll Call Vote"},
+        {"fact": "The Tax Collector's receipt labels $55,075.00 as 'total 2025 municipal charges' paid, while the City Finance ledger labels $59,925.00 as 'TOTAL 2025 MUNICIPAL CHARGES'; the $4,850.00 difference is the supplemental sewer connection and stormwater fee under Permit B-2025-3312.", "source": "Tax_Receipt_2025_Adams_Family.pdf — Note paragraph; City_Finance_2025_Municipal_Charge_Ledger.pdf — charge table"},
+        {"fact": "Planning Board Resolution No. 2026-PB-07 recites that 'members Delgado and Ferraro stated that Lot 14 presented a closer question', but in the April 1 transcript only Ms. Ferraro used the phrase 'a closer question'.", "source": "Planning_Board_Resolution_2026-PB-07.pdf — fourth WHEREAS clause; Planning_Board_Transcript_April_1_2026.docx — Ferraro statement near end of public portion"}
+      ],
+      "must_not_claim": [
+        "The Overlook engineer found the building's electrical service to be overloaded or unsafe (the memo states no overloading, tripped breakers or unsafe conditions were observed).",
+        "The Fester-Mayor emails show the Mayor directing Fester to reach a predetermined blight finding (she wrote 'do the real analysis' and 'Present it straight').",
+        "There is a $9,000,000 appraisal of the property.",
+        "The City's records show a second newspaper publication of the hearing notice (the Answer states Defendants do not assert that a second publication exists).",
+        "Robert Adams testified that every violation including the January 2026 sanitation notice was fully closed (he conceded that one was 'not fully closed out yet')."
+      ],
+      "notes": "The question that exposed the original failure. Requires distinguishing genuine documentary conflicts from negated propositions; the must_not_claim list carries the known negation-flip and invented-number traps."
+    },
+    {
+      "id": "adams-04",
+      "category": "disputes",
+      "question": "Which allegations in the Verified Complaint does the City admit, and which does it deny?",
+      "gold_facts": [
+        {"fact": "The Answer admits Complaint paragraph 9, which states that 5,000 of 6,600 suite square feet, or 75.8%, was occupied and all four apartments were occupied.", "source": "Answer_Adams_v_Clifton.docx — paragraph 9; Verified_Complaint_Adams_v_Clifton.docx — paragraph 9"},
+        {"fact": "As to the $67,700.02 of 2025 capital improvements alleged in Complaint paragraph 10, Defendants state they lack sufficient knowledge of the precise invoice amounts and otherwise deny.", "source": "Answer_Adams_v_Clifton.docx — paragraph 10"},
+        {"fact": "The Answer admits that the City finance ledger records $59,925.00 and a current account.", "source": "Answer_Adams_v_Clifton.docx — paragraph 11"},
+        {"fact": "The Answer admits that the mailed hearing notice did not use the terms Condemnation Redevelopment Area or eminent domain and that its certification identifies one publication on March 12, but denies that those facts require the relief demanded.", "source": "Answer_Adams_v_Clifton.docx — paragraph 14"},
+        {"fact": "The Answer admits that the MSC-O overlay permits the uses described but denies that it defeats the designation.", "source": "Answer_Adams_v_Clifton.docx — paragraph 23"},
+        {"fact": "The Answer denies Complaint paragraphs 26, 27 and 28, the Count I allegations that the record does not tie Lot 14's condition to the required detriment and that Resolution No. 2026-118 is arbitrary and capricious.", "source": "Answer_Adams_v_Clifton.docx — paragraphs 26, 27, 28"},
+        {"fact": "The Answer denies Complaint paragraphs 30 through 33, the Count II declaratory judgment allegations.", "source": "Answer_Adams_v_Clifton.docx — paragraphs 30, 31, 32, 33"},
+        {"fact": "The Answer admits the documentary facts in the first sentence of Complaint paragraph 36 but denies that Plaintiff lacked actual notice or suffered prejudice.", "source": "Answer_Adams_v_Clifton.docx — paragraph 36"}
+      ],
+      "must_not_claim": [
+        "The City admitted that the designation is arbitrary, capricious and unsupported (paragraph 28 is denied).",
+        "The City denied that the hearing notice omitted the eminent-domain warning (it admitted that fact).",
+        "The City admitted that Plaintiff's 2025 capital improvements totaled $67,700.02.",
+        "The City admitted that the MSC-O overlay defeats the redevelopment designation."
+      ],
+      "notes": "Admit/deny mapping question. Pleading responses are the easiest place for a retriever to invert polarity, because admissions and denials sit adjacent in the same short document."
+    },
+    {
+      "id": "adams-05",
+      "category": "disputes",
+      "question": "On the alleged procedural notice defects, what does the City concede and what does it deny?",
+      "gold_facts": [
+        {"fact": "The Answer admits that the cited LRHL provisions speak to the notice contents, publication schedule, service period and owner warning described, but denies Plaintiff's characterization of the remedy.", "source": "Answer_Adams_v_Clifton.docx — paragraph 35"},
+        {"fact": "The Answer states: 'Defendants do not assert that a second newspaper publication or an earlier final notice exists in the present record.'", "source": "Answer_Adams_v_Clifton.docx — paragraph 36"},
+        {"fact": "The Answer admits that the June 10 letter says it constitutes formal notice, was sent 36 days after May 5, and states a publication-based challenge period.", "source": "Answer_Adams_v_Clifton.docx — paragraph 21"},
+        {"fact": "The Answer admits that no separate final designation notice was mailed to Plaintiff before June 10.", "source": "Answer_Adams_v_Clifton.docx — paragraph 21"},
+        {"fact": "The Answer denies that Plaintiff lacked actual notice or suffered prejudice because Plaintiff received the hearing notice, appeared, objected, and timely filed.", "source": "Answer_Adams_v_Clifton.docx — paragraph 36"},
+        {"fact": "Separate Defense 5 contends the challenged notice defects caused no prejudice while preserving the Court's authority to determine whether strict or substantial compliance applies.", "source": "Answer_Adams_v_Clifton.docx — Separate Defenses, number 5"},
+        {"fact": "Separate Defense 6 contends that any defect affecting condemnation notice or authority should be addressed by relief no broader than necessary and should not invalidate otherwise severable planning actions.", "source": "Answer_Adams_v_Clifton.docx — Separate Defenses, number 6"},
+        {"fact": "The Answer denies Complaint paragraph 37, which alleges the designation and asserted condemnation authority are invalid as applied.", "source": "Answer_Adams_v_Clifton.docx — paragraph 37"}
+      ],
+      "must_not_claim": [
+        "The City contends that a second newspaper publication did occur.",
+        "The City concedes that the designation is invalid because of the notice defects.",
+        "The City argues that the Complaint was filed out of time (Separate Defense 5 states Plaintiff 'timely filed').",
+        "The City denies that the June 10 letter used a publication-based challenge clock."
+      ],
+      "notes": "Who-denies-what question. The concession in paragraph 36 ('Defendants do not assert...') is a negative statement that a naive retriever can read as an affirmative assertion."
+    },
+    {
+      "id": "adams-06",
+      "category": "who_said_what",
+      "question": "What did the Overlook Engineering conditions memorandum actually find about the building's electrical service and structure, and what did it say it did not find or not do?",
+      "gold_facts": [
+        {"fact": "The memorandum is dated November 18, 2025, reflects a site visit on November 10, 2025, and was prepared by James T. Calloway, PE, of Overlook Engineering Group.", "source": "Overlook_Engineering_Conditions_Memo.pdf — header block, page 1"},
+        {"fact": "The memorandum states the electrical service and individual tenant panels appear original to the 1968 construction, with individual 100-amp panels serving each commercial tenant space.", "source": "Overlook_Engineering_Conditions_Memo.pdf — section 3, Electrical Observations"},
+        {"fact": "The memorandum states the engineer did not observe any evidence of overloading, tripped breakers, or unsafe conditions at the time of the visit.", "source": "Overlook_Engineering_Conditions_Memo.pdf — quote: 'we did not observe any evidence of overloading'"},
+        {"fact": "The memorandum states that no significant foundation settlement, wall cracking, or other structural distress was observed.", "source": "Overlook_Engineering_Conditions_Memo.pdf — section 2, Building Envelope and Foundation"},
+        {"fact": "The summary states: 'We observed no unsafe conditions requiring immediate remediation at the time of our visit.'", "source": "Overlook_Engineering_Conditions_Memo.pdf — section 6, Summary"},
+        {"fact": "The memorandum states that no destructive testing, load calculations, or code compliance analysis was performed.", "source": "Overlook_Engineering_Conditions_Memo.pdf — section 1, Purpose and Scope"},
+        {"fact": "The memorandum recommends that a licensed electrical contractor perform a load calculation and capacity evaluation prior to any additional tenant fit-out or equipment installation.", "source": "Overlook_Engineering_Conditions_Memo.pdf — section 3, Electrical Observations"},
+        {"fact": "The memorandum reports HVAC equipment with nameplate data consistent with an approximately 1994 renovation, approximately 31 years old, and states that all units inspected were operational at the time of the visit.", "source": "Overlook_Engineering_Conditions_Memo.pdf — section 4, Mechanical (HVAC) Observations"}
+      ],
+      "must_not_claim": [
+        "The engineer found that the electrical service was overloaded or presented an unsafe condition.",
+        "The engineer found structural distress, foundation settlement, or that the building was structurally unsound.",
+        "The engineer performed a load calculation or a code compliance review.",
+        "The engineer found that the HVAC units were non-operational."
+      ],
+      "notes": "Negation-sensitive. Every negative finding here ('no overloading', 'no unsafe conditions', 'no structural distress') was rewritten as a positive claim in the failure that motivated this eval."
+    },
+    {
+      "id": "adams-07",
+      "category": "who_said_what",
+      "question": "What did the Murphy & Murphy client intake memorandum record about the conflicts check and about which client documents were missing at intake?",
+      "gold_facts": [
+        {"fact": "The intake memorandum is dated June 15, 2026 and was written by Sarah Murphy, Esq., to the file.", "source": "Client_Intake_Memo.docx — header block"},
+        {"fact": "The memo states: 'Conflicts check run June 15, 2026 — no conflicts identified.'", "source": "Client_Intake_Memo.docx — section 7, Conflicts Check"},
+        {"fact": "The memo states the firm does not currently represent the City of Clifton or any adverse party in this matter.", "source": "Client_Intake_Memo.docx — section 7, Conflicts Check"},
+        {"fact": "The memo records that the client paid a documented $35,000 franchise fee and reports additional build-out costs that have not yet been supported with invoices.", "source": "Client_Intake_Memo.docx — section 3, Statement of Facts"},
+        {"fact": "The memo states: 'No appraisal fee invoice or owner engineering invoice was received at intake.'", "source": "Client_Intake_Memo.docx — section 8, Fee Arrangement"},
+        {"fact": "The memo records that the client reports no separate final designation notice was received before the June 10 letter.", "source": "Client_Intake_Memo.docx — section 3, Statement of Facts"},
+        {"fact": "The memo directs filing the action in lieu of prerogative writs by June 18, 2026, one day before the earliest 45-day calculation from the May 5 adoption.", "source": "Client_Intake_Memo.docx — section 6, Immediate Action Items & Deadlines"}
+      ],
+      "must_not_claim": [
+        "The conflicts check identified a conflict.",
+        "The firm previously represented, or currently represents, the City of Clifton.",
+        "The client produced invoices supporting the Jersey Mike's build-out costs at intake.",
+        "The firm received the owner's engineering invoice or the appraisal fee invoice at intake."
+      ],
+      "notes": "Negation-sensitive, and the exact trap named in the eval spec: 'no conflicts identified' must not become 'conflicts were identified'."
+    },
+    {
+      "id": "adams-08",
+      "category": "who_said_what",
+      "question": "What did Norman Fester and Mayor Diane Kowalski say to each other in the emails produced from the City email archive?",
+      "gold_facts": [
+        {"fact": "On December 3, 2025 Mayor Kowalski wrote that the Council 'would rather not run a public auction process on this one if we can help it' and that it is cleaner to go the redevelopment route and negotiate directly with a qualified developer.", "source": "Fester_Mayor_Email_Correspondence.pdf — email dated December 3, 2025, 4:12 PM"},
+        {"fact": "On December 4, 2025 Fester replied that he would need to do a genuine conditions investigation regardless of the outcome she was hoping for, and that 'If the Main Street properties turn out to be in decent shape, I'll say so.'", "source": "Fester_Mayor_Email_Correspondence.pdf — email dated December 4, 2025, 9:47 AM"},
+        {"fact": "Kowalski replied the same day: 'Totally fair, and appreciated — do the real analysis.'", "source": "Fester_Mayor_Email_Correspondence.pdf — email dated December 4, 2025, 11:03 AM"},
+        {"fact": "On February 20, 2026 Fester wrote that on Lot 14 the 'detriment to welfare' piece is thinner than on the other lots, while stating he could still support an obsolescence/faulty-arrangement finding based on the building systems and the parking shortfall.", "source": "Fester_Mayor_Email_Correspondence.pdf — email dated February 20, 2026, 2:31 PM"},
+        {"fact": "Kowalski replied on February 20, 2026: 'Present it straight — I don't want to get into a situation where we're accused of pre-deciding this.'", "source": "Fester_Mayor_Email_Correspondence.pdf — email dated February 20, 2026, 3:55 PM"},
+        {"fact": "Complaint paragraph 22 characterizes the emails as reflecting a desire to use redevelopment to avoid public-bidding constraints and as acknowledging that the detriment finding as to Lot 14 was comparatively weak.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraph 22"},
+        {"fact": "The Answer admits the correspondence exists, denies Plaintiff's characterization, and relies on its complete text including the direction to perform the actual analysis.", "source": "Answer_Adams_v_Clifton.docx — paragraph 22"},
+        {"fact": "The emails were requested in the OPRA request Murphy & Murphy submitted June 16, 2026 covering Fester/Kowalski correspondence from January 1, 2025 through March 1, 2026.", "source": "OPRA_Request_June_16_2026.pdf — Records Requested, item 1"}
+      ],
+      "must_not_claim": [
+        "The Mayor instructed Fester to find the property blighted or to reach a predetermined conclusion.",
+        "Fester told the Mayor he would reach whatever conclusion she wanted.",
+        "Fester wrote that he could not support any statutory finding as to Lot 14.",
+        "The City withheld the Fester-Mayor emails from the OPRA production."
+      ],
+      "notes": "Negation-sensitive attribution. The emails contain both a candid statement about avoiding a public auction and explicit instructions to do an honest analysis; a wrong answer collapses the second into the first."
+    },
+    {
+      "id": "adams-09",
+      "category": "who_said_what",
+      "question": "At her September 22, 2026 deposition, what did Diane Hartwell testify about who decided not to develop a redevelopment land-value analysis?",
+      "gold_facts": [
+        {"fact": "Hartwell testified she was retained in May 2026 and corresponded primarily with Ms. Nowak, the City Planner.", "source": "Deposition_Hartwell_September_22_2026.docx — examination by Ms. Murphy, early questions"},
+        {"fact": "Hartwell testified that the engagement letter described the intended use of the report and that the highest and best use analysis and conclusion were her own professional judgment.", "source": "Deposition_Hartwell_September_22_2026.docx — quote: 'The highest and best use analysis'"},
+        {"fact": "Hartwell testified: 'Nobody instructed me not to' perform a separate land valuation under the redevelopment scenario.", "source": "Deposition_Hartwell_September_22_2026.docx — quote: 'Nobody instructed me not to'"},
+        {"fact": "Hartwell testified that the City did not direct a predetermined highest-and-best-use conclusion.", "source": "Deposition_Hartwell_September_22_2026.docx — quote: 'The City did not direct a predetermined'"},
+        {"fact": "Hartwell testified that she did not pull a single comparable land sale in her report.", "source": "Deposition_Hartwell_September_22_2026.docx — quote: 'No, I did not.'"},
+        {"fact": "Asked whether she agreed with Whitfield's $2,900,000 conclusion, Hartwell testified she has concerns with aspects of his analysis but has not been asked to prepare a formal response to his report.", "source": "Deposition_Hartwell_September_22_2026.docx — answer following the Whitfield $2,900,000 question"},
+        {"fact": "Hartwell testified that her report does not rule out a higher value on a different, supported record, but concluded that this record did not establish a specific redevelopment program or a land-value indication.", "source": "Deposition_Hartwell_September_22_2026.docx — quote: 'does not rule out a higher value'"},
+        {"fact": "On examination by Mr. Bianchi, Hartwell testified the $1,850,000 conclusion was reliable to a reasonable degree of professional certainty for continued use of the property as improved.", "source": "Deposition_Hartwell_September_22_2026.docx — Examination by Mr. Bianchi"}
+      ],
+      "must_not_claim": [
+        "Hartwell testified that the City instructed her to value the property at its current use only.",
+        "Hartwell testified that she agreed with Whitfield's $2,900,000 conclusion.",
+        "Hartwell testified that she reviewed and approved the City's August 5, 2026 letter before it was sent (she testified she did not recall reviewing a final draft).",
+        "Hartwell testified that she performed a separate land valuation under the redevelopment scenario."
+      ],
+      "notes": "Negation-sensitive. 'Nobody instructed me not to' is a double negative that flips easily into 'the City instructed her not to'."
+    },
+    {
+      "id": "adams-10",
+      "category": "who_said_what",
+      "question": "At the April 1, 2026 Planning Board hearing, what did each board member and public speaker say about Lot 14?",
+      "gold_facts": [
+        {"fact": "Ms. Ferraro stated that the record should reflect that Lot 14 presents a closer question than Lots 12 and 16.", "source": "Planning_Board_Transcript_April_1_2026.docx — quote: 'Lot 14 presents a closer question'"},
+        {"fact": "Mr. Delgado stated that he toured the site himself and that the parking situation is real, having seen cars back up onto Main during the dinner rush.", "source": "Planning_Board_Transcript_April_1_2026.docx — quote: 'The parking situation is real'"},
+        {"fact": "Mr. Delgado also stated that the building did not strike him as falling apart the way some of the other parcels in the study area do.", "source": "Planning_Board_Transcript_April_1_2026.docx — quote: \"didn't strike me as falling apart\""},
+        {"fact": "Ms. Wu asked whether the building was currently occupied, and Mr. Fester answered that a restaurant, a GameStop, an owner build-out of the third unit for a Jersey Mike's franchise, and four occupied apartments were present.", "source": "Planning_Board_Transcript_April_1_2026.docx — Wu/Fester exchange"},
+        {"fact": "Robert Adams told the Board that the restaurant had been there twelve years, that GameStop renewed its lease last year, and that the owner signed a Jersey Mike's franchise agreement and put down a five-figure deposit on a build-out then underway.", "source": "Planning_Board_Transcript_April_1_2026.docx — Mr. Adams public comment"},
+        {"fact": "Henryk Kowalczyk stated he owns Pierogi King, has been a tenant since 2014, that his business is good and that he does not want to move.", "source": "Planning_Board_Transcript_April_1_2026.docx — Mr. Kowalczyk public comment"},
+        {"fact": "Maria Santos stated she lives in Unit 2A, has lived there six years, and asked what happens to her lease.", "source": "Planning_Board_Transcript_April_1_2026.docx — Ms. Santos public comment"},
+        {"fact": "The roll call vote on the motion was Brennan yes, Ortiz yes, Delgado no, Wu yes, Reyes yes, Ferraro no, Kim yes; the motion carried 5-2.", "source": "Planning_Board_Transcript_April_1_2026.docx — roll call vote line"}
+      ],
+      "must_not_claim": [
+        "Mr. Delgado said the parking problem at the site was not real or did not exist.",
+        "Ms. Wu or Mr. Reyes voted against the motion.",
+        "Robert Adams did not appear or speak at the April 1 hearing.",
+        "The Board voted to recommend excluding Lot 14 from the Study Area."
+      ],
+      "notes": "Attribution question over a single transcript where the same speaker makes one statement helping each side; also tests that the 5-2 roll call is read off the correct seven names."
+    },
+    {
+      "id": "adams-11",
+      "category": "valuation",
+      "question": "What valuation figures, offers and counter-offers are in this case, who produced each, and on what dates?",
+      "gold_facts": [
+        {"fact": "Diane Hartwell's appraisal report dated June 3, 2026 concludes a market value of $1,850,000 as of the May 15, 2026 effective date.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 7, Reconciliation and value conclusion"},
+        {"fact": "The City's June 10, 2026 Notice of Determination and Proposed Acquisition extends a written offer of $1,850,000.00 based on the Hartwell appraisal.", "source": "Formal_Notice_of_Determination_Adams_Family.pdf — section 1"},
+        {"fact": "Marcus Whitfield's rebuttal appraisal dated July 15, 2026 concludes a market value of $2,900,000 as of the same May 15, 2026 effective date.", "source": "Adams_Family_Rebuttal_Appraisal.pdf — letter of transmittal and section 7"},
+        {"fact": "The City's August 5, 2026 settlement letter increases the offer from $1,850,000 to $1,975,000.", "source": "Clifton_Offer_Letter_to_Adams_Family.pdf — Renewed Offer, page 1"},
+        {"fact": "The August 5, 2026 letter also offers reimbursement of reasonable third-party appraisal costs up to $15,000 and a closing date no earlier than 120 days after execution of a settlement agreement.", "source": "Clifton_Offer_Letter_to_Adams_Family.pdf — terms 3 and 4, page 2"},
+        {"fact": "Adams Family Properties declined by letter dated August 19, 2026 and counter-offered $2,600,000, with cost reimbursement up to $45,000 and a closing no earlier than 150 days.", "source": "Adams_Family_Rejection_Letter.pdf — 'If the City Wishes to Proceed with Acquisition', terms 1, 3, 4"},
+        {"fact": "Hartwell's supplemental report dated October 10, 2026 states 'My June 3 value remains $1,850,000' and calculates no redevelopment-potential sensitivity.", "source": "Hartwell_Supplemental_Report.docx — section 4, Reconciliation and limitations"}
+      ],
+      "must_not_claim": [
+        "There is a $9,000,000 appraisal of 10 Main Street.",
+        "Hartwell raised her value conclusion in the October 10, 2026 supplement.",
+        "Adams Family Properties accepted the $1,975,000 offer or the parties settled.",
+        "Whitfield's $2,900,000 opinion includes the $35,000 franchise fee, moving costs or business reestablishment benefits."
+      ],
+      "notes": "Valuation spine of the case. The invented-appraisal trap and the 'supplement changed the number' trap are both explicitly excluded."
+    },
+    {
+      "id": "adams-12",
+      "category": "valuation",
+      "question": "Why did the City's appraiser not develop an income approach, and what rent evidence was actually in the appraisal file?",
+      "gold_facts": [
+        {"fact": "The Hartwell report states the income approach was considered but not developed because a pre-report residential rent roll, operating statements, and support for market rent in owner-operated Unit C were not supplied.", "source": "City_Appraisal_Report_10_Main_Street.docx — letter of transmittal"},
+        {"fact": "The Pierogi King lease covers 2,800 SF at $4,500.00 per month, or $54,000.00 per year, and was executed December 18, 2023.", "source": "Lease_Pierogi_King.docx — sections 1 and 4, and execution date"},
+        {"fact": "The GameStop lease covers 2,200 SF at $3,500.00 per month, or $42,000.00 per year, and was executed December 9, 2024.", "source": "Lease_GameStop.docx — sections 1 and 4, and execution date"},
+        {"fact": "The report states the two commercial leases establish $96,000 of annual contract rent but do not establish potential gross income, effective gross income, operating expenses, net operating income, or an income-capitalization value.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 6, Income approach"},
+        {"fact": "Unit C, approximately 1,600 SF, is recorded as an owner-operated Jersey Mike's franchise build-out with $0 contract rent and no lease.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 2 occupancy table"},
+        {"fact": "The report states no unsupported residential rent, expense ratio, capitalization rate, or owner-suite rent is booked merely to force an income indication.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 6, closing paragraph"},
+        {"fact": "The sales comparison approach is the sole developed valuation approach and carries primary weight.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 7"}
+      ],
+      "must_not_claim": [
+        "Hartwell developed an income capitalization value indication.",
+        "Jersey Mike's is a third commercial tenant paying rent at the property.",
+        "The appraiser imputed a market rent to owner-operated Unit C.",
+        "The residential rent receipts for Units 2A-2D were part of the pre-report record (they are dated June and July 2026, after the June 3, 2026 report)."
+      ],
+      "notes": "Negation-heavy valuation question: the report is written almost entirely in terms of what was not supplied and not developed."
+    },
+    {
+      "id": "adams-13",
+      "category": "valuation",
+      "question": "What comparable sales did each appraiser use, and how do the two grids differ?",
+      "gold_facts": [
+        {"fact": "Hartwell used three improved-building comparables: 215 Piaget Ave, Clifton at $1,675,000; 402 Main Ave, Passaic at $1,890,000; and 88 Van Houten Ave, Clifton at $2,050,000.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 5, Sales comparison approach grid"},
+        {"fact": "Hartwell's adjusted range is $1,540,000 to $2,010,000, with Comp B given greatest weight for recency and size, producing an indicated value of $1,850,000.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 5, Reconciliation"},
+        {"fact": "Whitfield used three development-site sales: 145 Piaget Ave, Clifton at $2,710,000; 310 Van Houten Ave, Clifton at $3,250,000; and 55 Getty Ave, Paterson at $2,540,000.", "source": "Adams_Family_Rebuttal_Appraisal.pdf — section 5, Comparable development-site sales"},
+        {"fact": "Whitfield's adjusted range is $2,840,000 to $3,245,000, with Sale 1 given greatest weight, producing a reconciled value of $2,900,000.", "source": "Adams_Family_Rebuttal_Appraisal.pdf — section 7, Reconciliation"},
+        {"fact": "Whitfield's primary approach is development-land sales comparison; Hartwell's is improved sales comparison valuing the property in continued use.", "source": "Adams_Family_Rebuttal_Appraisal.pdf — section 1, Primary approach; City_Appraisal_Report_10_Main_Street.docx — section 4, Maximally productive"},
+        {"fact": "Whitfield states the disagreement is a premise and market-evidence dispute and is not based on converting the owner franchise into a third tenancy.", "source": "Adams_Family_Rebuttal_Appraisal.pdf — section 8, Review of City appraisal"},
+        {"fact": "Neither appraiser attaches comparable deeds or verification notes; both state those workfiles are retained by the appraiser and not represented as attached exhibits.", "source": "City_Appraisal_Report_10_Main_Street.docx — section 9; Adams_Family_Rebuttal_Appraisal.pdf — section 10"}
+      ],
+      "must_not_claim": [
+        "Both appraisers relied on the same set of comparable sales.",
+        "Hartwell used development land sales.",
+        "Whitfield's 55 Getty Avenue comparable is located in Clifton (it is in Paterson).",
+        "The comparable deeds and verification workfiles are attached to the reports in the matter folder."
+      ],
+      "notes": "Tests whether similar-looking numeric grids from two documents stay attached to the right author; the two grids share Clifton street names (Piaget, Van Houten) with different addresses and prices."
+    },
+    {
+      "id": "adams-14",
+      "category": "timeline",
+      "question": "Lay out the redevelopment designation timeline from the authorizing resolution through the filing of the Complaint, with dates.",
+      "gold_facts": [
+        {"fact": "Council Resolution No. 2026-04, adopted January 12, 2026, directed the preliminary investigation and expressly designated the proposed determination as a Condemnation Redevelopment Area determination.", "source": "City_Council_Resolution_2026-04.pdf — adoption line and resolved paragraph 2"},
+        {"fact": "The Fester Preliminary Investigation Report is dated March 1, 2026 and reflects field inspections of January 22 and January 29, 2026.", "source": "Fester_Preliminary_Investigation_Report.docx — report date and section 1"},
+        {"fact": "The public hearing notice is dated March 10, 2026, was mailed to record owners March 10, 2026, and was published in the Clifton Journal on March 12, 2026.", "source": "Public_Hearing_Notice_April_1_2026.pdf — dated line and publication footer"},
+        {"fact": "The Planning Board held the public hearing on April 1, 2026 and voted 5-2 to recommend designation of Block 2601, Lots 12 through 16.", "source": "Planning_Board_Transcript_April_1_2026.docx — roll call vote"},
+        {"fact": "The Planning Board adopted Resolution No. 2026-PB-07 on April 15, 2026 by a 5-2 vote.", "source": "Planning_Board_Minutes_April_15_2026.docx — item 2, Roll Call Vote"},
+        {"fact": "The Municipal Council adopted Resolution No. 2026-118 on May 5, 2026 by a 6-1 vote, with Councilman Bruno voting no, and introduced Ordinance No. 2026-21 the same evening.", "source": "Council_Minutes_May_5_2026.pdf — New Business and Introduction sections"},
+        {"fact": "Ordinance No. 2026-21 passed finally on May 19, 2026 by a 6-1 vote, was published May 22, 2026, and took effect June 8, 2026.", "source": "Ordinance_2026-21_Main_Street_Redevelopment_Plan.pdf — Legislative History table"},
+        {"fact": "The Notice of Determination and Proposed Acquisition is dated June 10, 2026 and the Verified Complaint was filed June 18, 2026.", "source": "Formal_Notice_of_Determination_Adams_Family.pdf — date line; Verified_Complaint_Adams_v_Clifton.docx — 'Dated: June 18, 2026'"}
+      ],
+      "must_not_claim": [
+        "Resolution No. 2026-118 adopted the Main Street Redevelopment Plan.",
+        "Ordinance No. 2026-21 was adopted on May 5, 2026 (May 5 was introduction and referral only).",
+        "The hearing notice was published twice, once each week for two consecutive weeks.",
+        "The Planning Board adopted Resolution No. 2026-PB-07 at the April 1 hearing."
+      ],
+      "notes": "Date-chaining question across seven documents; the April 1 vote versus the April 15 memorializing resolution, and the May 5 introduction versus the May 19 adoption, are the two collapse points."
+    },
+    {
+      "id": "adams-15",
+      "category": "timeline",
+      "question": "What are the competing 45-day challenge deadlines in this case, and when was the determination notice sent relative to the designation?",
+      "gold_facts": [
+        {"fact": "Resolution No. 2026-118 was adopted May 5, 2026 and published May 8, 2026.", "source": "City_Council_Resolution_2026-118.pdf — adoption line; Formal_Notice_of_Determination_Adams_Family.pdf — section 2, '(published May 8, 2026)'"},
+        {"fact": "The June 10, 2026 notice states that any challenge must be filed within forty-five days of publication of Resolution No. 2026-118 under N.J.S.A. 40A:12A-6(b)(7).", "source": "Formal_Notice_of_Determination_Adams_Family.pdf — section 2"},
+        {"fact": "The June 10 letter was sent 36 days after the May 5 determination, and the Answer admits that fact.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraph 21; Answer_Adams_v_Clifton.docx — paragraph 21"},
+        {"fact": "The Complaint alleges that N.J.S.A. 40A:12A-6 required service of the final determination notice within ten days.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraph 35"},
+        {"fact": "The intake memo calculates 45 days after the May 5 adoption as producing June 19, 2026, and directs filing by June 18, 2026 to avoid dependence on the notice conflict.", "source": "Client_Intake_Memo.docx — section 2, Matter Summary"},
+        {"fact": "The adopted Main Street Redevelopment Plan states that for a Condemnation Redevelopment Area owner receiving the determination notice, subsections (e)(ii) and (h) direct a forty-five-day period measured from receipt, and that the Plan does not waive or narrow either protection.", "source": "Main_Street_Redevelopment_Plan.docx — Section 9"},
+        {"fact": "The Answer admits no separate final designation notice was mailed to Plaintiff before June 10, 2026.", "source": "Answer_Adams_v_Clifton.docx — paragraph 21"},
+        {"fact": "The City's own relocation policy requires the designation notice to be served on record owners within ten days after the Council's determination.", "source": "Redevelopment_Acquisition_Relocation_Policy.docx — section 2, Notice of Designation"}
+      ],
+      "must_not_claim": [
+        "The June 10 notice was served within ten days of the May 5 determination.",
+        "The June 10 notice stated a receipt-based forty-five-day challenge period.",
+        "The Complaint was filed after the applicable deadline.",
+        "The City concedes that the publication-based challenge clock in its notice was legally wrong."
+      ],
+      "notes": "Two competing clocks and a 36-day gap. Tests whether the model keeps 'publication-based' (what the notice said) distinct from 'receipt-based' (what Plaintiff and the Plan say the statute requires)."
+    },
+    {
+      "id": "adams-16",
+      "category": "procedure",
+      "question": "What is the procedural posture of this case, what counts are pleaded, and what relief does each side seek?",
+      "gold_facts": [
+        {"fact": "The action is brought in lieu of prerogative writs under Rule 4:69-1 et seq. in the Superior Court of New Jersey, Law Division, Passaic County, Docket No. PAS-L-001884-26.", "source": "Verified_Complaint_Adams_v_Clifton.docx — caption and paragraph 5"},
+        {"fact": "Count I alleges the designation is not supported by substantial evidence under N.J.S.A. 40A:12A-5(d), Gallenthin and Malanga.", "source": "Verified_Complaint_Adams_v_Clifton.docx — Count I heading and paragraph 25"},
+        {"fact": "Count II seeks a declaratory judgment concerning existing MSC-O zoning and the stated public purpose.", "source": "Verified_Complaint_Adams_v_Clifton.docx — Count II heading"},
+        {"fact": "Count III alleges procedural defects under the Local Redevelopment and Housing Law.", "source": "Verified_Complaint_Adams_v_Clifton.docx — Count III heading"},
+        {"fact": "Plaintiff demands a declaration that Resolution No. 2026-118 is invalid and unenforceable as to Block 2601, Lot 14, an injunction against acquisition or condemnation, alternatively a remand for LRHL-compliant proceedings, costs, and other equitable relief.", "source": "Verified_Complaint_Adams_v_Clifton.docx — Prayer for Relief, items (a) through (e)"},
+        {"fact": "The Answer, dated July 8, 2026, asserts seven separate defenses.", "source": "Answer_Adams_v_Clifton.docx — Separate Defenses, numbered 1 through 7"},
+        {"fact": "Defendants state they do not demand a jury trial because an action under Rule 4:69 is tried to the Court.", "source": "Answer_Adams_v_Clifton.docx — 'NO JURY DEMAND' section"},
+        {"fact": "Defendants demand dismissal to the extent permitted by law, an order upholding Resolution No. 2026-118 or limiting any remedy to the proven procedural defect, costs, and other appropriate relief.", "source": "Answer_Adams_v_Clifton.docx — Prayer for Relief"}
+      ],
+      "must_not_claim": [
+        "This is a condemnation action filed by the City under the Eminent Domain Act.",
+        "Plaintiff demanded a jury trial.",
+        "The Complaint pleads four or more counts.",
+        "Plaintiff seeks money damages or just compensation in this action."
+      ],
+      "notes": "Posture question. The corpus contains heavy eminent-domain and appraisal material, so the common error is to describe the case as a condemnation valuation proceeding rather than a prerogative-writs challenge."
+    },
+    {
+      "id": "adams-17",
+      "category": "references",
+      "question": "Which Complaint paragraphs do Answer paragraphs 14, 21, 22 and 36 respond to, and what does each response say?",
+      "gold_facts": [
+        {"fact": "Complaint paragraph 14 alleges the March hearing notice did not state the proposed determination was a Condemnation Redevelopment Area or that eminent-domain authority would follow, and certifies publication on March 12 only.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraph 14"},
+        {"fact": "Answer paragraph 14 responds by admitting the notice did not use those terms and that its certification identifies one publication on March 12, while denying that those facts require the relief demanded.", "source": "Answer_Adams_v_Clifton.docx — paragraph 14"},
+        {"fact": "Complaint paragraph 21 alleges the June 10 letter was sent 36 days after the designation, extended a $1,850,000 offer, and instructs that a challenge runs from May 8 publication.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraph 21"},
+        {"fact": "Answer paragraph 21 admits those facts and admits no separate final designation notice was mailed before June 10, while denying the remaining legal conclusions.", "source": "Answer_Adams_v_Clifton.docx — paragraph 21"},
+        {"fact": "Complaint paragraph 22 alleges the Fester-Mayor emails reflect a desire to use redevelopment to avoid public-bidding constraints and acknowledge a comparatively weak detriment finding as to Lot 14.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraph 22"},
+        {"fact": "Answer paragraph 22 admits the correspondence exists, denies Plaintiff's characterization, and relies on its complete text including the direction to perform the actual analysis.", "source": "Answer_Adams_v_Clifton.docx — paragraph 22"},
+        {"fact": "Answer paragraph 36 admits the documentary facts stated in the first sentence of Complaint paragraph 36 and denies that Plaintiff lacked actual notice or suffered prejudice.", "source": "Answer_Adams_v_Clifton.docx — paragraph 36"},
+        {"fact": "Complaint paragraph 24 realleges paragraphs 1 through 23, paragraph 29 realleges 1 through 28, and paragraph 34 realleges 1 through 33; Answer paragraphs 24, 29 and 34 each state that Defendants repeat their prior responses.", "source": "Verified_Complaint_Adams_v_Clifton.docx — paragraphs 24, 29, 34; Answer_Adams_v_Clifton.docx — paragraphs 24, 29, 34"}
+      ],
+      "must_not_claim": [
+        "Answer paragraph 14 denies that the hearing notice omitted the eminent-domain warning.",
+        "The Answer does not respond to the allegations about the Fester-Mayor correspondence.",
+        "Answer paragraph 22 admits Plaintiff's characterization of the emails.",
+        "Answer paragraph 36 denies the documentary facts alleged in Complaint paragraph 36."
+      ],
+      "notes": "Cross-document reference resolution: a numbered Answer paragraph is meaningless without the Complaint paragraph it answers. Directly exercises the reference-resolver path."
+    },
+    {
+      "id": "adams-18",
+      "category": "references",
+      "question": "What records does the Fester Preliminary Investigation Report rely on, and what does it expressly say it did not do?",
+      "gold_facts": [
+        {"fact": "The Report was prepared pursuant to City Council Resolution No. 2026-04, adopted January 12, 2026.", "source": "Fester_Preliminary_Investigation_Report.docx — section 1, Introduction and Scope of Study"},
+        {"fact": "The Report is based on field inspections conducted January 22 and January 29, 2026.", "source": "Fester_Preliminary_Investigation_Report.docx — section 1"},
+        {"fact": "The Report relies on a structural and mechanical conditions memorandum prepared by Overlook Engineering Group dated November 2025.", "source": "Fester_Preliminary_Investigation_Report.docx — section 1 and section 3.1"},
+        {"fact": "The Report reviewed City tax records, the current Zoning Ordinance, and the 2024 Master Plan Reexamination Report.", "source": "Fester_Preliminary_Investigation_Report.docx — section 1"},
+        {"fact": "The Report reviewed Bureau of Fire Prevention violation history, identifying three Notices of Violation (NOV-2025-0891, NOV-2025-0912, NOV-2025-0935), and Division of Code Enforcement records identifying two property maintenance notices (PM-2025-1187 and PM-2026-0142).", "source": "Fester_Preliminary_Investigation_Report.docx — sections 3.4 and 3.5"},
+        {"fact": "The Report states: 'FMPA did not commission an independent structural engineering survey of 10 Main Street beyond the Overlook memorandum referenced above.'", "source": "Fester_Preliminary_Investigation_Report.docx — section 1, final sentence"},
+        {"fact": "The Limitations section states FMPA did not independently verify tenant lease terms, occupancy status changes after February 1, 2026, or the status of the owner-operated Jersey Mike's build-out beyond what was visible from the exterior and reported by City staff.", "source": "Fester_Preliminary_Investigation_Report.docx — section 6, Limitations"},
+        {"fact": "The Report states the electrical memorandum does not itself establish inadequate capacity or an unsafe condition.", "source": "Fester_Preliminary_Investigation_Report.docx — section 3.1"}
+      ],
+      "must_not_claim": [
+        "The Fester Report relied on the four Clifton Police Department incident reports in the matter file.",
+        "FMPA commissioned its own independent structural engineering survey of 10 Main Street.",
+        "The Fester Report relied on the Hartwell appraisal (the appraisal is dated June 3, 2026, three months after the Report).",
+        "The Fester Report independently verified the Pierogi King and GameStop lease terms."
+      ],
+      "notes": "Tests what a report cites back to, and resists the pull of nearby-but-uncited documents. The four police reports and two leases sit in the same corpus but are not among the Report's sources."
+    },
+    {
+      "id": "adams-19",
+      "category": "references",
+      "question": "What does the City's August 5, 2026 settlement letter respond to, and what prior events does the Adams rejection letter refer back to?",
+      "gold_facts": [
+        {"fact": "The August 5, 2026 letter states the City reviewed the Complaint and the rebuttal appraisal report of Marcus T. Whitfield dated July 15, 2026, which Murphy & Murphy provided on July 18.", "source": "Clifton_Offer_Letter_to_Adams_Family.pdf — opening paragraph, page 1"},
+        {"fact": "The letter states the City reviewed Whitfield's report with Diane R. Hartwell, MAI, and continues to rely on Hartwell's $1,850,000 appraisal opinion.", "source": "Clifton_Offer_Letter_to_Adams_Family.pdf — 'The City's Position on Valuation'"},
+        {"fact": "The letter states the City does not agree that redevelopment potential under the MSC-O should control the current offer.", "source": "Clifton_Offer_Letter_to_Adams_Family.pdf — 'The City's Position on Valuation'"},
+        {"fact": "The August 19, 2026 rejection letter responds to the City's August 5, 2026 letter and says a $125,000 increase does not meaningfully engage with the $2,900,000 valuation in Whitfield's July 15, 2026 appraisal.", "source": "Adams_Family_Rejection_Letter.pdf — 'The Offer Does Not Reflect the Property's Value'"},
+        {"fact": "The rejection letter refers back to the Planning Board's divided 5-2 vote, to Mr. Delgado and Ms. Ferraro identifying Lot 14 as 'a closer question', and to the Council's 6-1 vote with Councilman Bruno dissenting.", "source": "Adams_Family_Rejection_Letter.pdf — 'A Different Path: Withdrawal of Lot 14 from the Designation'"},
+        {"fact": "The rejection letter states the MSC-O overlay has permitted mixed-use redevelopment on the parcel by right since December 1, 2019, more than six years before the valuation date.", "source": "Adams_Family_Rejection_Letter.pdf — 'The Offer Does Not Reflect the Property's Value'"},
+        {"fact": "The rejection letter proposes that the City consider amending Resolution No. 2026-118 to withdraw Lot 14 from the designated Study Area while proceeding with Lots 12, 13, 15 and 16.", "source": "Adams_Family_Rejection_Letter.pdf — 'A Different Path' section"},
+        {"fact": "Both letters state they are settlement communications subject to N.J.R.E. 408.", "source": "Clifton_Offer_Letter_to_Adams_Family.pdf — SETTLEMENT COMMUNICATION block; Adams_Family_Rejection_Letter.pdf — opening italic block"}
+      ],
+      "must_not_claim": [
+        "The August 5, 2026 letter withdrew or amended the redevelopment designation.",
+        "Adams Family Properties accepted the $1,975,000 offer.",
+        "The rejection letter demanded $2,900,000 (it counter-offered $2,600,000).",
+        "Hartwell prepared a formal written response to Whitfield's rebuttal report."
+      ],
+      "notes": "Letter-to-report and letter-to-letter reference chain, including a reference back into hearing and council records. The 'closer question' attribution in the rejection letter is the litigant's characterization, which is why the gold fact is phrased as what the letter says."
+    }
+  ]
+}
