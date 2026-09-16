@@ -50,6 +50,16 @@ def merge_hybrid_results(
     }
     merged.update(channels)
 
+    # ``statements`` is not one of the channels above: the lane sets the key only when it
+    # found something, so it is absent from ``empty_hybrid_result`` and rides through as an
+    # unowned primary key. That is wrong for the default concurrent session path, which
+    # retrieves twice -- the conversational lane can rank statements the raw query did not,
+    # and a raw lane that raised arrives here as ``None`` outright. Take whichever lane has
+    # them, primary first, and still grow no key when neither does.
+    statements = primary.get("statements") or secondary.get("statements")
+    if statements:
+        merged["statements"] = statements
+
     chunk_ids = [chunk_id for chunk in channels["chunks"] if (chunk_id := result_id(chunk))]
     primary_summaries = primary.get("chunk_summaries", {})
     secondary_summaries = secondary.get("chunk_summaries", {})

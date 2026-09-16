@@ -28,12 +28,18 @@ from cognee.modules.retrieval.hybrid.results import (
     payload_matches_node_filter,
     result_id,
 )
-from cognee.modules.retrieval.utils.assertion_pairs import expand_assertion_pairs
+from cognee.modules.retrieval.utils.assertion_pairs import PAIR_EDGE_TYPES, expand_assertion_pairs
 from cognee.shared.logging_utils import get_logger
 
 logger = get_logger("HybridRetriever")
 
 STATEMENTS_COLLECTION = "Assertion_name"
+
+# Adapter order is not context order: a store is free to return a seed's edges in any
+# order it likes, and the same graph then renders a different section on every backend.
+# The pair types sort in the order they are declared -- what the statement answers, then
+# who it is attributed to, then who said it -- and an unlisted relationship follows them.
+_PAIR_TYPE_ORDER = {relationship: rank for rank, relationship in enumerate(PAIR_EDGE_TYPES)}
 
 # How a pair edge reads on the statement it was rendered under. Direction matters: on the
 # denial the ``responds_to`` edge is what it answers, and on the allegation the same edge
@@ -90,10 +96,9 @@ async def build_statements(
     if not seeds:
         return []
 
-    _counterparts, pair_edges = await expand_assertion_pairs(graph_engine, list(seeds))
-    graph_properties, pairs_by_id = _pairs_by_seed(
-        pair_edges, set(seeds), node_name, node_name_filter_operator
-    )
+    nodes, pair_edges = await expand_assertion_pairs(graph_engine, list(seeds))
+    graph_properties = _properties_by_id(nodes)
+    pairs_by_id = _pairs_by_seed(pair_edges, set(seeds), node_name, node_name_filter_operator)
 
     statements = []
     for seed_id, row_properties in seeds.items():
@@ -135,28 +140,43 @@ def _seed_rows(hits: list[Any]) -> dict[str, dict]:
     return seeds
 
 
+def _properties_by_id(nodes: list[Any]) -> dict[str, dict]:
+    """``{id: projected properties}`` for every node the expansion returned.
+
+    The list opens with the seed assertions themselves, in the order they were asked for,
+    so the seeds' own graph properties come out of the one ``get_neighborhood`` call the
+    pairs already needed -- including for a seed that nothing points at, which has no pair
+    edge to read its endpoints off.
+    """
+    properties: dict[str, dict] = {}
+    for node in nodes or []:
+        attributes = getattr(node, "attributes", None)
+        if isinstance(attributes, dict):
+            properties.setdefault(str(node.id), attributes)
+    return properties
+
+
 def _pairs_by_seed(
     pair_edges: list[Any],
     seed_ids: set[str],
     node_name: Optional[list[str]],
     node_name_filter_operator: str,
-) -> tuple[dict[str, dict], dict[str, list[dict]]]:
-    """The pair lines each seed earned, plus the full node properties the edges carried.
+) -> dict[str, list[dict]]:
+    """The pair lines each seed earned, deduplicated by pair and in a fixed order.
 
-    The seeds' own properties come back on the edge endpoints of the one
-    ``get_neighborhood`` call the pairs already needed, so reading them costs no second
-    round trip -- and a seed with no pair edges simply renders from its vector row.
+    A line is identified by ``(relationship, counterpart id)``, not by what it renders as:
+    a multi-count complaint denies the same proposition more than once, so two distinct
+    allegations can produce the same words and both still have to appear. The rendered
+    text decides only for a counterpart with no usable id, which nothing else can tell
+    apart.
     """
-    graph_properties: dict[str, dict] = {}
     pairs: dict[str, list[dict]] = {}
+    seen: dict[str, set] = {}
 
     for edge in pair_edges or []:
         source, target = getattr(edge, "node1", None), getattr(edge, "node2", None)
         if source is None or target is None:
             continue
-        for node in (source, target):
-            if isinstance(node.attributes, dict):
-                graph_properties.setdefault(str(node.id), node.attributes)
 
         relationship = _relationship_name(edge)
         if not relationship:
@@ -176,12 +196,24 @@ def _pairs_by_seed(
             )
             if pair is None:
                 continue
-            rendered = pairs.setdefault(seed_id, [])
-            if any(existing["text"] == pair["text"] for existing in rendered):
+            identity = (relationship, pair["node_id"] or pair["text"])
+            if identity in seen.setdefault(seed_id, set()):
                 continue
-            rendered.append(pair)
+            seen[seed_id].add(identity)
+            pairs.setdefault(seed_id, []).append(pair)
 
-    return graph_properties, pairs
+    return {seed_id: sorted(rendered, key=_pair_order) for seed_id, rendered in pairs.items()}
+
+
+def _pair_order(pair: dict) -> tuple:
+    """Fixed relationship order, then the counterpart, then the line itself."""
+    relationship = pair.get("relationship") or ""
+    return (
+        _PAIR_TYPE_ORDER.get(relationship, len(_PAIR_TYPE_ORDER)),
+        relationship,
+        pair.get("node_id") or "",
+        pair.get("text") or "",
+    )
 
 
 def _pair(
@@ -209,14 +241,20 @@ def _pair(
     if not _counterpart_in_scope(properties, node_name, node_name_filter_operator):
         return None
 
-    counterpart_label = node_context_label(properties)
+    counterpart_id = str(counterpart.id)
+    # The projection fills every whitelisted key, so ``properties["id"]`` is present but
+    # ``None`` whenever the store keeps the id out of its property bag. The label's id
+    # fallback reads the node's own id instead of depending on the whitelist for it.
+    counterpart_label = node_context_label(
+        {**properties, "id": properties.get("id") or counterpart_id}
+    )
     if not counterpart_label:
         return None
 
     return {
         "text": f"{label}: {counterpart_label}{_resolution_note(edge.attributes)}",
         "relationship": relationship,
-        "node_id": str(counterpart.id),
+        "node_id": counterpart_id,
     }
 
 
@@ -227,14 +265,14 @@ def _counterpart_in_scope(
 ) -> bool:
     """Whether a pair counterpart may be rendered under a node-scoped search.
 
-    Only an *explicitly* out-of-scope counterpart is dropped. The seed already passed the
-    store's own filter, and a counterpart whose properties do not carry ``belongs_to_set``
-    -- an untagged speaker, or a projection that never asked for the property -- cannot be
-    judged either way. Losing the allegation a retrieved denial answers is the one failure
-    this lane exists to prevent, so "cannot tell" keeps the pair.
+    The same rule, through the same helper, that every other scope check in hybrid
+    retrieval applies: a node that does not carry the requested set is out of it, and the
+    entity lane drops untagged one-hop neighbours on exactly that basis. There is no
+    "cannot tell" case left to make an exception for -- ``expand_assertion_pairs``
+    projects ``belongs_to_set`` explicitly, so the key is always present on a counterpart
+    it returned, and reading its absence as consent would let a scoped search render
+    statements from outside the set it asked for.
     """
-    if not node_name or not isinstance(properties.get("belongs_to_set"), list):
-        return True
     return payload_matches_node_filter(properties, node_name, node_name_filter_operator)
 
 

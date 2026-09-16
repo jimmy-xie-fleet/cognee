@@ -54,7 +54,17 @@ ALLEGATION = {
     "asserted_by": "Plaintiff",
 }
 
+SECOND_ALLEGATION = {**ALLEGATION, "id": "allegation-2"}
+
+NAMELESS_ALLEGATION = {
+    "id": "allegation-9",
+    "statement_type": "allegation",
+    "polarity": "positive",
+}
+
 SPEAKER = {"id": "defendants-1", "name": "Defendants", "type": "Person"}
+
+COUNSEL = {"id": "counsel-1", "name": "Counsel of record", "type": "Person"}
 
 RESOLUTION = {"resolution_confidence": 0.95, "resolution_strategy": "paragraph_locator"}
 
@@ -87,14 +97,28 @@ def _graph(nodes=None, edges=None):
     return _FakeGraph(nodes, edges)
 
 
+PAIR_EDGES = [
+    ("denial-1", "allegation-1", "responds_to", dict(RESOLUTION)),
+    ("denial-1", "defendants-1", "asserted_by", {}),
+]
+
+
 def _pair_graph():
     """The denial, the allegation it answers, and the speaker behind it."""
     return _graph(
         nodes=[_node_row(DENIAL), _node_row(ALLEGATION), _node_row(SPEAKER)],
-        edges=[
-            ("denial-1", "allegation-1", "responds_to", dict(RESOLUTION)),
-            ("denial-1", "defendants-1", "asserted_by", {}),
+        edges=[tuple(edge) for edge in PAIR_EDGES],
+    )
+
+
+def _scoped_pair_graph(node_set: str = "KEN"):
+    """The same three nodes, each tagged with the node set a scoped search asks for."""
+    return _graph(
+        nodes=[
+            _node_row({**props, "belongs_to_set": [node_set]})
+            for props in (DENIAL, ALLEGATION, SPEAKER)
         ],
+        edges=[tuple(edge) for edge in PAIR_EDGES],
     )
 
 
@@ -237,6 +261,21 @@ async def test_graph_properties_fill_in_what_the_vector_row_does_not_carry():
 
 
 @pytest.mark.asyncio
+async def test_a_pair_less_seed_still_reads_its_graph_properties():
+    """``expand_assertion_pairs`` returns the seeds themselves, edges or no edges.
+
+    Reading the seeds off that node list rather than off the pair edges' endpoints is what
+    lets a statement nothing points at still render its stored stance and speaker.
+    """
+    narrow_row = {"id": "denial-1", "name": "Adams breached the lease", "statement_type": "denial"}
+
+    built = await build_statements(_graph(nodes=[_node_row(DENIAL)]), [_hit(narrow_row)])
+
+    assert built[0]["pairs"] == []
+    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+
+
+@pytest.mark.asyncio
 async def test_no_hits_asks_the_graph_for_nothing():
     graph = _pair_graph()
 
@@ -281,20 +320,25 @@ def test_an_explicitly_out_of_scope_counterpart_is_dropped():
     assert _counterpart_in_scope({"belongs_to_set": ["KEN"]}, ["KEN", "OTHER"], "AND") is False
 
 
-def test_an_unjudgeable_counterpart_stays():
-    """The seed passed the store's filter; an untagged counterpart cannot be judged.
+def test_an_untagged_counterpart_is_dropped_under_a_scoped_search():
+    """Scope reads here exactly the way it reads everywhere else in hybrid retrieval.
 
-    The graph projection does not ask for ``belongs_to_set``, so this is the normal case
-    rather than the exception -- and dropping it would lose the other half of the pair.
+    ``payload_matches_node_filter`` treats a missing ``belongs_to_set`` as "not in the
+    requested set", and the entity lane drops untagged one-hop neighbours on that basis.
+    The pair expansion projects ``belongs_to_set`` explicitly, so the key is always present
+    and "cannot tell" no longer applies -- a counterpart that does not carry the set is out
+    of scope, not unjudgeable.
     """
-    assert _counterpart_in_scope({}, ["KEN"], "OR") is True
-    assert _counterpart_in_scope({"belongs_to_set": None}, ["KEN"], "OR") is True
+    assert _counterpart_in_scope({}, ["KEN"], "OR") is False
+    assert _counterpart_in_scope({"belongs_to_set": None}, ["KEN"], "OR") is False
+    # An unscoped search asks nothing of the counterpart.
+    assert _counterpart_in_scope({}, None, "OR") is True
     assert _counterpart_in_scope({"belongs_to_set": ["OTHER"]}, None, "OR") is True
 
 
 @pytest.mark.asyncio
-async def test_a_node_scoped_search_still_renders_the_pair():
-    built = await build_statements(_pair_graph(), [_hit(DENIAL)], node_name=["KEN"])
+async def test_a_node_scoped_search_renders_an_in_scope_pair():
+    built = await build_statements(_scoped_pair_graph(), [_hit(DENIAL)], node_name=["KEN"])
 
     assert [pair["relationship"] for pair in built[0]["pairs"]] == [
         "responds_to",
@@ -303,11 +347,108 @@ async def test_a_node_scoped_search_still_renders_the_pair():
 
 
 @pytest.mark.asyncio
+async def test_a_node_scoped_search_drops_an_untagged_counterpart():
+    """The unscoped rendering of the very same graph keeps both pairs."""
+    scoped = await build_statements(_pair_graph(), [_hit(DENIAL)], node_name=["KEN"])
+    unscoped = await build_statements(_pair_graph(), [_hit(DENIAL)])
+
+    assert scoped[0]["pairs"] == []
+    assert len(unscoped[0]["pairs"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_pairs_carry_the_relationship_and_the_counterpart_id():
     built = await build_statements(_pair_graph(), [_hit(DENIAL)])
 
     assert built[0]["pairs"][0]["relationship"] == "responds_to"
     assert built[0]["pairs"][0]["node_id"] == "allegation-1"
+
+
+@pytest.mark.asyncio
+async def test_pair_lines_follow_a_fixed_relationship_order():
+    """Adapter order is not context order: the same graph has to render the same way."""
+    graph = _graph(
+        nodes=[_node_row(DENIAL), _node_row(SPEAKER), _node_row(COUNSEL), _node_row(ALLEGATION)],
+        edges=[
+            ("denial-1", "defendants-1", "asserted_by", {}),
+            ("denial-1", "counsel-1", "attributed_to", {}),
+            ("denial-1", "allegation-1", "responds_to", {}),
+        ],
+    )
+
+    built = await build_statements(graph, [_hit(DENIAL)])
+
+    assert [pair["relationship"] for pair in built[0]["pairs"]] == [
+        "responds_to",
+        "attributed_to",
+        "asserted_by",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pairs_of_one_relationship_are_ordered_by_the_counterpart_id():
+    graph = _graph(
+        nodes=[_node_row(DENIAL), _node_row(SECOND_ALLEGATION), _node_row(ALLEGATION)],
+        edges=[
+            ("denial-1", "allegation-2", "responds_to", {}),
+            ("denial-1", "allegation-1", "responds_to", {}),
+        ],
+    )
+
+    built = await build_statements(graph, [_hit(DENIAL)])
+
+    assert [pair["node_id"] for pair in built[0]["pairs"]] == ["allegation-1", "allegation-2"]
+
+
+@pytest.mark.asyncio
+async def test_two_counterparts_that_render_identically_both_appear():
+    """A multi-count complaint repeats a proposition; two allegations are not one line."""
+    graph = _graph(
+        nodes=[_node_row(DENIAL), _node_row(ALLEGATION), _node_row(SECOND_ALLEGATION)],
+        edges=[
+            ("denial-1", "allegation-1", "responds_to", {}),
+            ("denial-1", "allegation-2", "responds_to", {}),
+        ],
+    )
+
+    built = await build_statements(graph, [_hit(DENIAL)])
+
+    assert [pair["node_id"] for pair in built[0]["pairs"]] == ["allegation-1", "allegation-2"]
+    assert len({pair["text"] for pair in built[0]["pairs"]}) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_same_counterpart_twice_is_rendered_once():
+    """Identity is the pair, not the rendering: the notes differ, the counterpart does not."""
+    graph = _graph(
+        nodes=[_node_row(DENIAL), _node_row(ALLEGATION)],
+        edges=[
+            ("denial-1", "allegation-1", "responds_to", dict(RESOLUTION)),
+            ("denial-1", "allegation-1", "responds_to", {}),
+        ],
+    )
+
+    built = await build_statements(graph, [_hit(DENIAL)])
+
+    assert len(built[0]["pairs"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_nameless_counterpart_falls_back_to_its_node_id():
+    """The label's id fallback must not depend on the store having stored an ``id``.
+
+    ``get_neighborhood`` returns a node as ``(id, properties)``, and the projection fills
+    every whitelisted key -- so ``properties["id"]`` is ``None`` whenever the store kept the
+    id out of the property bag. The node's own id is what the label falls back to.
+    """
+    graph = _graph(
+        nodes=[_node_row(DENIAL), _node_row(NAMELESS_ALLEGATION)],
+        edges=[("denial-1", "allegation-9", "responds_to", {})],
+    )
+
+    built = await build_statements(graph, [_hit(DENIAL)])
+
+    assert built[0]["pairs"][0]["text"] == "responds to: [allegation/positive] allegation-9"
 
 
 # ---------------------------------------------------------------------------------------
@@ -387,7 +528,7 @@ def test_a_context_without_statements_is_byte_identical():
 def test_merge_carries_the_primary_statements_and_adds_no_channel():
     merged = merge_hybrid_results(
         {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "denial-1"}]},
-        {"chunks": [], "entities": [], "facts": []},
+        {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "conversational-1"}]},
         chunks_limit=5,
         entities_limit=5,
         facts_limit=5,
@@ -395,6 +536,49 @@ def test_merge_carries_the_primary_statements_and_adds_no_channel():
 
     assert merged["statements"] == [{"id": "denial-1"}]
     assert set(merged) == {"chunks", "chunk_summaries", "entities", "facts", "statements"}
+
+
+def test_merge_keeps_the_statements_of_whichever_lane_found_them():
+    """The default ``SESSION_SEARCH_MODE=concurrent`` retrieves twice and merges once.
+
+    ``statements`` is not a merged channel -- the lane sets the key only when it found
+    something -- so taking it from the primary alone discards the conversational lane's
+    statements whenever the raw query did not rank any.
+    """
+    merged = merge_hybrid_results(
+        {"chunks": [], "entities": [], "facts": []},
+        {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "denial-1"}]},
+        chunks_limit=5,
+        entities_limit=5,
+        facts_limit=5,
+    )
+
+    assert merged["statements"] == [{"id": "denial-1"}]
+
+
+def test_merge_keeps_the_statements_when_the_other_lane_raised():
+    """``session_aware_completion`` merges ``None`` for a lane that raised."""
+    merged = merge_hybrid_results(
+        None,
+        {"chunks": [], "entities": [], "facts": [], "statements": [{"id": "denial-1"}]},
+        chunks_limit=5,
+        entities_limit=5,
+        facts_limit=5,
+    )
+
+    assert merged["statements"] == [{"id": "denial-1"}]
+
+
+def test_merge_of_two_lanes_without_statements_grows_no_key():
+    merged = merge_hybrid_results(
+        {"chunks": [], "entities": [], "facts": []},
+        {"chunks": [], "entities": [], "facts": []},
+        chunks_limit=5,
+        entities_limit=5,
+        facts_limit=5,
+    )
+
+    assert set(merged) == {"chunks", "chunk_summaries", "entities", "facts"}
 
 
 # ---------------------------------------------------------------------------------------
