@@ -39,7 +39,8 @@ logger = get_logger("HybridRetriever")
 DEFAULT_HYBRID_LANE_TOP_K = 10
 
 # The statements lane is seeded from one vector collection and renders a short block per
-# hit, so it is budgeted wider than the entity lane. Task 7 moves this onto RetrievalConfig.
+# hit, so it is budgeted wider than the entity lane. The registry supplies the value from
+# RetrievalConfig; this constant is only the constructor's fallback when none is given.
 DEFAULT_STATEMENTS_TOP_K = 20
 
 

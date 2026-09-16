@@ -9,6 +9,7 @@ network is touched.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from cognee.modules.retrieval.config import RetrievalConfig, get_retrieval_config
 
@@ -66,6 +67,28 @@ def test_pair_expansion_flag_is_overridable_by_env(monkeypatch):
     config = get_retrieval_config()
 
     assert config.graph_completion_pair_expansion is False
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "HYBRID_CHUNKS_TOP_K",
+        "HYBRID_ENTITIES_TOP_K",
+        "HYBRID_FACTS_TOP_K",
+        "HYBRID_STATEMENTS_TOP_K",
+        "HYBRID_MAX_EDGES_PER_ENTITY",
+        "DISPUTES_TOP_K",
+    ],
+)
+@pytest.mark.parametrize("bad_value", ["0", "-5"])
+def test_a_non_positive_budget_is_rejected_at_startup(monkeypatch, env_name, bad_value):
+    """A request top_k of 0 is a 422; an env budget of 0 must not slip through silently."""
+    monkeypatch.setenv(env_name, bad_value)
+
+    with pytest.raises(ValidationError) as excinfo:
+        RetrievalConfig()
+
+    assert env_name.lower() in str(excinfo.value)
 
 
 def test_to_dict_reports_every_field():

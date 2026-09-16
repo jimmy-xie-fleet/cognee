@@ -14,6 +14,8 @@ the defaults that apply when a caller does not set one explicitly.
 """
 
 from functools import lru_cache
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,13 +23,16 @@ class RetrievalConfig(BaseSettings):
     # Hybrid recall lane budgets. Raised well above the old request-`top_k`-derived
     # caps (10 for chunks/entities/facts, 20 for statements) so a legal graph's
     # completion gets a context comparable in size to the plain graph's.
-    hybrid_chunks_top_k: int = 30
-    hybrid_entities_top_k: int = 30
-    hybrid_facts_top_k: int = 30
-    hybrid_statements_top_k: int = 20
-    hybrid_max_edges_per_entity: int = 20
+    # Every budget is at least 1: the request-level `top_k` is rejected at 0 with a 422,
+    # and a typo such as `HYBRID_ENTITIES_TOP_K=-5` in .env would otherwise silently
+    # starve every hybrid search of its entity lane instead of failing at startup.
+    hybrid_chunks_top_k: int = Field(default=30, ge=1)
+    hybrid_entities_top_k: int = Field(default=30, ge=1)
+    hybrid_facts_top_k: int = Field(default=30, ge=1)
+    hybrid_statements_top_k: int = Field(default=20, ge=1)
+    hybrid_max_edges_per_entity: int = Field(default=20, ge=1)
     # Task 9's DISPUTES registry entry reads this.
-    disputes_top_k: int = 50
+    disputes_top_k: int = Field(default=50, ge=1)
     # Replaces the module-level `PAIR_EXPANSION_ENABLED` constant in
     # cognee/modules/retrieval/utils/assertion_pairs.py.
     graph_completion_pair_expansion: bool = True
