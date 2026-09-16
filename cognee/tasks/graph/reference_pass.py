@@ -351,6 +351,8 @@ def _edge_precheck(outcome: Outcome, props: dict, view: GraphView) -> Outcome:
 
     Without this a backend that cannot patch nodes re-plans the same resolution every pass,
     and the ``add_edges`` MERGE would reset a ``feedback_weight`` ``improve()`` had tuned.
+    Its parameters stay explicit rather than taking the pass context: this is the seam the
+    mapping-failure test patches with a three-argument fake.
     """
     resolution = outcome.resolution
     if resolution is None or resolution.patch_mode == PATCH_NONE:
