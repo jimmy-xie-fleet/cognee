@@ -11,20 +11,18 @@ spends no calls, and ``traces_started`` in the summary is the would-be count (th
 summary's ``notes`` carries ``llm_estimate_only`` in this mode).
 
 Budget/behaviour flags -- leave any of these unset to let ``CognifyConfig`` decide:
-``--llm-max-calls``, ``--tracer-max-iter``, ``--llm-confidence-threshold``,
-``--infer-unstated`` (also runs the unstated denial/admission inference pass after the
-stated loop). ``--show-traces`` prints each planned resolution's stored tracer steps --
+``--llm-max-calls``, ``--tracer-max-iter``, ``--llm-confidence-threshold``.
+``--show-traces`` prints each planned resolution's stored tracer steps --
 the model's one-sentence reason, then one indented line per tool call.
 
-Prints the summary counters (including the budget spent -- ``llm_calls`` are the calls
-that came back, ``llm_calls_attempted`` is what the budget was charged -- the trace
-outcomes, the per-tool call counts, and the unstated-inference counts), one line per
-resolution the plan proposes, and one line per reference that stayed dangling (a non-UUID
-``responds_to``/``attributed_to`` reference the plan did not touch and no edge already
-answers -- including a structured-only reference held in ``<field>_ref`` with a blank
-plain field -- plus every UUID-shaped value pointing at a node no longer in the graph).
-The count beside that heading (``dangling_listed``) reconciles the list with the
-``unresolved`` and ``ambiguous`` counters above it.
+Prints the summary counters (including the budget spent -- ``llm_calls`` are the calls that
+came back, ``llm_calls_attempted`` is what the budget was charged -- the trace outcomes and
+the per-tool call counts), one line per resolution the plan proposes, and one line per
+reference that stayed dangling (a non-UUID ``responds_to``/``attributed_to`` reference the
+plan did not touch and no edge already answers -- including a structured-only reference held
+in ``<field>_ref`` with a blank plain field -- plus every UUID-shaped value pointing at a
+node no longer in the graph). The count beside that heading (``dangling_listed``) reconciles
+the list with the ``unresolved`` and ``ambiguous`` counters above it.
 
 ``--apply`` writes the plan (edges, then node patches) via ``write_resolutions``.
 
@@ -233,8 +231,7 @@ async def run(args: argparse.Namespace) -> int:
             "requested: "
             f"llm_max_calls={_flag_or_config(args.llm_max_calls)} "
             f"tracer_max_iter={_flag_or_config(args.tracer_max_iter)} "
-            f"llm_confidence_threshold={_flag_or_config(args.llm_confidence_threshold)} "
-            f"infer_unstated={True if args.infer_unstated else 'config'}"
+            f"llm_confidence_threshold={_flag_or_config(args.llm_confidence_threshold)}"
         )
 
         resolutions, summary = await plan_resolutions(
@@ -244,8 +241,6 @@ async def run(args: argparse.Namespace) -> int:
             llm_max_calls=args.llm_max_calls,
             tracer_max_iter=args.tracer_max_iter,
             llm_confidence_threshold=args.llm_confidence_threshold,
-            infer_unstated=args.infer_unstated or None,
-            infer_confidence_threshold=None,
         )
 
         print(
@@ -261,8 +256,6 @@ async def run(args: argparse.Namespace) -> int:
         print(
             f"llm_budget={summary.get('llm_budget', 0)} llm_calls={summary.get('llm_calls', 0)} "
             f"llm_calls_attempted={summary.get('llm_calls_attempted', 0)} "
-            f"llm_calls_stated={summary.get('llm_calls_stated', 0)} "
-            f"llm_calls_inferred={summary.get('llm_calls_inferred', 0)} "
             f"llm_budget_exhausted={summary.get('llm_budget_exhausted', 0)} "
             f"llm_tokens_in={summary.get('llm_tokens_in', 0)} "
             f"llm_tokens_out={summary.get('llm_tokens_out', 0)}"
@@ -280,10 +273,6 @@ async def run(args: argparse.Namespace) -> int:
             f"llm_skipped_empty_graph={summary.get('llm_skipped_empty_graph', 0)}"
         )
         print(f"tool_calls_by_name={summary.get('tool_calls_by_name', {})}")
-        print(
-            f"inferred_scanned={summary.get('inferred_scanned', 0)} "
-            f"inferred_resolved={summary.get('inferred_resolved', 0)}"
-        )
         if summary.get("notes"):
             print(f"notes={summary['notes']}")
 
@@ -368,14 +357,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Minimum confidence for an llm_trace resolution (default: config value).",
-    )
-    parser.add_argument(
-        "--infer-unstated",
-        action="store_true",
-        help=(
-            "Also run the unstated denial/admission inference pass after the stated "
-            "loop (default: config value when this flag is omitted)."
-        ),
     )
     parser.add_argument(
         "--show-traces",

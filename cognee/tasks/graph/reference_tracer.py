@@ -38,7 +38,6 @@ logger = get_logger("reference_tracer")
 
 TRACE_SYSTEM_PROMPT = "trace_reference_system.txt"
 TRACE_USER_PROMPT = "trace_reference_user.txt"
-INFER_UNSTATED_SYSTEM_PROMPT = "infer_unstated_reference_system.txt"
 
 # How much of a tool result a TraceRecord keeps. A record is for a human reading a report,
 # not for the model, which already saw the full (truncated) result in its context.
@@ -150,8 +149,7 @@ def _reference_block(hint: Optional[ReferenceHint]) -> Optional[Dict[str, str]]:
     """The reference as the document made it, or None when there is nothing to show.
 
     None drives the user template's ``{% if reference %}`` to its "no reference recorded"
-    branch, which is the shape the unstated-inference variant always runs in.
-    Fence-neutralised like the source block: every field here is document wording.
+    branch. Fence-neutralised like the source block: every field here is document wording.
     """
     if hint is None:
         return None

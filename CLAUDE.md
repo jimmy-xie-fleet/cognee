@@ -838,8 +838,8 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
     single pass. Per reference the same two cheap steps run first, then two guards skip a
     reference that has already been answered: a `responds_to`/`attributed_to` edge out of this
     assertion carrying `resolved_by="reference_resolver"`, or a stored `<field>_resolution`
-    holding an `llm_trace`/`llm_inferred` attempt with the same `fingerprint`. A record that
-    gave up at the step cap stores that cap in `max_iter`, so raising `tracer_max_iter` re-opens
+    holding an `llm_trace` attempt with the same `fingerprint`. A record that gave up at the step
+    cap stores that cap in `max_iter`, so raising `tracer_max_iter` re-opens
     it without `force` (a record written before the cap was stored still counts as an attempt).
     What survives both guards gets seed retrieval (`search_candidates` — vector over
     `Assertion_name`, `DocumentChunk_text`, `TextSummary_text` and each `<DocumentType>_name`,
@@ -854,15 +854,13 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
     assertion, `P2` passage, `D1` document — a summary hit is folded onto its chunk, so it never
     becomes a candidate), never as a node id, so
     `finish(candidate_label | null, confidence, reason)` can only name a label or abstain.
-    Strategies: `llm_trace` for a reference the document stated, `llm_inferred` for an unstated
-    denial/admission link.
+    An answer it links is recorded with the strategy `llm_trace`.
   - **Budget** (env, on `CognifyConfig`): `REFERENCE_LLM_MAX_CALLS` (300, per pass, shared by
     every trace), `REFERENCE_TRACER_MAX_ITER` (4, per reference — each iteration is one tool
     step or one finish, and reaching the cap costs no extra call),
-    `REFERENCE_LLM_CONFIDENCE_THRESHOLD` (0.6), `REFERENCE_INFER_UNSTATED` (false),
-    `REFERENCE_INFER_CONFIDENCE_THRESHOLD` (0.75). `resolve_references_pipeline()` and
-    `resolve_assertion_references()` take the same five as `llm_max_calls`, `tracer_max_iter`,
-    `llm_confidence_threshold`, `infer_unstated`, `infer_confidence_threshold` (`None` = config).
+    `REFERENCE_LLM_CONFIDENCE_THRESHOLD` (0.6). `resolve_references_pipeline()` and
+    `resolve_assertion_references()` take the same three as `llm_max_calls`, `tracer_max_iter`,
+    `llm_confidence_threshold` (`None` = config).
     The summary reports both halves of the spend: `llm_calls` are the calls that came back,
     `llm_calls_attempted` is what the budget was charged (a failed call is charged too), so it
     is `llm_calls_attempted` that reaches `llm_budget` when the budget is exhausted.
@@ -895,19 +893,11 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
     under new ids — re-resolves without `force`, records a `stale_id` note and is counted in the
     summary's `stale_ids` (an `entity_name` answer replaces the dead id there, the wording
     staying in `<field>_text`); `asserted_by` (the identity field) is never touched.
-  - **Unstated inference** (`REFERENCE_INFER_UNSTATED=true`, off by default) runs from the same
-    budget, strictly after every stated reference was offered a trace: a `denial` or `admission`
-    with a blank `responds_to`, no `responds_to_ref` and a `source_quote` is seeded on its
-    proposition alone and traced with `infer_unstated_reference_system.txt`. An answer above
-    `reference_infer_confidence_threshold` writes an `llm_inferred` edge carrying `inferred=True`
-    and `feedback_weight=0.2`, and patches **only** `<field>_resolution` — the graph never claims
-    the document wrote a reference it did not write.
   - **Operator scripts** (`scripts/legal/`): `resolve_references_report.py <dataset> [--apply]
     [--force] [--llm-max-calls N] [--tracer-max-iter N] [--llm-confidence-threshold F]
-    [--infer-unstated] [--show-traces]` plans a pass (`--apply` writes it; a plan-only run
-    still spends), printing the intended spend before the first call and every `llm_*` /
-    `traces_*` / `tool_calls_by_name` / `inferred_*` summary key after it; `find_disputes.py`
-    prints a `resolution_strategy` breakdown and lists `inferred=True` edges separately;
+    [--show-traces]` plans a pass (`--apply` writes it; a plan-only run still spends), printing the
+    intended spend before the first call and every `llm_*` / `traces_*` / `tool_calls_by_name`
+    summary key after it; `find_disputes.py` prints a `resolution_strategy` breakdown;
     `ingest_adams_legal.py --source <dir>` ingests a document directory with the profile.
 - **Limitations**: fuzzy grounding runs at a 0.9 cutoff, which is sensitive to pluralization —
   a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
@@ -941,12 +931,7 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   which degrades to the stored chunks when the derived text file is missing or unreadable; a
   legacy free-text reference from a pre-structured dataset reaches the tracer as a `legacy_text`
   hint, its own words unparsed, and an old `<field>_resolution` blob with no `fingerprint` is
-  reconsidered once, so the first pass over such a dataset spends budget on it; the `0.75`
-  unstated bar is stated both in `reference_infer_confidence_threshold` and in
-  `infer_unstated_reference_system.txt`, two sources of truth that have to move together; an
-  inferred link can land on a sibling assertion in the same pleading rather than the one it
-  answers (the same-document discount is a penalty, not a filter), which is why
-  `REFERENCE_INFER_UNSTATED` is false by default and wants a spot-check before it is turned on;
+  reconsidered once, so the first pass over such a dataset spends budget on it;
   a bare `"the Complaint"` short-circuits to whatever `Complaint` stub entity extraction minted,
   before the tracer sees it; re-resolution never deletes a superseded edge; `update_node`
   is implemented only on the Ladybug adapter, so other graph backends get the reference edges
@@ -954,8 +939,7 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   the only record that a reference was answered, which is what stops the next pass re-tracing it
   and re-emitting its edges, so a reference that *abstained* (no edge, and no record to store)
   is traced and paid for again on every pass, and a changed reference on an already-linked field
-  needs `force` (so does a stated reference that later appears on a field an `llm_inferred` edge
-  already answers); edges the memify pipeline writes are owned by the resolver's sentinel data id
+  needs `force`; edges the memify pipeline writes are owned by the resolver's sentinel data id
   (`REFERENCE_RESOLUTION_DATA_ID`),
   not the ingesting document, so they do not follow that document's `forget()`; there are no
   edge-evidence rows for resolved references; `update()` takes no `enrichment_tasks` parameter,

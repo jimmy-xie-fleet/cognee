@@ -119,13 +119,6 @@ async def test_pipeline_rejects_an_invalid_confidence_threshold(bad_threshold):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad_threshold", [0, -0.1, 1.5, "0.6", True])
-async def test_pipeline_rejects_an_invalid_infer_threshold(bad_threshold):
-    with pytest.raises(CogneeValidationError):
-        await resolve_references_pipeline(infer_confidence_threshold=bad_threshold)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("bad_budget", [-1, 1.5, "10", True])
 async def test_pipeline_rejects_an_invalid_call_budget(bad_budget):
     with pytest.raises(CogneeValidationError):
@@ -137,16 +130,6 @@ async def test_pipeline_rejects_an_invalid_call_budget(bad_budget):
 async def test_pipeline_rejects_an_invalid_iteration_cap(bad_iterations):
     with pytest.raises(CogneeValidationError):
         await resolve_references_pipeline(tracer_max_iter=bad_iterations)
-
-
-@pytest.mark.asyncio
-async def test_pipeline_forwards_the_unstated_inference_options():
-    """The detect Task binds both, and the pass reads them off its own arguments."""
-    _, memify_mock, _, _ = await _run(infer_unstated=True, infer_confidence_threshold=0.8)
-
-    detect_options = memify_mock.call_args.kwargs["extraction_tasks"][0].default_params["kwargs"]
-    assert detect_options["infer_unstated"] is True
-    assert detect_options["infer_confidence_threshold"] == 0.8
 
 
 @pytest.mark.asyncio

@@ -32,10 +32,8 @@ from cognee.modules.engine.models.Assertion import _normalize
 # a consumer can tell an id that was already in the field from one this resolver derived.
 STRATEGY_EXISTING_ID = "existing_id"
 STRATEGY_ENTITY_NAME = "entity_name"
-# The agentic tracer's two answers: a reference the document made (``llm_trace``) and one
-# it only implied (``llm_inferred``, opt-in). Both come from the pass, never from the tail.
+# The agentic tracer's answer, written by the resolver pass and never by the tail.
 STRATEGY_LLM_TRACE = "llm_trace"
-STRATEGY_LLM_INFERRED = "llm_inferred"
 
 RESOLVED_BY = "reference_resolver"
 
@@ -557,14 +555,12 @@ def build_reference_edge(
     source_props: Mapping[str, Any],
     target_label: Optional[str],
     target_type: str,
-    extra_properties: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[str, str, str, Dict[str, Any]]:
     """One ``(source, target, relationship, properties)`` edge for a resolved reference.
 
     The raw shape ``add_edges`` takes: the caller still runs it through
     ``ensure_default_edge_properties``, which fills the storage defaults and leaves the
-    stance-preserving ``edge_text`` set here alone. ``extra_properties`` is merged **last**,
-    so a caller can add properties and deliberately override one of the shape's own.
+    stance-preserving ``edge_text`` set here alone.
     """
     properties = {
         "relationship_name": resolution.field,
@@ -577,8 +573,6 @@ def build_reference_edge(
         "resolved_by": RESOLVED_BY,
         "edge_text": stance_edge_text(source_props, resolution.field, target_label),
     }
-    if extra_properties:
-        properties.update(extra_properties)
 
     return (resolution.assertion_id, target_id, resolution.field, properties)
 
@@ -596,9 +590,8 @@ def build_node_patch(
     re-resolution must not overwrite the original wording with its own idea of it.
 
     In ``"resolution_only"`` mode only the ``<field>_resolution`` blob is written. Writing
-    the field would either null out wording the extraction recorded (``anchor_id`` is
-    ``None`` for every negative record) or make the graph claim the document stated a
-    reference it never wrote.
+    the field would null out wording the extraction recorded: ``anchor_id`` is ``None`` for
+    every negative record.
     """
     field = resolution.field
     audit = {

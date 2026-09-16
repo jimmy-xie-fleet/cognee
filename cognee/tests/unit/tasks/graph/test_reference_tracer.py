@@ -24,7 +24,6 @@ from cognee.tasks.graph.reference_graph_view import DocumentTextCache
 from cognee.tasks.graph.reference_retrieval import LexicalIndex
 from cognee.tasks.graph.reference_tracer import (
     FENCE_CLOSE,
-    INFER_UNSTATED_SYSTEM_PROMPT,
     MAX_TOOL_OUTPUT_CHARS,
     TRACE_PREVIEW_CHARS,
     TRACE_SYSTEM_PROMPT,
@@ -753,47 +752,22 @@ async def test_without_a_hint_the_reference_block_is_omitted():
     assert "2026-06-10" not in prompt
 
 
-@pytest.mark.asyncio
-async def test_the_system_prompt_is_read_from_the_given_path():
-    steps = [TracerStep(finish=TracerFinish(candidate_label=None))]
+def test_the_system_prompt_exists_and_states_the_contract():
+    prompt = read_query_prompt(TRACE_SYSTEM_PROMPT)
 
-    _, _, _, gateway, _, _, _ = await _trace(steps, system_prompt_path=INFER_UNSTATED_SYSTEM_PROMPT)
-
-    system_prompt = gateway.await_args_list[0].kwargs["system_prompt"]
-    assert system_prompt == read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
-    assert system_prompt
-    assert "answering" in system_prompt
+    assert prompt
+    assert "tool_call" in prompt
+    assert "finish" in prompt
+    assert "abstention" in prompt
 
 
-def test_both_system_prompts_exist_and_state_the_contract():
-    stated = read_query_prompt(TRACE_SYSTEM_PROMPT)
-    unstated = read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
-
-    for prompt in (stated, unstated):
-        assert prompt
-        assert "tool_call" in prompt
-        assert "finish" in prompt
-        assert "abstention" in prompt
-    # The unstated variant is the stated prompt plus its own paragraph.
-    assert len(unstated) > len(stated)
-
-
-def test_the_unstated_prompt_states_the_higher_confidence_bar():
-    # Finding 6: results of this variant are judged against
-    # reference_infer_confidence_threshold (0.75), so telling the model 0.6 is enough
-    # manufactures answers the pass then throws away.
-    unstated = read_query_prompt(INFER_UNSTATED_SYSTEM_PROMPT)
-
-    assert "below `0.75` abstain" in unstated
-
-
-def test_neither_prompt_offers_a_summary_label():
-    # Task 7 maps a summary hit to its chunk, so an S label is never issued; inviting the
+def test_the_prompt_never_offers_a_summary_label():
+    # A summary hit is mapped to its chunk, so an S label is never issued; inviting the
     # model to name one costs a whole trace.
-    for name in (TRACE_SYSTEM_PROMPT, INFER_UNSTATED_SYSTEM_PROMPT):
-        prompt = read_query_prompt(name)
-        assert "`S…`" not in prompt
-        assert "summary" not in prompt.lower()
+    prompt = read_query_prompt(TRACE_SYSTEM_PROMPT)
+
+    assert "`S…`" not in prompt
+    assert "summary" not in prompt.lower()
 
 
 def test_the_system_prompt_explains_the_fence_and_where_labels_come_from():

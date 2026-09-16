@@ -16,7 +16,6 @@ from cognee.modules.graph.utils.reference_resolution import (
     RESOLVED_BY,
     STRATEGY_ENTITY_NAME,
     STRATEGY_EXISTING_ID,
-    STRATEGY_LLM_INFERRED,
     STRATEGY_LLM_TRACE,
     Locator,
     ReferenceHint,
@@ -361,12 +360,10 @@ def test_strategy_names_are_the_documented_values():
         STRATEGY_EXISTING_ID,
         STRATEGY_ENTITY_NAME,
         STRATEGY_LLM_TRACE,
-        STRATEGY_LLM_INFERRED,
     ) == (
         "existing_id",
         "entity_name",
         "llm_trace",
-        "llm_inferred",
     )
 
 
@@ -440,33 +437,6 @@ def test_build_node_patch_resolution_only_never_touches_the_field():
 
 def test_build_node_patch_full_mode_is_the_default():
     assert build_node_patch(_resolution(), {}) == build_node_patch(_resolution(), {}, mode="full")
-
-
-def test_build_reference_edge_merges_extra_properties_last():
-    _, _, _, props = build_reference_edge(
-        _resolution(strategy=STRATEGY_LLM_INFERRED),
-        "a-1",
-        source_props=DENIAL_PROPS,
-        target_label="Payment was late",
-        target_type="assertion",
-        extra_properties={"inferred": True, "feedback_weight": 0.2, "resolved_by": "override"},
-    )
-    assert props["inferred"] is True
-    assert props["feedback_weight"] == 0.2
-    # Merged last, so an extra property wins over the shape's own default.
-    assert props["resolved_by"] == "override"
-
-
-def test_build_reference_edge_without_extra_properties_is_unchanged():
-    _, _, _, props = build_reference_edge(
-        _resolution(),
-        "a-1",
-        source_props=DENIAL_PROPS,
-        target_label="Payment was late",
-        target_type="assertion",
-    )
-    assert props["resolved_by"] == RESOLVED_BY
-    assert "inferred" not in props
 
 
 # --------------------------------------------------------------------------------------
