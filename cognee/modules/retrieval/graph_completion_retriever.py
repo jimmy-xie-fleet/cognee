@@ -8,6 +8,7 @@ from cognee.modules.retrieval.utils.validate_queries import validate_retriever_i
 from cognee.modules.graph.utils import resolve_edges_to_text
 from cognee.modules.graph.utils.convert_node_to_data_point import get_all_subclasses
 from cognee.modules.retrieval.base_retriever import BaseRetriever
+from cognee.modules.retrieval.utils.assertion_pairs import append_assertion_pairs_to_retrieval
 from cognee.modules.retrieval.utils.brute_force_triplet_search import brute_force_triplet_search
 from cognee.modules.retrieval.utils.merge_results import (
     conversational_reserve,
@@ -135,6 +136,11 @@ class GraphCompletionRetriever(BaseRetriever):
             return []
 
         triplets = await self.get_triplets(query, query_batch)
+        # An assertion means nothing without its counterpart: a denial's affirmative
+        # name reads as a claim of its own unless the statement it answers, and the
+        # speaker behind it, arrive with it. Additive, and a no-op (down to identity)
+        # when the retrieval surfaced no assertion.
+        triplets = await append_assertion_pairs_to_retrieval(self._unified_engine.graph, triplets)
 
         # Check if all triplets are empty, in case of batch queries
         if query_batch and all(len(batched_triplets) == 0 for batched_triplets in triplets):
