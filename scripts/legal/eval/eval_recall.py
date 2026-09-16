@@ -132,6 +132,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=0, help="Seed for the spot-check sample.")
     parser.add_argument(
+        "--label",
+        default=None,
+        help=(
+            "Free-text label for the run manifest, e.g. the server's code version. "
+            "The manifest records the harness's own commit separately."
+        ),
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="Validate the question files and exit (0 valid, 1 invalid).",
@@ -183,6 +191,39 @@ def _write_answers(directory: Path, rows, backup: bool) -> None:
     _progress(f"Wrote {path}")
 
 
+def _fold_journals(source: Path, destination: Path, previous, write: bool = True):
+    """Overlay the answers journal onto ``previous``, optionally persisting it."""
+    recovered = lib.recover_partial_answers(source, previous)
+    count = sum(1 for old, new in zip(previous, recovered) if old is not new)
+    if count:
+        _progress(
+            f"Recovered {count} row(s) from an interrupted run's {lib.PARTIAL_ANSWERS_FILENAME}"
+        )
+        if write:
+            _write_answers(destination, recovered, backup=destination == source)
+    return recovered
+
+
+def _fold_verdict_journal(source: Path, destination: Path, order, write: bool = True):
+    """Load the saved verdicts, overlay their journal, optionally persist them."""
+    verdicts_path = source / lib.VERDICTS_FILENAME
+    existing = (
+        [lib.VerdictRow.from_dict(row) for row in lib.read_jsonl(verdicts_path)]
+        if verdicts_path.exists()
+        else []
+    )
+    recovered = lib.recover_partial_verdicts(source, existing, order)
+    if write and len(recovered) != len(existing):
+        _progress(
+            f"Recovered {len(recovered) - len(existing)} verdict(s) from "
+            f"{lib.PARTIAL_VERDICTS_FILENAME}"
+        )
+        if destination == source:
+            lib.backup_file(destination / lib.VERDICTS_FILENAME)
+        lib.write_jsonl(destination / lib.VERDICTS_FILENAME, recovered)
+    return recovered
+
+
 def _open_session(args) -> tuple:
     """Build a logged-in session. Returns ``(session, client)``; the caller closes."""
     username, password = lib.credentials_from_environment()
@@ -223,6 +264,11 @@ def _verdict_reporter(total: int, journal: Path | None = None):
     return report
 
 
+def _session_prefix(run_directory: Path) -> str:
+    """Namespace for this run's per-cell sessions, so two runs never share one."""
+    return f"eval-{run_directory.name}"
+
+
 def _run_matrix(args, questions, datasets, search_types, run_directory: Path) -> list:
     session, client = _open_session(args)
     total = len(datasets) * len(search_types) * len(questions)
@@ -234,6 +280,7 @@ def _run_matrix(args, questions, datasets, search_types, run_directory: Path) ->
             datasets=datasets,
             search_types=search_types,
             top_k=args.top_k,
+            session_prefix=_session_prefix(run_directory),
             on_row=_progress_reporter(total, journal),
         )
     finally:
@@ -257,6 +304,7 @@ def _answer_rows(args, failed, by_id, run_directory: Path) -> list:
                 datasets=[row.dataset],
                 search_types=[row.search_type],
                 top_k=row.top_k or args.top_k,
+                session_prefix=_session_prefix(run_directory),
                 on_row=report,
             )
             rows.extend(fresh)
@@ -278,6 +326,12 @@ def main(argv: list[str] | None = None) -> int:
     question_paths = args.questions or []
     if not question_paths:
         parser.error("--questions is required (repeat it for several files)")
+    if args.judge_only and args.no_judge:
+        parser.error("--judge-only with --no-judge would do nothing at all")
+    if not 0.0 <= args.spot_check <= 1.0:
+        parser.error(f"--spot-check must be a fraction in [0, 1], not {args.spot_check}")
+    if args.top_k < 1:
+        parser.error(f"--top-k must be at least 1, not {args.top_k}")
 
     if args.validate_only:
         return _validate_only(question_paths)
@@ -301,11 +355,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.judge_only:
         source_directory = Path(args.judge_only)
-        answer_rows = _load_answers(source_directory)
-        if answer_rows is None:
+        previous = _load_answers(source_directory)
+        if previous is None:
             return 1
         run_directory = Path(args.out) if args.out else source_directory
         run_directory.mkdir(parents=True, exist_ok=True)
+
+        # Fold the journals in exactly as --resume does, BEFORE anything clears
+        # them. A run that died between appending a row and rewriting the main
+        # file keeps its answers only in the journal; judging without folding
+        # would grade the stale matrix and then delete the evidence.
+        answer_rows = _fold_journals(source_directory, run_directory, previous)
+        existing_verdicts = _fold_verdict_journal(source_directory, run_directory, answer_rows)
         _progress(f"Re-judging {len(answer_rows)} saved answer(s) from {source_directory}")
 
     elif args.resume:
@@ -316,14 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         run_directory = Path(args.out) if args.out else source_directory
         run_directory.mkdir(parents=True, exist_ok=True)
 
-        recovered = lib.recover_partial_answers(source_directory, previous)
-        recovered_count = sum(1 for old, new in zip(previous, recovered) if old is not new)
-        if recovered_count:
-            _progress(
-                f"Recovered {recovered_count} row(s) from an interrupted run's "
-                f"{lib.PARTIAL_ANSWERS_FILENAME}"
-            )
-        previous = recovered
+        previous = _fold_journals(source_directory, run_directory, previous, write=False)
 
         failed = lib.rows_needing_answers(previous)
         _progress(
@@ -345,13 +399,8 @@ def main(argv: list[str] | None = None) -> int:
         reanswered = _answer_rows(args, failed, by_id, run_directory) if failed else []
         answer_rows = lib.merge_answer_rows(previous, reanswered)
 
-        verdicts_path = source_directory / lib.VERDICTS_FILENAME
-        if verdicts_path.exists():
-            existing_verdicts = [
-                lib.VerdictRow.from_dict(row) for row in lib.read_jsonl(verdicts_path)
-            ]
-        existing_verdicts = lib.recover_partial_verdicts(
-            source_directory, existing_verdicts, answer_rows
+        existing_verdicts = _fold_verdict_journal(
+            source_directory, run_directory, answer_rows, write=False
         )
 
         _write_answers(run_directory, answer_rows, backup=run_directory == source_directory)
@@ -369,7 +418,27 @@ def main(argv: list[str] | None = None) -> int:
         run_directory = Path(args.out) if args.out else lib.default_run_directory(DEFAULT_RUNS_ROOT)
         run_directory.mkdir(parents=True, exist_ok=True)
 
-        answer_rows = _run_matrix(args, questions, datasets, search_types, run_directory)
+        manifest_path = lib.write_manifest(
+            run_directory,
+            base_url=args.base_url,
+            question_paths=question_paths,
+            datasets=datasets,
+            search_types=search_types,
+            top_k=args.top_k,
+            timeout=args.timeout,
+            pause_seconds=args.pause_seconds,
+            label=args.label,
+        )
+        _progress(f"Wrote {manifest_path}")
+
+        # The whole matrix, marked not attempted, before the first request. A run
+        # killed in its first pass used to leave --resume nothing to resume from;
+        # now the matrix is always on disk and the journal decides what is done.
+        pending = lib.pending_matrix(questions, datasets, search_types, top_k=args.top_k)
+        _write_answers(run_directory, pending, backup=False)
+
+        fresh = _run_matrix(args, questions, datasets, search_types, run_directory)
+        answer_rows = lib.merge_answer_rows(pending, fresh)
         _write_answers(run_directory, answer_rows, backup=False)
 
     if args.no_judge:

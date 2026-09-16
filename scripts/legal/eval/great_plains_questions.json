@@ -6,20 +6,56 @@
       "category": "summary",
       "question": "what's going on in this case?",
       "gold_facts": [
-        {"fact": "Kiran Patel, Amara Osei and David Smith are the plaintiffs, and Dale R. Henriksen, Sandra M. Henriksen, Great Plains Logistics, Inc., Henriksen Transport Services LLC and Northland Property Holdings LLC are the defendants.", "source": "order-granting-TRO-2026-03-25.pdf — caption, page 1"},
-        {"fact": "The case is Case No. 27-CV-26-4871 in the Hennepin County District Court, Fourth Judicial District, State of Minnesota.", "source": "order-granting-TRO-2026-03-25.pdf — caption, page 1"},
-        {"fact": "Plaintiffs hold 1,800 shares, representing 18% of Great Plains Logistics, Inc.", "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"},
-        {"fact": "Defendants initiated a compulsory repurchase of Plaintiffs' shares under a disputed November 3, 2025 amendment to the shareholder agreement.", "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"},
-        {"fact": "The Company's stated repurchase calculation was $288 per share, or $518,400 for the combined interest, and Plaintiffs dispute the amendment's validity and the valuation methodology.", "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"},
-        {"fact": "On March 25, 2026 the court entered a temporary restraining order restraining Defendants from enforcing the compulsory repurchase and required Plaintiffs to post $25,000 in security within seven days.", "source": "order-granting-TRO-2026-03-25.pdf — Order, paragraphs 1 and 3"},
-        {"fact": "The complaint alleges breach of fiduciary duty, unfairly prejudicial conduct, and breach of contract.", "source": "deposition-patel-kiran-2026-07-08.pdf — EP-18"},
-        {"fact": "Four depositions were taken between July 8 and August 1, 2026: Patel, Dale Henriksen, David Smith and Greystone's Jeff Park.", "source": "matter-chronology-2026-08-25.xlsx — Chronology (cont. 2), records dated 2026-07-08 through 2026-08-01"}
+        {
+          "fact": "Kiran Patel, Amara Osei and David Smith are the plaintiffs, and Dale R. Henriksen, Sandra M. Henriksen, Great Plains Logistics, Inc., Henriksen Transport Services LLC and Northland Property Holdings LLC are the defendants.",
+          "source": "order-granting-TRO-2026-03-25.pdf — caption, page 1"
+        },
+        {
+          "fact": "The case is Case No. 27-CV-26-4871 in the Hennepin County District Court, Fourth Judicial District, State of Minnesota.",
+          "source": "order-granting-TRO-2026-03-25.pdf — caption, page 1"
+        },
+        {
+          "fact": "Plaintiffs hold 1,800 shares, representing 18% of Great Plains Logistics, Inc.",
+          "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"
+        },
+        {
+          "fact": "Defendants initiated a compulsory repurchase of Plaintiffs' shares under a disputed November 3, 2025 amendment to the shareholder agreement.",
+          "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"
+        },
+        {
+          "fact": "The Company's stated repurchase calculation was $288 per share, or $518,400 for the combined interest, and Plaintiffs dispute the amendment's validity and the valuation methodology.",
+          "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"
+        },
+        {
+          "fact": "On March 25, 2026 the court entered a temporary restraining order restraining Defendants from enforcing the compulsory repurchase and required Plaintiffs to post $25,000 in security within seven days.",
+          "source": "order-granting-TRO-2026-03-25.pdf — Order, paragraphs 1 and 3"
+        },
+        {
+          "fact": "The complaint alleges breach of fiduciary duty, unfairly prejudicial conduct, and breach of contract.",
+          "source": "deposition-patel-kiran-2026-07-08.pdf — EP-18"
+        },
+        {
+          "fact": "Four depositions were taken between July 8 and August 1, 2026: Patel, Dale Henriksen, David Smith and Greystone's Jeff Park.",
+          "source": "matter-chronology-2026-08-25.xlsx — Chronology (cont. 2), records dated 2026-07-08 through 2026-08-01"
+        }
       ],
       "must_not_claim": [
-        "The court has determined the fair value of the shares or ruled on the validity of the November 3, 2025 amendment.",
-        "The shares have already been repurchased and transferred to the majority holders.",
-        "Dale Henriksen is a plaintiff, or the minority holders are defendants.",
-        "The case is pending in arbitration rather than in district court."
+        {
+          "claim": "The court has determined the fair value of the shares or ruled on the validity of the November 3, 2025 amendment.",
+          "match": []
+        },
+        {
+          "claim": "The shares have already been repurchased and transferred to the majority holders.",
+          "match": []
+        },
+        {
+          "claim": "Dale Henriksen is a plaintiff, or the minority holders are defendants.",
+          "match": []
+        },
+        {
+          "claim": "The case is pending in arbitration rather than in district court.",
+          "match": []
+        }
       ],
       "notes": "Held-out baseline orientation question, deliberately identical in wording to the Adams summary question so the two corpora are scored on the same prompt."
     },
@@ -28,20 +64,56 @@
       "category": "summary",
       "question": "Who owns what in Great Plains Logistics, and what other entities are involved?",
       "gold_facts": [
-        {"fact": "Dale Henriksen holds 6,200 shares, or 62% of the 10,000 outstanding shares.", "source": "shareholder-agreement-executed-2012-06-15.pdf — Schedule A"},
-        {"fact": "Sandra Henriksen holds 2,000 shares (20%), Kiran Patel 900 shares (9%), Amara Osei 500 shares (5%), and David Smith 400 shares (4%).", "source": "shareholder-agreement-executed-2012-06-15.pdf — Schedule A"},
-        {"fact": "Dale Henriksen is President and CEO and has held that position since the company was incorporated in 2009; Sandra Henriksen is Secretary and Treasurer.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-5"},
-        {"fact": "Henriksen Transport Services LLC was formed in 2021 and Dale Henriksen is its sole member and manager.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-6"},
-        {"fact": "Northland Property Holdings LLC is owned fifty-fifty by Dale and Sandra Henriksen and owns the property that Great Plains leases.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-6"},
-        {"fact": "Greystone Accounting Group, P.A. has served Great Plains since 2015, with Jeff Park as engagement partner, and also serves Henriksen Transport Services.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-4 and EP-5"},
-        {"fact": "Plaintiffs are represented by Lindquist & Associates and Defendants by Morrison & Kale LLP.", "source": "deposition-patel-kiran-2026-07-08.pdf — EP-2, Appearances"},
-        {"fact": "The Company's 2025 unaudited financials report total related party costs of $3,098,000, comprising $1,950,000 transportation services, $500,000 management fees, and $648,000 facility lease.", "source": "great-plains-unaudited-financials-2025-YE.xlsx — Income Statement, 'Related party costs included above'"}
+        {
+          "fact": "Dale Henriksen holds 6,200 shares, or 62% of the 10,000 outstanding shares.",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Schedule A"
+        },
+        {
+          "fact": "Sandra Henriksen holds 2,000 shares (20%), Kiran Patel 900 shares (9%), Amara Osei 500 shares (5%), and David Smith 400 shares (4%).",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Schedule A"
+        },
+        {
+          "fact": "Dale Henriksen is President and CEO and has held that position since the company was incorporated in 2009; Sandra Henriksen is Secretary and Treasurer.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-5"
+        },
+        {
+          "fact": "Henriksen Transport Services LLC was formed in 2021 and Dale Henriksen is its sole member and manager.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-6"
+        },
+        {
+          "fact": "Northland Property Holdings LLC is owned fifty-fifty by Dale and Sandra Henriksen and owns the property that Great Plains leases.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-6"
+        },
+        {
+          "fact": "Greystone Accounting Group, P.A. has served Great Plains since 2015, with Jeff Park as engagement partner, and also serves Henriksen Transport Services.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-4 and EP-5"
+        },
+        {
+          "fact": "Plaintiffs are represented by Lindquist & Associates and Defendants by Morrison & Kale LLP.",
+          "source": "deposition-patel-kiran-2026-07-08.pdf — EP-2, Appearances"
+        },
+        {
+          "fact": "The Company's 2025 unaudited financials report total related party costs of $3,098,000, comprising $1,950,000 transportation services, $500,000 management fees, and $648,000 facility lease.",
+          "source": "great-plains-unaudited-financials-2025-YE.xlsx — Income Statement, 'Related party costs included above'"
+        }
       ],
       "must_not_claim": [
-        "Henriksen Transport Services is an unrelated third-party carrier.",
-        "Northland Property Holdings is owned solely by Dale Henriksen or by the Company.",
-        "Greystone Accounting Group serves only Great Plains and not Henriksen Transport Services.",
-        "Kiran Patel or David Smith holds a majority or controlling interest."
+        {
+          "claim": "Henriksen Transport Services is an unrelated third-party carrier.",
+          "match": []
+        },
+        {
+          "claim": "Northland Property Holdings is owned solely by Dale Henriksen or by the Company.",
+          "match": []
+        },
+        {
+          "claim": "Greystone Accounting Group serves only Great Plains and not Henriksen Transport Services.",
+          "match": []
+        },
+        {
+          "claim": "Kiran Patel or David Smith holds a majority or controlling interest.",
+          "match": []
+        }
       ],
       "notes": "Ownership-and-affiliates map. Establishes the related-party structure that later valuation and dispute questions depend on."
     },
@@ -50,21 +122,62 @@
       "category": "disputes",
       "question": "can you list all the contradictions detected in this case?",
       "gold_facts": [
-        {"fact": "Dale Henriksen's November 5, 2025 email states the amendment was approved by holders of 82% of outstanding shares, while the executed amendment recites that the signing shareholders hold 86% (Dale 62%, Sandra 20%, Smith 4%).", "source": "email-patel-to-henriksen-2025-11-05.pdf — Henriksen reply, November 5, 2025, 4:18 PM; shareholder-agreement-amendment-2025-11-03.pdf — third WHEREAS clause"},
-        {"fact": "That same email cites 'Section 10.1 of the existing agreement' as the source of the 75% supermajority amendment threshold, while the 2012 agreement places the amendment provision at Article 9, Section 9.1 and Section 10.1 is the governing-law clause.", "source": "email-patel-to-henriksen-2025-11-05.pdf — Henriksen reply; shareholder-agreement-executed-2012-06-15.pdf — Sections 9.1 and 10.1"},
-        {"fact": "The amendment recites that notice of the proposed amendment was provided to all Shareholders in accordance with the Original Agreement, while Patel wrote that he received no notice and Smith testified he received no written notice at all, only a phone call from Dale on November 2.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — fourth WHEREAS clause; email-patel-to-henriksen-2025-11-05.pdf — Patel email, 7:32 AM; deposition-smith-david-2026-07-22.pdf — EP-6"},
-        {"fact": "Section 9.4 of the 2012 agreement provides that no amendment shall eliminate or reduce the Section 5.1 minimum distribution obligation without the unanimous written consent of all Shareholders, yet the November 3, 2025 amendment deletes Article 5 in its entirety on the signatures of holders of 86%.", "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 9.4; shareholder-agreement-amendment-2025-11-03.pdf — Section 3"},
-        {"fact": "Greystone applied a 25% minority discount and a 20% marketability discount in the buyback calculation, although amended Section 4.1 does not direct either discount and original Section 4.3 expressly barred both.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-12; shareholder-agreement-executed-2012-06-15.pdf — Section 4.3"},
-        {"fact": "The Northland payment register records a flat $54,000 per month through December 2025, while the lease calls for a 3% increase on each anniversary of the July 1, 2023 commencement date; Zhou computes a $39,171.60 difference against scheduled base rent.", "source": "northland-lease-payment-records-2023-2025.csv — all 30 rows; northland-gp-warehouse-lease-2023-07.pdf — Section 3(b); forensic-accounting-preliminary-report-zhou-2026-06.pdf — Lease-payment comparison"},
-        {"fact": "The 2025 unaudited income statement reports $1,950,000 of related-party transportation cost while the 47-row HTS invoice schedule totals $1,173,000 for 2025, an unresolved $777,000 difference.", "source": "forensic-accounting-preliminary-report-zhou-2026-06.pdf — '2025 population reconciliation'"},
-        {"fact": "Patel's November 5, 2025 email states he has been a shareholder and director since the company's incorporation in 2009, while he testified that he acquired his shares and joined the board in June 2012.", "source": "email-patel-to-henriksen-2025-11-05.pdf — Patel email, 7:32 AM; deposition-patel-kiran-2026-07-08.pdf — EP-4"}
+        {
+          "fact": "Dale Henriksen's November 5, 2025 email states the amendment was approved by holders of 82% of outstanding shares, while the executed amendment recites that the signing shareholders hold 86% (Dale 62%, Sandra 20%, Smith 4%).",
+          "source": "email-patel-to-henriksen-2025-11-05.pdf — Henriksen reply, November 5, 2025, 4:18 PM; shareholder-agreement-amendment-2025-11-03.pdf — third WHEREAS clause"
+        },
+        {
+          "fact": "That same email cites 'Section 10.1 of the existing agreement' as the source of the 75% supermajority amendment threshold, while the 2012 agreement places the amendment provision at Article 9, Section 9.1 and Section 10.1 is the governing-law clause.",
+          "source": "email-patel-to-henriksen-2025-11-05.pdf — Henriksen reply; shareholder-agreement-executed-2012-06-15.pdf — Sections 9.1 and 10.1"
+        },
+        {
+          "fact": "The amendment recites that notice of the proposed amendment was provided to all Shareholders in accordance with the Original Agreement, while Patel wrote that he received no notice and Smith testified he received no written notice at all, only a phone call from Dale on November 2.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — fourth WHEREAS clause; email-patel-to-henriksen-2025-11-05.pdf — Patel email, 7:32 AM; deposition-smith-david-2026-07-22.pdf — EP-6"
+        },
+        {
+          "fact": "Section 9.4 of the 2012 agreement provides that no amendment shall eliminate or reduce the Section 5.1 minimum distribution obligation without the unanimous written consent of all Shareholders, yet the November 3, 2025 amendment deletes Article 5 in its entirety on the signatures of holders of 86%.",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 9.4; shareholder-agreement-amendment-2025-11-03.pdf — Section 3"
+        },
+        {
+          "fact": "Greystone applied a 25% minority discount and a 20% marketability discount in the buyback calculation, although amended Section 4.1 does not direct either discount and original Section 4.3 expressly barred both.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-12; shareholder-agreement-executed-2012-06-15.pdf — Section 4.3"
+        },
+        {
+          "fact": "The Northland payment register records a flat $54,000 per month through December 2025, while the lease calls for a 3% increase on each anniversary of the July 1, 2023 commencement date; Zhou computes a $39,171.60 difference against scheduled base rent.",
+          "source": "northland-lease-payment-records-2023-2025.csv — all 30 rows; northland-gp-warehouse-lease-2023-07.pdf — Section 3(b); forensic-accounting-preliminary-report-zhou-2026-06.pdf — Lease-payment comparison"
+        },
+        {
+          "fact": "The 2025 unaudited income statement reports $1,950,000 of related-party transportation cost while the 47-row HTS invoice schedule totals $1,173,000 for 2025, an unresolved $777,000 difference.",
+          "source": "forensic-accounting-preliminary-report-zhou-2026-06.pdf — '2025 population reconciliation'"
+        },
+        {
+          "fact": "Patel's November 5, 2025 email states he has been a shareholder and director since the company's incorporation in 2009, while he testified that he acquired his shares and joined the board in June 2012.",
+          "source": "email-patel-to-henriksen-2025-11-05.pdf — Patel email, 7:32 AM; deposition-patel-kiran-2026-07-08.pdf — EP-4"
+        }
       ],
       "must_not_claim": [
-        "Zhou concluded that Great Plains was overcharged $512,000 by Henriksen Transport Services (she states no population-wide excess-charge amount and declines to extrapolate).",
-        "Zhou found the duplicated invoice identifiers to be duplicate payments (she states this is not, by itself, proof of a duplicate charge).",
-        "The blank 'Approved By' fields on four invoice rows prove that approval did not occur or that the payments were improper.",
-        "The court has found the November 3, 2025 amendment invalid or determined fair value.",
-        "Distributions in 2023 fell short of the 40% minimum (the 2023 figures equal exactly 40%)."
+        {
+          "claim": "Zhou concluded that Great Plains was overcharged $512,000 by Henriksen Transport Services (she states no population-wide excess-charge amount and declines to extrapolate).",
+          "match": [
+            "$512,000"
+          ]
+        },
+        {
+          "claim": "Zhou found the duplicated invoice identifiers to be duplicate payments (she states this is not, by itself, proof of a duplicate charge).",
+          "match": []
+        },
+        {
+          "claim": "The blank 'Approved By' fields on four invoice rows prove that approval did not occur or that the payments were improper.",
+          "match": []
+        },
+        {
+          "claim": "The court has found the November 3, 2025 amendment invalid or determined fair value.",
+          "match": []
+        },
+        {
+          "claim": "Distributions in 2023 fell short of the 40% minimum (the 2023 figures equal exactly 40%).",
+          "match": []
+        }
       ],
       "notes": "Held-out twin of the Adams contradictions question. The must_not_claim list is built from the forensic report's own express non-conclusions, which are the negated propositions most likely to be flipped."
     },
@@ -73,20 +186,56 @@
       "category": "disputes",
       "question": "What does Dale Henriksen dispute about the plaintiffs' account of the November 3, 2025 meeting, and what does he concede?",
       "gold_facts": [
-        {"fact": "Henriksen testified that Sandra handled the mailing logistics at his direction and that he did not specify the addresses.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-17"},
-        {"fact": "Henriksen testified that he cannot explain how the notice went to Patel's old address and that if it went to an old address, it was an administrative error and not intentional.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-19"},
-        {"fact": "Henriksen conceded that his November 5 email's 82% figure referred to himself and Sandra only, and that adding Smith's 4% brings the total to 86%.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-18"},
-        {"fact": "Asked whether Smith was lying about the phrase 'routine housekeeping', Henriksen testified he is not saying Smith is lying, does not recall his exact words, and did not intend to mislead.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-21"},
-        {"fact": "Henriksen testified the meeting lasted maybe thirty to forty-five minutes, while Smith testified it took about ten minutes, maybe fifteen.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-21; deposition-smith-david-2026-07-22.pdf — EP-7"},
-        {"fact": "Henriksen agreed the dates were approximately correct but disputed the characterization, testifying 'This wasn't a scheme. It was legitimate corporate governance.'", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-22"},
-        {"fact": "Henriksen testified he believed the amendment was properly adopted and declined to offer a legal opinion on what would follow if it were invalid.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-25"},
-        {"fact": "Henriksen agreed that without the two discounts the stated price would be higher, testifying 'Mathematically, yes.'", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-26"}
+        {
+          "fact": "Henriksen testified that Sandra handled the mailing logistics at his direction and that he did not specify the addresses.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-17"
+        },
+        {
+          "fact": "Henriksen testified that he cannot explain how the notice went to Patel's old address and that if it went to an old address, it was an administrative error and not intentional.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-19"
+        },
+        {
+          "fact": "Henriksen conceded that his November 5 email's 82% figure referred to himself and Sandra only, and that adding Smith's 4% brings the total to 86%.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-18"
+        },
+        {
+          "fact": "Asked whether Smith was lying about the phrase 'routine housekeeping', Henriksen testified he is not saying Smith is lying, does not recall his exact words, and did not intend to mislead.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-21"
+        },
+        {
+          "fact": "Henriksen testified the meeting lasted maybe thirty to forty-five minutes, while Smith testified it took about ten minutes, maybe fifteen.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-21; deposition-smith-david-2026-07-22.pdf — EP-7"
+        },
+        {
+          "fact": "Henriksen agreed the dates were approximately correct but disputed the characterization, testifying 'This wasn't a scheme. It was legitimate corporate governance.'",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-22"
+        },
+        {
+          "fact": "Henriksen testified he believed the amendment was properly adopted and declined to offer a legal opinion on what would follow if it were invalid.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-25"
+        },
+        {
+          "fact": "Henriksen agreed that without the two discounts the stated price would be higher, testifying 'Mathematically, yes.'",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-26"
+        }
       ],
       "must_not_claim": [
-        "Henriksen testified that Smith was lying about the 'routine housekeeping' characterization.",
-        "Henriksen testified that he personally addressed and mailed the meeting notices.",
-        "Henriksen denied that the amendment signature page shows 86%.",
-        "Henriksen testified that the discounts made no difference to the per-share price."
+        {
+          "claim": "Henriksen testified that Smith was lying about the 'routine housekeeping' characterization.",
+          "match": []
+        },
+        {
+          "claim": "Henriksen testified that he personally addressed and mailed the meeting notices.",
+          "match": []
+        },
+        {
+          "claim": "Henriksen denied that the amendment signature page shows 86%.",
+          "match": []
+        },
+        {
+          "claim": "Henriksen testified that the discounts made no difference to the per-share price.",
+          "match": []
+        }
       ],
       "notes": "Who-denies-what question. Henriksen's answers mix concessions ('Mathematically, yes', 'I cannot explain it') with denials of characterization; a wrong answer collapses one into the other."
     },
@@ -95,20 +244,56 @@
       "category": "disputes",
       "question": "What approvals did the related-party transactions with Henriksen Transport Services and Northland receive, and what does the shareholder agreement require?",
       "gold_facts": [
-        {"fact": "Section 6.4(g) of the 2012 agreement requires the prior written consent or affirmative vote of holders of not less than 75% of outstanding shares for any related party transaction having a value in excess of $50,000.", "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 6.4(g)"},
-        {"fact": "Henriksen testified that HTS invoices were approved in the ordinary course of business and that he approved them himself as CEO.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-8"},
-        {"fact": "Henriksen testified he does not recall a specific board resolution or a formal vote on the HTS transactions and could not point to one.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-9"},
-        {"fact": "The only board-minutes reference located is one sentence in the March 22, 2024 minutes stating the Company has been utilizing Henriksen Transport Services for supplemental capacity during peak periods, followed by 'No action required.'", "source": "board-minutes-2024-03-22.pdf — section 5.3, Overflow Route Capacity"},
-        {"fact": "Henriksen testified he does not recall written competitive bids before using HTS and that the market was evaluated informally.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-11"},
-        {"fact": "The Northland lease dated July 1, 2023 is signed by Dale R. Henriksen for Northland as landlord and by Dale R. Henriksen for Great Plains as tenant.", "source": "northland-gp-warehouse-lease-2023-07.pdf — signature blocks"},
-        {"fact": "Henriksen testified he does not recall a separate written appraisal or market analysis before setting the initial Northland rent, and could not identify a writing disclosing Northland's ownership to the minority shareholders.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-12"},
-        {"fact": "Henriksen testified he received approximately $150,000 to $180,000 in management fees in 2024 beyond his CEO salary and does not recall a separate written resolution by disinterested directors approving them.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-13"}
+        {
+          "fact": "Section 6.4(g) of the 2012 agreement requires the prior written consent or affirmative vote of holders of not less than 75% of outstanding shares for any related party transaction having a value in excess of $50,000.",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 6.4(g)"
+        },
+        {
+          "fact": "Henriksen testified that HTS invoices were approved in the ordinary course of business and that he approved them himself as CEO.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-8"
+        },
+        {
+          "fact": "Henriksen testified he does not recall a specific board resolution or a formal vote on the HTS transactions and could not point to one.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-9"
+        },
+        {
+          "fact": "The only board-minutes reference located is one sentence in the March 22, 2024 minutes stating the Company has been utilizing Henriksen Transport Services for supplemental capacity during peak periods, followed by 'No action required.'",
+          "source": "board-minutes-2024-03-22.pdf — section 5.3, Overflow Route Capacity"
+        },
+        {
+          "fact": "Henriksen testified he does not recall written competitive bids before using HTS and that the market was evaluated informally.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-11"
+        },
+        {
+          "fact": "The Northland lease dated July 1, 2023 is signed by Dale R. Henriksen for Northland as landlord and by Dale R. Henriksen for Great Plains as tenant.",
+          "source": "northland-gp-warehouse-lease-2023-07.pdf — signature blocks"
+        },
+        {
+          "fact": "Henriksen testified he does not recall a separate written appraisal or market analysis before setting the initial Northland rent, and could not identify a writing disclosing Northland's ownership to the minority shareholders.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-12"
+        },
+        {
+          "fact": "Henriksen testified he received approximately $150,000 to $180,000 in management fees in 2024 beyond his CEO salary and does not recall a separate written resolution by disinterested directors approving them.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-13"
+        }
       ],
       "must_not_claim": [
-        "The board formally approved the Henriksen Transport Services transactions by resolution.",
-        "The March 22, 2024 minutes disclose the dollar amounts billed by Henriksen Transport Services.",
-        "The Northland lease was approved by a 75% shareholder vote after disclosure of Dale and Sandra's ownership.",
-        "Competitive written bids were obtained before Great Plains began using Henriksen Transport Services."
+        {
+          "claim": "The board formally approved the Henriksen Transport Services transactions by resolution.",
+          "match": []
+        },
+        {
+          "claim": "The March 22, 2024 minutes disclose the dollar amounts billed by Henriksen Transport Services.",
+          "match": []
+        },
+        {
+          "claim": "The Northland lease was approved by a 75% shareholder vote after disclosure of Dale and Sandra's ownership.",
+          "match": []
+        },
+        {
+          "claim": "Competitive written bids were obtained before Great Plains began using Henriksen Transport Services.",
+          "match": []
+        }
       ],
       "notes": "Negation-heavy: the substance is a series of things that do not exist in the record (no resolution, no vote, no bids, no appraisal, no disclosure writing)."
     },
@@ -117,20 +302,56 @@
       "category": "who_said_what",
       "question": "What did Jeff Park testify that he did not do, did not check, and did not disclose?",
       "gold_facts": [
-        {"fact": "Park testified he did not find a specific document showing that the dual Great Plains / HTS engagement was disclosed to the full board.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-7"},
-        {"fact": "Park testified 'No' when asked whether he told Patel, Osei or Smith that he was discussing buyback scenarios with Henriksen.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-10"},
-        {"fact": "Park testified he did not investigate whether an accelerated write-down would be supportable before offering to model it.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-9"},
-        {"fact": "Park testified he did not assess compliance with the 40% distribution provision because contract interpretation is legal work.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-10"},
-        {"fact": "Park testified he did not test whether the HTS rates were at market as a valuation engagement, only considering the accounting and disclosure of the transactions.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-11"},
-        {"fact": "Park testified he did not consider whether the amendment was validly adopted because that is a legal question, and that he did not ask counsel whether the amendment authorized shareholder-level discounts.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-12 and EP-13"},
-        {"fact": "Park testified the January calculation was a limited book-value calculation, not a full going-concern valuation, and did not independently value goodwill, customer relationships or future cash flows.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-14"},
-        {"fact": "Park testified he believes Greystone maintained independence with respect to the Great Plains audit while simultaneously serving HTS.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-16"}
+        {
+          "fact": "Park testified he did not find a specific document showing that the dual Great Plains / HTS engagement was disclosed to the full board.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-7"
+        },
+        {
+          "fact": "Park testified 'No' when asked whether he told Patel, Osei or Smith that he was discussing buyback scenarios with Henriksen.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-10"
+        },
+        {
+          "fact": "Park testified he did not investigate whether an accelerated write-down would be supportable before offering to model it.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-9"
+        },
+        {
+          "fact": "Park testified he did not assess compliance with the 40% distribution provision because contract interpretation is legal work.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-10"
+        },
+        {
+          "fact": "Park testified he did not test whether the HTS rates were at market as a valuation engagement, only considering the accounting and disclosure of the transactions.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-11"
+        },
+        {
+          "fact": "Park testified he did not consider whether the amendment was validly adopted because that is a legal question, and that he did not ask counsel whether the amendment authorized shareholder-level discounts.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-12 and EP-13"
+        },
+        {
+          "fact": "Park testified the January calculation was a limited book-value calculation, not a full going-concern valuation, and did not independently value goodwill, customer relationships or future cash flows.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-14"
+        },
+        {
+          "fact": "Park testified he believes Greystone maintained independence with respect to the Great Plains audit while simultaneously serving HTS.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-16"
+        }
       ],
       "must_not_claim": [
-        "Park testified that he did disclose the dual engagement to Patel, Osei and Smith.",
-        "Park testified that he tested whether the HTS rates were at market.",
-        "Park testified that Greystone's independence was impaired.",
-        "Park testified that his January calculation was a full going-concern valuation of Great Plains."
+        {
+          "claim": "Park testified that he did disclose the dual engagement to Patel, Osei and Smith.",
+          "match": []
+        },
+        {
+          "claim": "Park testified that he tested whether the HTS rates were at market.",
+          "match": []
+        },
+        {
+          "claim": "Park testified that Greystone's independence was impaired.",
+          "match": []
+        },
+        {
+          "claim": "Park testified that his January calculation was a full going-concern valuation of Great Plains.",
+          "match": []
+        }
       ],
       "notes": "Negation-sensitive. Nearly every answer is a denial of an action; the final fact is the one affirmative claim and must not be flipped either."
     },
@@ -139,20 +360,56 @@
       "category": "who_said_what",
       "question": "What did David Smith testify about how he came to sign the November 3, 2025 amendment?",
       "gold_facts": [
-        {"fact": "Smith testified he is a retired high school principal with no financial or business education, and that his degrees are in education.", "source": "deposition-smith-david-2026-07-22.pdf — EP-3 and EP-4"},
-        {"fact": "Smith testified he invested $40,000 in 2012 for 400 shares, or four percent.", "source": "deposition-smith-david-2026-07-22.pdf — EP-4"},
-        {"fact": "Smith testified Dale called him the day before, November 2, and said it was a quick meeting for paperwork, 'routine housekeeping' and 'administrative changes' that would take fifteen minutes.", "source": "deposition-smith-david-2026-07-22.pdf — EP-6"},
-        {"fact": "Smith testified he received no written notice of the meeting, no letter and no email, only the phone call from Dale.", "source": "deposition-smith-david-2026-07-22.pdf — EP-6"},
-        {"fact": "Smith testified Sandra texted him on October 29 asking if he could swing by Monday afternoon to sign some papers.", "source": "deposition-smith-david-2026-07-22.pdf — EP-7"},
-        {"fact": "Smith testified he did not read the amendment before signing, that Sandra showed him where to sign, that he was at the office about ten minutes, and that he did not take a copy with him.", "source": "deposition-smith-david-2026-07-22.pdf — EP-7 and EP-8"},
-        {"fact": "Smith testified that Dale said nothing about valuations, buybacks or non-competes at the meeting, and that Patel's and Osei's absence was not discussed.", "source": "deposition-smith-david-2026-07-22.pdf — EP-8"},
-        {"fact": "Smith testified that he received the buyback notice around January 20, 2026 stating the Company was buying his shares for about $115,000.", "source": "deposition-smith-david-2026-07-22.pdf — EP-10"}
+        {
+          "fact": "Smith testified he is a retired high school principal with no financial or business education, and that his degrees are in education.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-3 and EP-4"
+        },
+        {
+          "fact": "Smith testified he invested $40,000 in 2012 for 400 shares, or four percent.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-4"
+        },
+        {
+          "fact": "Smith testified Dale called him the day before, November 2, and said it was a quick meeting for paperwork, 'routine housekeeping' and 'administrative changes' that would take fifteen minutes.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-6"
+        },
+        {
+          "fact": "Smith testified he received no written notice of the meeting, no letter and no email, only the phone call from Dale.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-6"
+        },
+        {
+          "fact": "Smith testified Sandra texted him on October 29 asking if he could swing by Monday afternoon to sign some papers.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-7"
+        },
+        {
+          "fact": "Smith testified he did not read the amendment before signing, that Sandra showed him where to sign, that he was at the office about ten minutes, and that he did not take a copy with him.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-7 and EP-8"
+        },
+        {
+          "fact": "Smith testified that Dale said nothing about valuations, buybacks or non-competes at the meeting, and that Patel's and Osei's absence was not discussed.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-8"
+        },
+        {
+          "fact": "Smith testified that he received the buyback notice around January 20, 2026 stating the Company was buying his shares for about $115,000.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-10"
+        }
       ],
       "must_not_claim": [
-        "Smith read the amendment before signing it.",
-        "Smith received written notice of the November 3, 2025 meeting.",
-        "Smith is a signatory to the amendment on the plaintiffs' side and therefore supports the forced buyback.",
-        "Smith testified that Dale explained the forced buyback and book-value valuation before he signed."
+        {
+          "claim": "Smith read the amendment before signing it.",
+          "match": []
+        },
+        {
+          "claim": "Smith received written notice of the November 3, 2025 meeting.",
+          "match": []
+        },
+        {
+          "claim": "Smith is a signatory to the amendment on the plaintiffs' side and therefore supports the forced buyback.",
+          "match": []
+        },
+        {
+          "claim": "Smith testified that Dale explained the forced buyback and book-value valuation before he signed.",
+          "match": []
+        }
       ],
       "notes": "Smith is the structurally confusing witness: he signed the amendment and is also a plaintiff. Tests whether a signature is correctly separated from an endorsement."
     },
@@ -161,20 +418,56 @@
       "category": "valuation",
       "question": "What per-share values are in the record for Great Plains Logistics, who produced each, and how was the $288 figure built?",
       "gold_facts": [
-        {"fact": "The 2025 unaudited year-end financials report total equity of $4,800,000 and a book value per share of $480 on 10,000 shares.", "source": "great-plains-unaudited-financials-2025-YE.xlsx — Summary, Key Metrics"},
-        {"fact": "Jeff Park testified that he applied a 25 percent minority discount and a 20 percent marketability discount in the book-value calculation prepared in January 2026.", "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-12"},
-        {"fact": "The Company's stated repurchase calculation was $288 per share, or $518,400 for the combined 1,800-share interest.", "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"},
-        {"fact": "In September 2025 Jeff Park estimated book value per share at approximately $510 to $520 based on the Q2 unaudited numbers.", "source": "email-henriksen-to-greystone-2025-09-12.pdf — Park reply, September 14, 2025"},
-        {"fact": "Kingsley & Associates concluded a reconciled enterprise value of $21,442,824, an indicated equity value of $18,042,824 after deducting $3,400,000 of stated debt, and $1,804.28 per share.", "source": "patel-valuation-report-kingsley-2026-04.pdf — Executive conclusion, page 2"},
-        {"fact": "Kingsley values the 1,800-share interest at $3,247,708 and, adding a separately calculated $115,200 distribution allocation, states a combined economic amount of $3,362,908.", "source": "patel-valuation-report-kingsley-2026-04.pdf — Equity and shareholder interest table"},
-        {"fact": "Kingsley applies a fair-value premise with no minority-interest or marketability discount at the shareholder level, and states that the 25% market-approach adjustment is an enterprise-level size adjustment.", "source": "patel-valuation-report-kingsley-2026-04.pdf — Engagement and standard of value"},
-        {"fact": "Section 4.3 of the 2012 agreement requires the Appraised Value to be determined without any discount for minority interest and without any discount for lack of marketability.", "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 4.3"}
+        {
+          "fact": "The 2025 unaudited year-end financials report total equity of $4,800,000 and a book value per share of $480 on 10,000 shares.",
+          "source": "great-plains-unaudited-financials-2025-YE.xlsx — Summary, Key Metrics"
+        },
+        {
+          "fact": "Jeff Park testified that he applied a 25 percent minority discount and a 20 percent marketability discount in the book-value calculation prepared in January 2026.",
+          "source": "deposition-greystone-jeff-park-2026-08-01.pdf — EP-12"
+        },
+        {
+          "fact": "The Company's stated repurchase calculation was $288 per share, or $518,400 for the combined 1,800-share interest.",
+          "source": "order-granting-TRO-2026-03-25.pdf — Findings and Conclusions, paragraph 2"
+        },
+        {
+          "fact": "In September 2025 Jeff Park estimated book value per share at approximately $510 to $520 based on the Q2 unaudited numbers.",
+          "source": "email-henriksen-to-greystone-2025-09-12.pdf — Park reply, September 14, 2025"
+        },
+        {
+          "fact": "Kingsley & Associates concluded a reconciled enterprise value of $21,442,824, an indicated equity value of $18,042,824 after deducting $3,400,000 of stated debt, and $1,804.28 per share.",
+          "source": "patel-valuation-report-kingsley-2026-04.pdf — Executive conclusion, page 2"
+        },
+        {
+          "fact": "Kingsley values the 1,800-share interest at $3,247,708 and, adding a separately calculated $115,200 distribution allocation, states a combined economic amount of $3,362,908.",
+          "source": "patel-valuation-report-kingsley-2026-04.pdf — Equity and shareholder interest table"
+        },
+        {
+          "fact": "Kingsley applies a fair-value premise with no minority-interest or marketability discount at the shareholder level, and states that the 25% market-approach adjustment is an enterprise-level size adjustment.",
+          "source": "patel-valuation-report-kingsley-2026-04.pdf — Engagement and standard of value"
+        },
+        {
+          "fact": "Section 4.3 of the 2012 agreement requires the Appraised Value to be determined without any discount for minority interest and without any discount for lack of marketability.",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 4.3"
+        }
       ],
       "must_not_claim": [
-        "Kingsley applied a minority or marketability discount at the shareholder level.",
-        "The $288 per-share figure is an independent appraisal or a court-determined fair value.",
-        "The amended Section 4.1 expressly directs the use of minority and marketability discounts.",
-        "The 2025 financial statements supporting the book-value figure were audited."
+        {
+          "claim": "Kingsley applied a minority or marketability discount at the shareholder level.",
+          "match": []
+        },
+        {
+          "claim": "The $288 per-share figure is an independent appraisal or a court-determined fair value.",
+          "match": []
+        },
+        {
+          "claim": "The amended Section 4.1 expressly directs the use of minority and marketability discounts.",
+          "match": []
+        },
+        {
+          "claim": "The 2025 financial statements supporting the book-value figure were audited.",
+          "match": []
+        }
       ],
       "notes": "Four different per-share numbers ($288, $480, $510-520, $1,804.28) with different premises and dates. The trap is treating any one of them as 'the' value, or attaching the enterprise-level size adjustment to the shareholder-level discount prohibition."
     },
@@ -183,20 +476,56 @@
       "category": "valuation",
       "question": "What does the distribution record show for 2021 through 2025, and how is the claimed shortfall calculated?",
       "gold_facts": [
-        {"fact": "Section 5.1 of the 2012 agreement requires the Company to distribute not less than forty percent of Net Income for each Fiscal Year and states the requirement is not subject to the discretion of the Board.", "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 5.1"},
-        {"fact": "Annual distributions were $1,240,000 in 2021, $1,280,000 in 2022, $1,240,000 in 2023, $780,000 in 2024 and $380,000 in 2025, with no distribution in Q4 2025.", "source": "distribution-ledger-2021-2025.xlsx — Distribution Ledger, Annual Total rows"},
-        {"fact": "The shortfall workpaper applies a $2,600,000 net-income input for 2024 against a $1,040,000 forty-percent benchmark and $780,000 of recorded distributions, producing a $260,000 shortfall.", "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, 2024 row"},
-        {"fact": "For 2025 it applies $1,900,000 of net income against a $760,000 benchmark and $380,000 of distributions, producing a $380,000 shortfall.", "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, 2025 row"},
-        {"fact": "The aggregate shortfall is $640,000 and the three minority holders' 18% allocation is $115,200.", "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, aggregate rows"},
-        {"fact": "The workpaper discloses that the 2024 $2,600,000 net-income input is reported in case materials but the underlying 2024 financial statement was not supplied, and that the 2025 input is copied from the supplied unaudited year-end workbook.", "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, source-status column and limitation note"},
-        {"fact": "Henriksen testified that for 2023 the register states $3.1 million of net income and $1.24 million of distributions, which equals forty percent, and agreed the register does not show a 2023 shortfall.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-28"},
-        {"fact": "Patel testified that the register shows $70,200 allocated to his nine percent interest from the $780,000 distributed in 2024, against $93,600 at the forty-percent benchmark, a $23,400 difference.", "source": "deposition-patel-kiran-2026-07-08.pdf — EP-16"}
+        {
+          "fact": "Section 5.1 of the 2012 agreement requires the Company to distribute not less than forty percent of Net Income for each Fiscal Year and states the requirement is not subject to the discretion of the Board.",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Section 5.1"
+        },
+        {
+          "fact": "Annual distributions were $1,240,000 in 2021, $1,280,000 in 2022, $1,240,000 in 2023, $780,000 in 2024 and $380,000 in 2025, with no distribution in Q4 2025.",
+          "source": "distribution-ledger-2021-2025.xlsx — Distribution Ledger, Annual Total rows"
+        },
+        {
+          "fact": "The shortfall workpaper applies a $2,600,000 net-income input for 2024 against a $1,040,000 forty-percent benchmark and $780,000 of recorded distributions, producing a $260,000 shortfall.",
+          "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, 2024 row"
+        },
+        {
+          "fact": "For 2025 it applies $1,900,000 of net income against a $760,000 benchmark and $380,000 of distributions, producing a $380,000 shortfall.",
+          "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, 2025 row"
+        },
+        {
+          "fact": "The aggregate shortfall is $640,000 and the three minority holders' 18% allocation is $115,200.",
+          "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, aggregate rows"
+        },
+        {
+          "fact": "The workpaper discloses that the 2024 $2,600,000 net-income input is reported in case materials but the underlying 2024 financial statement was not supplied, and that the 2025 input is copied from the supplied unaudited year-end workbook.",
+          "source": "distribution-ledger-2021-2025.xlsx — Shortfall Workpaper, source-status column and limitation note"
+        },
+        {
+          "fact": "Henriksen testified that for 2023 the register states $3.1 million of net income and $1.24 million of distributions, which equals forty percent, and agreed the register does not show a 2023 shortfall.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-28"
+        },
+        {
+          "fact": "Patel testified that the register shows $70,200 allocated to his nine percent interest from the $780,000 distributed in 2024, against $93,600 at the forty-percent benchmark, a $23,400 difference.",
+          "source": "deposition-patel-kiran-2026-07-08.pdf — EP-16"
+        }
       ],
       "must_not_claim": [
-        "The 2023 distributions fell short of the forty percent minimum.",
-        "The 2024 net-income figure of $2.6 million is supported by an underlying audited financial statement in the package.",
-        "The $640,000 aggregate shortfall has been established as a legal entitlement or awarded.",
-        "The distribution ledger is a bank statement or an audited financial record."
+        {
+          "claim": "The 2023 distributions fell short of the forty percent minimum.",
+          "match": []
+        },
+        {
+          "claim": "The 2024 net-income figure of $2.6 million is supported by an underlying audited financial statement in the package.",
+          "match": []
+        },
+        {
+          "claim": "The $640,000 aggregate shortfall has been established as a legal entitlement or awarded.",
+          "match": []
+        },
+        {
+          "claim": "The distribution ledger is a bank statement or an audited financial record.",
+          "match": []
+        }
       ],
       "notes": "Arithmetic plus source-limitation question. The 2023 year is the control: it complies, so an answer that sweeps it into the shortfall is wrong."
     },
@@ -205,20 +534,56 @@
       "category": "timeline",
       "question": "Lay out the sequence of events from September 2025 through the March 2026 court order, with dates.",
       "gold_facts": [
-        {"fact": "On September 12, 2025 Dale Henriksen emailed Jeff Park asking about consolidating ownership, switching the shareholder-agreement valuation methodology to book value, and what current book value per share would look like on the Q2 numbers.", "source": "email-henriksen-to-greystone-2025-09-12.pdf — Henriksen email, September 12, 2025, 3:47 PM"},
-        {"fact": "Park replied on September 14, 2025 estimating book value at approximately $510 to $520 per share and offering to model accelerated depreciation or more conservative receivable reserves if Henriksen wanted to minimize the per-share number.", "source": "email-henriksen-to-greystone-2025-09-12.pdf — Park reply, September 14, 2025, 10:22 AM"},
-        {"fact": "Sandra Henriksen texted David Smith on October 29, 2025 asking him to swing by Monday afternoon to sign some papers, and notice was mailed October 30 for a November 3 meeting.", "source": "deposition-smith-david-2026-07-22.pdf — EP-7; deposition-henriksen-dale-2026-07-15.pdf — EP-19"},
-        {"fact": "The First Amendment to Shareholder Agreement is dated November 3, 2025 and is signed by Dale Henriksen, Sandra Henriksen and David Smith.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — signature page"},
-        {"fact": "Patel learned of the meeting on November 4, 2025 when Amara Osei texted him, and emailed Dale Henriksen on November 5, 2025.", "source": "deposition-patel-kiran-2026-07-08.pdf — EP-12"},
-        {"fact": "Dale and Sandra Henriksen signed a written consent on January 15, 2026 exercising the mandatory repurchase right under amended Section 3.9.", "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-24"},
-        {"fact": "Patel and Smith each received the buyback notice around January 20, 2026, and Patel retained counsel in January 2026 with a formal demand sent January 28.", "source": "deposition-patel-kiran-2026-07-08.pdf — EP-17 and EP-13; deposition-smith-david-2026-07-22.pdf — EP-10"},
-        {"fact": "The court entered the temporary restraining order on March 25, 2026 and set the preliminary injunction hearing for April 15, 2026 at 9:00 a.m.", "source": "order-granting-TRO-2026-03-25.pdf — Order paragraph 5 and filing stamp"}
+        {
+          "fact": "On September 12, 2025 Dale Henriksen emailed Jeff Park asking about consolidating ownership, switching the shareholder-agreement valuation methodology to book value, and what current book value per share would look like on the Q2 numbers.",
+          "source": "email-henriksen-to-greystone-2025-09-12.pdf — Henriksen email, September 12, 2025, 3:47 PM"
+        },
+        {
+          "fact": "Park replied on September 14, 2025 estimating book value at approximately $510 to $520 per share and offering to model accelerated depreciation or more conservative receivable reserves if Henriksen wanted to minimize the per-share number.",
+          "source": "email-henriksen-to-greystone-2025-09-12.pdf — Park reply, September 14, 2025, 10:22 AM"
+        },
+        {
+          "fact": "Sandra Henriksen texted David Smith on October 29, 2025 asking him to swing by Monday afternoon to sign some papers, and notice was mailed October 30 for a November 3 meeting.",
+          "source": "deposition-smith-david-2026-07-22.pdf — EP-7; deposition-henriksen-dale-2026-07-15.pdf — EP-19"
+        },
+        {
+          "fact": "The First Amendment to Shareholder Agreement is dated November 3, 2025 and is signed by Dale Henriksen, Sandra Henriksen and David Smith.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — signature page"
+        },
+        {
+          "fact": "Patel learned of the meeting on November 4, 2025 when Amara Osei texted him, and emailed Dale Henriksen on November 5, 2025.",
+          "source": "deposition-patel-kiran-2026-07-08.pdf — EP-12"
+        },
+        {
+          "fact": "Dale and Sandra Henriksen signed a written consent on January 15, 2026 exercising the mandatory repurchase right under amended Section 3.9.",
+          "source": "deposition-henriksen-dale-2026-07-15.pdf — EP-24"
+        },
+        {
+          "fact": "Patel and Smith each received the buyback notice around January 20, 2026, and Patel retained counsel in January 2026 with a formal demand sent January 28.",
+          "source": "deposition-patel-kiran-2026-07-08.pdf — EP-17 and EP-13; deposition-smith-david-2026-07-22.pdf — EP-10"
+        },
+        {
+          "fact": "The court entered the temporary restraining order on March 25, 2026 and set the preliminary injunction hearing for April 15, 2026 at 9:00 a.m.",
+          "source": "order-granting-TRO-2026-03-25.pdf — Order paragraph 5 and filing stamp"
+        }
       ],
       "must_not_claim": [
-        "The buyback notice preceded the November 3, 2025 amendment.",
-        "Patel received written notice of the November 3, 2025 meeting at his current address.",
-        "Notice of the November 3 meeting was mailed ten or more days in advance.",
-        "The preliminary injunction was decided on March 25, 2026."
+        {
+          "claim": "The buyback notice preceded the November 3, 2025 amendment.",
+          "match": []
+        },
+        {
+          "claim": "Patel received written notice of the November 3, 2025 meeting at his current address.",
+          "match": []
+        },
+        {
+          "claim": "Notice of the November 3 meeting was mailed ten or more days in advance.",
+          "match": []
+        },
+        {
+          "claim": "The preliminary injunction was decided on March 25, 2026.",
+          "match": []
+        }
       ],
       "notes": "Date-chaining across emails, depositions, the amendment and the order. The compressed September-to-January sequence is the core of the plaintiffs' theory, so ordering errors change the meaning."
     },
@@ -227,20 +592,56 @@
       "category": "references",
       "question": "Which provisions of the 2012 shareholder agreement does the November 3, 2025 amendment replace, and what does each replacement say?",
       "gold_facts": [
-        {"fact": "Section 1 of the amendment deletes Article 4 (Valuation) in its entirety and replaces it with a book-value methodology determined by the Company's independent CPA, whose determination is final and binding.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 1, new Section 4.1"},
-        {"fact": "New Section 4.2 states that the book value methodology supersedes any prior valuation methodology, including any requirement for an independent appraisal or any prohibition on the application of discounts.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 1, new Section 4.2"},
-        {"fact": "Section 2 adds new Section 3.9, a Forced Buyback allowing holders of a majority of outstanding shares to require any Subject Shareholder to sell all of that shareholder's shares within thirty days of receipt of notice.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 2, new Section 3.9"},
-        {"fact": "Section 3 deletes Article 5 (Distributions) and replaces it with sole Board discretion over whether, when and in what amounts distributions are made, subject only to Minn. Stat. section 302A.551.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 3, new Section 5.1"},
-        {"fact": "Section 4 deletes Article 7 and replaces it with a three-year, two-hundred-mile post-departure non-competition covenant plus non-solicitation and liquidated damages equal to the Purchase Price received.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 4, new Sections 7.1 through 7.3"},
-        {"fact": "The 2012 Article 7 by contrast applied only during the period of share ownership, within a one-hundred-mile radius, and expressly ceased to apply upon disposition of all of a Shareholder's shares.", "source": "shareholder-agreement-executed-2012-06-15.pdf — Sections 7.1(a) and 7.2"},
-        {"fact": "Section 5 deletes Article 8 and replaces litigation in Hennepin County District Court with mandatory confidential AAA arbitration in Minneapolis before a single arbitrator, each party bearing its own costs.", "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 5, new Sections 8.1 through 8.4"},
-        {"fact": "Article 9 of the 2012 agreement permits amendment by holders of seventy-five percent of the outstanding shares and requires written notice to all Shareholders at least twenty days before the proposed effective date.", "source": "shareholder-agreement-executed-2012-06-15.pdf — Sections 9.1 and 9.2"}
+        {
+          "fact": "Section 1 of the amendment deletes Article 4 (Valuation) in its entirety and replaces it with a book-value methodology determined by the Company's independent CPA, whose determination is final and binding.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 1, new Section 4.1"
+        },
+        {
+          "fact": "New Section 4.2 states that the book value methodology supersedes any prior valuation methodology, including any requirement for an independent appraisal or any prohibition on the application of discounts.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 1, new Section 4.2"
+        },
+        {
+          "fact": "Section 2 adds new Section 3.9, a Forced Buyback allowing holders of a majority of outstanding shares to require any Subject Shareholder to sell all of that shareholder's shares within thirty days of receipt of notice.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 2, new Section 3.9"
+        },
+        {
+          "fact": "Section 3 deletes Article 5 (Distributions) and replaces it with sole Board discretion over whether, when and in what amounts distributions are made, subject only to Minn. Stat. section 302A.551.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 3, new Section 5.1"
+        },
+        {
+          "fact": "Section 4 deletes Article 7 and replaces it with a three-year, two-hundred-mile post-departure non-competition covenant plus non-solicitation and liquidated damages equal to the Purchase Price received.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 4, new Sections 7.1 through 7.3"
+        },
+        {
+          "fact": "The 2012 Article 7 by contrast applied only during the period of share ownership, within a one-hundred-mile radius, and expressly ceased to apply upon disposition of all of a Shareholder's shares.",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Sections 7.1(a) and 7.2"
+        },
+        {
+          "fact": "Section 5 deletes Article 8 and replaces litigation in Hennepin County District Court with mandatory confidential AAA arbitration in Minneapolis before a single arbitrator, each party bearing its own costs.",
+          "source": "shareholder-agreement-amendment-2025-11-03.pdf — Section 5, new Sections 8.1 through 8.4"
+        },
+        {
+          "fact": "Article 9 of the 2012 agreement permits amendment by holders of seventy-five percent of the outstanding shares and requires written notice to all Shareholders at least twenty days before the proposed effective date.",
+          "source": "shareholder-agreement-executed-2012-06-15.pdf — Sections 9.1 and 9.2"
+        }
       ],
       "must_not_claim": [
-        "The amendment left the minimum distribution obligation in place.",
-        "The amendment retained the requirement for an independent appraisal.",
-        "The 2012 non-compete applied for three years after a shareholder sold all of his or her shares.",
-        "The 2012 agreement required arbitration of disputes."
+        {
+          "claim": "The amendment left the minimum distribution obligation in place.",
+          "match": []
+        },
+        {
+          "claim": "The amendment retained the requirement for an independent appraisal.",
+          "match": []
+        },
+        {
+          "claim": "The 2012 non-compete applied for three years after a shareholder sold all of his or her shares.",
+          "match": []
+        },
+        {
+          "claim": "The 2012 agreement required arbitration of disputes.",
+          "match": []
+        }
       ],
       "notes": "Reference resolution between an amending instrument and the instrument it amends, where both documents use the same article and section numbers for different text. This is the single highest-value reference test in the held-out set."
     },
@@ -249,20 +650,56 @@
       "category": "references",
       "question": "Which operative records are missing from the matter file, and what secondary source does the file rely on for each?",
       "gold_facts": [
-        {"fact": "The operative Articles of Incorporation, Bylaws and amendments are not in the package; the only secondary references are sections 6.1 and 6.3 of the 2012 agreement and the November 5, 2025 email's citation to Bylaws Article III sections 3.04-3.05.", "source": "matter-file-index.docx — section 6, Missing-source register"},
-        {"fact": "The January 15, 2026 written consent is not supplied, and the March 25, 2026 TRO is the sole supplied secondary attribution for it.", "source": "matter-file-index.docx — section 6, Missing-source register"},
-        {"fact": "The Company's repurchase notice and calculation are not supplied; the TRO's statement of $288 per share and $518,400 combined is an attributed company position, not an independently supported valuation.", "source": "matter-file-index.docx — section 6, Missing-source register"},
-        {"fact": "The underlying 2024 financial statement supporting $2.6 million of net income is not supplied, so the 2024 distribution shortfall is arithmetic using a disclosed unsupported input.", "source": "matter-file-index.docx — section 6, Missing-source register"},
-        {"fact": "A complete David Smith signature page for the 2012 agreement is not supplied; the produced page 16 lacks his date and share-count fields, and Schedule A is separate ownership evidence only.", "source": "matter-file-index.docx — section 6, Missing-source register; shareholder-agreement-executed-2012-06-15.pdf — final signature block"},
-        {"fact": "Kingsley's cross-file reconciliation records that the $3.4 million debt input is an engagement assumption while the 2025 financials separately show $0.52m current debt, $0.68m long-term debt and $2.42m lease liabilities, and that no unsupported bridge is inferred.", "source": "patel-valuation-report-kingsley-2026-04.pdf — Appendix A, Cross-file reconciliation exceptions"},
-        {"fact": "Zhou lists five open records needed before supplementation, including native invoices and cancelled checks, the vendor contract and dispatch logs, market-rate source files for all 47 invoices, the general ledger and A/P detail, and lease amendments and the landlord ledger.", "source": "forensic-accounting-preliminary-report-zhou-2026-06.pdf — 'Open records needed before supplementation'"},
-        {"fact": "The matter index directs that deposition excerpts be cited by printed EP page and transcript line because the original source-page mapping was not supplied.", "source": "matter-file-index.docx — section 7, Record-handling conventions"}
+        {
+          "fact": "The operative Articles of Incorporation, Bylaws and amendments are not in the package; the only secondary references are sections 6.1 and 6.3 of the 2012 agreement and the November 5, 2025 email's citation to Bylaws Article III sections 3.04-3.05.",
+          "source": "matter-file-index.docx — section 6, Missing-source register"
+        },
+        {
+          "fact": "The January 15, 2026 written consent is not supplied, and the March 25, 2026 TRO is the sole supplied secondary attribution for it.",
+          "source": "matter-file-index.docx — section 6, Missing-source register"
+        },
+        {
+          "fact": "The Company's repurchase notice and calculation are not supplied; the TRO's statement of $288 per share and $518,400 combined is an attributed company position, not an independently supported valuation.",
+          "source": "matter-file-index.docx — section 6, Missing-source register"
+        },
+        {
+          "fact": "The underlying 2024 financial statement supporting $2.6 million of net income is not supplied, so the 2024 distribution shortfall is arithmetic using a disclosed unsupported input.",
+          "source": "matter-file-index.docx — section 6, Missing-source register"
+        },
+        {
+          "fact": "A complete David Smith signature page for the 2012 agreement is not supplied; the produced page 16 lacks his date and share-count fields, and Schedule A is separate ownership evidence only.",
+          "source": "matter-file-index.docx — section 6, Missing-source register; shareholder-agreement-executed-2012-06-15.pdf — final signature block"
+        },
+        {
+          "fact": "Kingsley's cross-file reconciliation records that the $3.4 million debt input is an engagement assumption while the 2025 financials separately show $0.52m current debt, $0.68m long-term debt and $2.42m lease liabilities, and that no unsupported bridge is inferred.",
+          "source": "patel-valuation-report-kingsley-2026-04.pdf — Appendix A, Cross-file reconciliation exceptions"
+        },
+        {
+          "fact": "Zhou lists five open records needed before supplementation, including native invoices and cancelled checks, the vendor contract and dispatch logs, market-rate source files for all 47 invoices, the general ledger and A/P detail, and lease amendments and the landlord ledger.",
+          "source": "forensic-accounting-preliminary-report-zhou-2026-06.pdf — 'Open records needed before supplementation'"
+        },
+        {
+          "fact": "The matter index directs that deposition excerpts be cited by printed EP page and transcript line because the original source-page mapping was not supplied.",
+          "source": "matter-file-index.docx — section 7, Record-handling conventions"
+        }
       ],
       "must_not_claim": [
-        "The January 15, 2026 written consent is in the matter file and its text can be quoted.",
-        "The Company's repurchase calculation workpaper is in the package.",
-        "The audited 2024 financial statements support the $2.6 million net-income figure.",
-        "David Smith's complete executed 2012 signature page is in the produced agreement."
+        {
+          "claim": "The January 15, 2026 written consent is in the matter file and its text can be quoted.",
+          "match": []
+        },
+        {
+          "claim": "The Company's repurchase calculation workpaper is in the package.",
+          "match": []
+        },
+        {
+          "claim": "The audited 2024 financial statements support the $2.6 million net-income figure.",
+          "match": []
+        },
+        {
+          "claim": "David Smith's complete executed 2012 signature page is in the produced agreement.",
+          "match": []
+        }
       ],
       "notes": "Tests whether an absence is retrieved as an absence. The whole register is a list of things that do not exist in the corpus, each paired with the secondary document that mentions them, which is exactly the shape that produces fabricated citations."
     }

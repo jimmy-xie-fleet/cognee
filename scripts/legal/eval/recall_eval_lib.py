@@ -26,6 +26,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -84,6 +85,30 @@ QUESTION_CATEGORIES = (
 
 ANSWERS_FILENAME = "answers.jsonl"
 VERDICTS_FILENAME = "verdicts.jsonl"
+MANIFEST_FILENAME = "run.json"
+
+#: Written for every cell before the first request, so a run that dies in its
+#: first pass still leaves ``--resume`` a complete matrix to work from - the
+#: journal, not the matrix, decides what is done.
+PENDING_ERROR = "pending: not attempted"
+
+#: Cue words that make a sentence a denial rather than a claim. Deliberately
+#: blunt: the span floor is meant to be conservative, and the LLM judge is the
+#: primary detector for anything subtler than this. Note what is NOT here: the
+#: bare verb "deny". In a legal answer "the defendants deny paragraph 12" is
+#: substantive content, not a denial of the trap, and treating it as a cue would
+#: silence the floor across most of this corpus. "denies"/"denied" are cues
+#: because they read as the answer reporting an absence.
+NEGATION_CUES = (
+    "not",
+    "no",
+    "never",
+    "denies",
+    "denied",
+    "without",
+    "cannot",
+    "unsupported",
+)
 # Crash journals: every row is appended here the moment it exists, so a run that
 # dies (disk full, server down, killed) loses nothing a --resume cannot recover.
 # Folded into the main files and deleted once a run finishes writing them.
@@ -135,29 +160,77 @@ class GoldFact:
 
 
 @dataclass(frozen=True)
+class Trap:
+    """One claim the documents do not support, plus the spans that betray it.
+
+    ``claim`` is the full sentence, which is what the LLM judge reads. ``match``
+    holds the short literals a real answer would actually contain - an amount, a
+    date, a resolution number, a distinctive phrase - because an answer never
+    contains the trap sentence verbatim, so matching on ``claim`` can only ever
+    find nothing. A trap with no spans is judge-only by design.
+    """
+
+    claim: str
+    match: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Question:
     id: str
     category: str
     question: str
     gold_facts: tuple[GoldFact, ...]
-    must_not_claim: tuple[str, ...] = ()
+    must_not_claim: tuple[Trap, ...] = ()
     notes: str = ""
     corpus: str = ""
 
 
-def _string_list(value: Any, label: str, problems: list[str]) -> tuple[str, ...]:
+def _parse_traps(value: Any, label: str, problems: list[str]) -> tuple[Trap, ...]:
+    """Parse ``must_not_claim``: a bare string, or ``{"claim":..., "match":[...]}``.
+
+    The bare string is kept for compatibility with gold files written before
+    spans existed; it parses to a trap the floor will never fire on.
+    """
     if value is None:
         return ()
     if not isinstance(value, list):
-        problems.append(f"{label}: must be a list of strings")
+        problems.append(f"{label}: must_not_claim must be a list")
         return ()
-    items: list[str] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, str):
-            problems.append(f"{label}[{index}]: must be a string")
+
+    traps: list[Trap] = []
+    for index, raw in enumerate(value):
+        where = f"{label}: must_not_claim[{index}]"
+        if isinstance(raw, str):
+            if not raw.strip():
+                problems.append(f"{where}: is an empty string")
+                continue
+            traps.append(Trap(claim=raw.strip()))
             continue
-        items.append(item)
-    return tuple(items)
+        if not isinstance(raw, dict):
+            problems.append(f"{where}: must be a string or an object with 'claim'")
+            continue
+
+        unknown = set(raw) - {"claim", "match"}
+        if unknown:
+            problems.append(f"{where}: unknown key(s): {', '.join(sorted(unknown))}")
+        claim = raw.get("claim")
+        if not isinstance(claim, str) or not claim.strip():
+            problems.append(f"{where}: is missing a non-empty 'claim'")
+            continue
+        spans_value = raw.get("match", [])
+        if spans_value is None:
+            spans_value = []
+        if not isinstance(spans_value, list):
+            problems.append(f"{where}: 'match' must be a list of short literal spans")
+            spans_value = []
+        spans: list[str] = []
+        for span_index, span in enumerate(spans_value):
+            if not isinstance(span, str) or not span.strip():
+                problems.append(f"{where}: match[{span_index}] must be a non-empty string")
+                continue
+            spans.append(span.strip())
+        traps.append(Trap(claim=claim.strip(), match=tuple(spans)))
+    return tuple(traps)
 
 
 def _parse_gold_facts(value: Any, label: str, problems: list[str]) -> tuple[GoldFact, ...]:
@@ -261,9 +334,7 @@ def validate_question_file(path: str | Path) -> list[Question]:
         else:
             gold_facts = _parse_gold_facts(raw["gold_facts"], label, problems)
 
-        must_not_claim = _string_list(
-            raw.get("must_not_claim"), f"{label}: must_not_claim", problems
-        )
+        must_not_claim = _parse_traps(raw.get("must_not_claim"), label, problems)
 
         notes = raw.get("notes", "")
         if notes is None:
@@ -358,7 +429,7 @@ _TRANSIENT_EXCEPTION_NAMES = frozenset(
 
 #: Error classes for the report histogram. Derived from the recorded message so
 #: a run answered by an older version of this harness still classifies.
-ERROR_CLASSES = ("401", "timeout", "5xx", "other")
+ERROR_CLASSES = ("pending", "empty", "401", "timeout", "5xx", "other")
 
 
 def classify_error_message(message: Optional[str]) -> str:
@@ -370,6 +441,10 @@ def classify_error_message(message: Optional[str]) -> str:
     if not message:
         return ""
     lowered = message.lower()
+    if lowered.startswith("pending"):
+        return "pending"
+    if lowered.startswith("answer: empty") or lowered.startswith("context: empty"):
+        return "empty"
     if "401" in lowered or "unauthorized" in lowered:
         return "401"
     if "timeout" in lowered or "timed out" in lowered:
@@ -470,24 +545,39 @@ def auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def cell_session_id(prefix: str, dataset: str, search_type: str, question_id: str) -> str:
+    """The per-cell session name.
+
+    Every cell gets its own session because both endpoints fall back to the
+    caller's *default* session when none is given: without this, question 19's
+    retrieval is shaped by the conversation questions 1-18 left behind, and two
+    runs of the same matrix are not comparable.
+    """
+    return f"{prefix}-{dataset}-{search_type}-{question_id}"
+
+
 def build_search_request(
     question: Question,
     dataset: str,
     search_type: str,
     top_k: int,
     only_context: bool,
+    session_id: Optional[str] = None,
 ) -> tuple[str, dict]:
     """The path and body for one call.
 
     ``AUTO`` goes to ``/recall`` with an explicit null ``search_type``, which is
     how the recall router opts into auto-routing; everything else goes to
-    ``/search`` with the type pinned.
+    ``/search`` with the type pinned. Both DTOs take ``session_id`` as a plain
+    optional string (verified in ``get_search_router.py`` / ``get_recall_router.py``).
     """
     body: dict[str, Any] = {
         "query": question.question,
         "datasets": [dataset],
         "top_k": top_k,
     }
+    if session_id:
+        body["session_id"] = session_id
     if search_type == AUTO_SEARCH_TYPE:
         body["search_type"] = None
         path = RECALL_PATH
@@ -520,6 +610,33 @@ def _collect_text(node: Any, chunks: list[str], depth: int) -> None:
             if key in node:
                 _collect_text(node[key], chunks, depth + 1)
                 return
+
+
+#: Statuses the server uses for a system marker instead of an answer
+#: (``ResponseMarkerEntry`` in ``cognee/modules/recall/types/RecallResponse.py``).
+MARKER_STATUSES = ("memory_warming_up", "build_failed")
+
+
+def detect_marker(payload: Any) -> Optional[str]:
+    """The marker status when the server answered with a marker, else ``None``.
+
+    A warming-up or build-failed marker renders as perfectly good prose, so
+    without this it reaches the judge as an answer that covers no gold facts -
+    a real zero indistinguishable from an empty dataset.
+    """
+    entries = payload if isinstance(payload, list) else [payload]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status")
+        if entry.get("source") == "system" and isinstance(status, str) and status:
+            return status
+        text = entry.get("text")
+        if isinstance(text, str) and text.startswith(
+            ("Memory is still warming up", "Memory build failed")
+        ):
+            return str(status or "memory_warming_up")
+    return None
 
 
 def extract_text(payload: Any) -> str:
@@ -555,6 +672,9 @@ class AnswerRow:
     context: str = ""
     elapsed_seconds: float = 0.0
     top_k: Optional[int] = None
+    # The per-cell session the two calls were made on, recorded so a run can be
+    # audited for cross-question contamination after the fact.
+    session_id: Optional[str] = None
     error: Optional[str] = None
     error_class: Optional[str] = None
 
@@ -659,54 +779,118 @@ class AuthenticatedSession:
                 attempt += 1
 
 
+DEFAULT_SESSION_PREFIX = "eval"
+
+
+def pending_matrix(
+    questions: Sequence[Question],
+    datasets: Sequence[str],
+    search_types: Sequence[str],
+    top_k: int = DEFAULT_TOP_K,
+) -> list[AnswerRow]:
+    """Every cell of the matrix, marked not attempted.
+
+    Written to ``answers.jsonl`` before the first request so a run killed in its
+    first pass is still resumable: the matrix is on disk from the start and the
+    journal is the only thing that says which cells are done.
+    """
+    rows: list[AnswerRow] = []
+    for dataset in datasets:
+        for search_type in search_types:
+            for question in questions:
+                rows.append(
+                    AnswerRow(
+                        dataset=dataset,
+                        search_type=search_type,
+                        question_id=question.id,
+                        category=question.category,
+                        question=question.question,
+                        corpus=question.corpus,
+                        top_k=top_k,
+                        error=PENDING_ERROR,
+                    )
+                )
+    return rows
+
+
+def _answer_one_cell(
+    session: AuthenticatedSession,
+    question: Question,
+    dataset: str,
+    search_type: str,
+    top_k: int,
+    session_prefix: str,
+) -> AnswerRow:
+    """Retrieve the context, then the answer, for one cell.
+
+    **Context first, deliberately.** Both endpoints record a QA turn on the
+    session, so asking for the answer first means the ``only_context`` call that
+    follows retrieves against a session the answer just wrote to - the judge
+    would grade the answer against a context the answer itself shaped. The
+    ordering costs nothing and removes the feedback loop.
+    """
+    row = AnswerRow(
+        dataset=dataset,
+        search_type=search_type,
+        question_id=question.id,
+        category=question.category,
+        question=question.question,
+        corpus=question.corpus,
+        top_k=top_k,
+        session_id=cell_session_id(session_prefix, dataset, search_type, question.id),
+    )
+    started = time.perf_counter()
+    try:
+        context_path, context_body = build_search_request(
+            question, dataset, search_type, top_k, only_context=True, session_id=row.session_id
+        )
+        row.context = extract_text(session.post(context_path, context_body))
+    except Exception as error:  # noqa: BLE001 - recorded, not raised
+        row.error = f"context: {type(error).__name__}: {error}"
+    else:
+        try:
+            answer_path, answer_body = build_search_request(
+                question, dataset, search_type, top_k, only_context=False, session_id=row.session_id
+            )
+            payload = session.post(answer_path, answer_body)
+            marker = detect_marker(payload)
+            row.answer = extract_text(payload)
+            if marker:
+                # Not an answer: the server is telling us it has nothing to
+                # answer from. Grading this as prose would report a real zero.
+                row.error = f"answer: empty (server marker {marker})"
+                row.answer = ""
+            elif not row.answer.strip():
+                row.error = "answer: empty (the server returned no text)"
+        except Exception as error:  # noqa: BLE001 - recorded, not raised
+            row.error = f"answer: {type(error).__name__}: {error}"
+    row.error_class = classify_error_message(row.error)
+    row.elapsed_seconds = round(time.perf_counter() - started, 3)
+    return row
+
+
 def run_answers(
     session: AuthenticatedSession,
     questions: Sequence[Question],
     datasets: Sequence[str],
     search_types: Sequence[str],
     top_k: int = DEFAULT_TOP_K,
+    session_prefix: str = DEFAULT_SESSION_PREFIX,
     on_row: Optional[Callable[[AnswerRow], None]] = None,
 ) -> list[AnswerRow]:
     """Answer every ``dataset x search_type x question`` cell.
 
-    Two calls per cell: the answer, then the same query with ``only_context`` so
-    the judge can tell a fabrication from a faithful reading of bad context. A
-    failure is recorded on the row and the run continues - one dead search type
-    should not cost the whole matrix.
+    Two calls per cell - the retrieval context, then the answer - each on a
+    session of its own. A failure is recorded on the row and the run continues:
+    one dead search type should not cost the whole matrix.
     """
     rows: list[AnswerRow] = []
-
     for dataset in datasets:
         for search_type in search_types:
             for question in questions:
-                row = AnswerRow(
-                    dataset=dataset,
-                    search_type=search_type,
-                    question_id=question.id,
-                    category=question.category,
-                    question=question.question,
-                    corpus=question.corpus,
-                    top_k=top_k,
+                row = _answer_one_cell(
+                    session, question, dataset, search_type, top_k, session_prefix
                 )
-                started = time.perf_counter()
-                try:
-                    answer_path, answer_body = build_search_request(
-                        question, dataset, search_type, top_k, only_context=False
-                    )
-                    row.answer = extract_text(session.post(answer_path, answer_body))
-                except Exception as error:  # noqa: BLE001 - recorded, not raised
-                    row.error = f"answer: {type(error).__name__}: {error}"
-                    row.error_class = classify_error_message(row.error)
-                else:
-                    try:
-                        context_path, context_body = build_search_request(
-                            question, dataset, search_type, top_k, only_context=True
-                        )
-                        row.context = extract_text(session.post(context_path, context_body))
-                    except Exception as error:  # noqa: BLE001 - recorded, not raised
-                        row.error = f"context: {type(error).__name__}: {error}"
-                        row.error_class = classify_error_message(row.error)
-                row.elapsed_seconds = round(time.perf_counter() - started, 3)
                 rows.append(row)
                 if on_row is not None:
                     on_row(row)
@@ -719,14 +903,81 @@ def run_answers(
 
 
 class JudgeVerdict(BaseModel):
-    """One graded answer. Coverage is derived, not asked for, so it cannot drift."""
+    """One graded answer.
 
-    gold_facts_covered: list[str] = Field(default_factory=list)
-    gold_facts_missed: list[str] = Field(default_factory=list)
+    Gold facts come back as **1-based indices** into the question's own list, not
+    as text. Text let the judge set its own denominator: a grader that reported
+    one found fact and silently dropped the other six scored 100%. With indices
+    the denominator is ``len(question.gold_facts)`` and the judge cannot move it -
+    an index it never classified is missed, not absent.
+    """
+
+    gold_facts_covered: list[int] = Field(default_factory=list)
+    gold_facts_missed: list[int] = Field(default_factory=list)
     wrong_claims: list[str] = Field(default_factory=list)
     fabricated_claims: list[str] = Field(default_factory=list)
     stance_errors: list[str] = Field(default_factory=list)
     notes: str = ""
+
+
+@dataclass
+class GoldFactScore:
+    """The scored gold-fact lists for one answer, with the judge's own mistakes."""
+
+    covered: list[int] = field(default_factory=list)
+    missed: list[int] = field(default_factory=list)
+    mismatch: list[str] = field(default_factory=list)
+    coverage: Optional[float] = None
+
+
+def score_gold_facts(verdict: JudgeVerdict, question: Question) -> GoldFactScore:
+    """Score the judge's indices against the question's gold facts.
+
+    Rules, all of them there to stop an optimistic score:
+
+    * the denominator is always ``len(question.gold_facts)``;
+    * an index the judge classified neither way counts as **missed**;
+    * an index outside ``1..n`` is dropped and recorded;
+    * an index on both lists is dropped from covered, counted missed, and
+      recorded - the judge contradicted itself and we do not guess which way.
+    """
+    total = len(question.gold_facts)
+    if total == 0:
+        return GoldFactScore(mismatch=["question has no gold facts"], coverage=None)
+
+    valid = set(range(1, total + 1))
+    mismatch: list[str] = []
+
+    def clean(indices: Sequence[int], which: str) -> list[int]:
+        out: list[int] = []
+        for raw in indices:
+            try:
+                index = int(raw)
+            except (TypeError, ValueError):
+                mismatch.append(f"{which} gold fact {raw!r} is not an index")
+                continue
+            if index not in valid:
+                mismatch.append(f"{which} gold fact index {index} is not in 1..{total}")
+                continue
+            if index not in out:
+                out.append(index)
+        return out
+
+    covered_raw = clean(verdict.gold_facts_covered, "covered")
+    missed_raw = clean(verdict.gold_facts_missed, "missed")
+
+    both = [index for index in covered_raw if index in missed_raw]
+    for index in both:
+        mismatch.append(f"gold fact {index} was listed on both sides and is counted missed")
+
+    covered = sorted(index for index in covered_raw if index not in missed_raw)
+    missed = sorted(valid - set(covered))
+    return GoldFactScore(
+        covered=covered,
+        missed=missed,
+        mismatch=mismatch,
+        coverage=len(covered) / total,
+    )
 
 
 class _LazyLLMGateway:
@@ -772,27 +1023,68 @@ def normalize_claim(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip().lower()
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?;:])\s+|\n+")
+_NEGATION_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(cue) for cue in NEGATION_CUES) + r")\b"
+)
+
+
+def split_sentences(text: str) -> list[str]:
+    """Rough sentence split, good enough to scope a negation cue.
+
+    Deliberately simple: the floor only needs to know whether the clause that
+    carries a span also carries a denial, and being wrong here makes the floor
+    *quieter*, never louder.
+    """
+    return [part.strip() for part in _SENTENCE_SPLIT.split(text or "") if part.strip()]
+
+
+def is_negated(sentence: str) -> bool:
+    """Whether a sentence carries a denial cue anywhere in it."""
+    return bool(_NEGATION_PATTERN.search(normalize_claim(sentence)))
+
+
+def triggered_traps(traps: Sequence[Trap], answer: str) -> list[Trap]:
+    """The traps whose span an answer asserts, ignoring the ones it denies.
+
+    A span fires only inside a sentence with no negation cue, so "the memo does
+    not state that conflicts were identified" is not read as claiming they were.
+    Conservative on purpose: the LLM judge still sees every full trap sentence
+    and remains the primary detector.
+    """
+    sentences = [sentence for sentence in split_sentences(answer) if not is_negated(sentence)]
+    if not sentences:
+        return []
+    normalized = [normalize_claim(sentence) for sentence in sentences]
+    fired: list[Trap] = []
+    for trap in traps:
+        spans = [normalize_claim(span) for span in trap.match]
+        if not any(span and any(span in sentence for sentence in normalized) for span in spans):
+            continue
+        fired.append(trap)
+    return fired
+
+
 def apply_must_not_claim_floor(
     verdict: JudgeVerdict,
-    must_not_claim: Sequence[str],
+    must_not_claim: Sequence[Trap],
     answer: str,
 ) -> JudgeVerdict:
-    """Add any triggered trap to ``fabricated_claims``, judge or no judge.
+    """Add every trap the answer's own words trigger to ``fabricated_claims``.
 
-    The deterministic floor exists because the judge is itself an LLM: a trap the
-    corpus author wrote down by hand is a fact about the corpus, and a run should
-    not be able to pass it by talking the grader round.
+    A conservative span floor, not a second grader: it fires only on a literal
+    the corpus author wrote down, only in a sentence that does not deny it, and
+    only for traps that carry spans. It catches the class of fabrication a judge
+    is most likely to wave through - an invented amount, date or number - and
+    stays silent about everything else.
     """
-    normalized_answer = normalize_claim(answer)
-    if not normalized_answer:
+    if not normalize_claim(answer):
         return verdict
     already = {normalize_claim(claim) for claim in verdict.fabricated_claims}
     additions = [
-        trap
-        for trap in must_not_claim
-        if normalize_claim(trap)
-        and normalize_claim(trap) in normalized_answer
-        and normalize_claim(trap) not in already
+        trap.claim
+        for trap in triggered_traps(must_not_claim, answer)
+        if normalize_claim(trap.claim) not in already
     ]
     if not additions:
         return verdict
@@ -816,10 +1108,13 @@ async def judge_answer(
         JUDGE_USER_PROMPT_FILE,
         {
             "question": question.question,
+            # Numbered so the judge answers with indices and cannot set its own
+            # denominator by returning a shorter list than it was given.
             "gold_facts": [
-                {"fact": gold.fact, "source": gold.source} for gold in question.gold_facts
+                {"index": index, "fact": gold.fact, "source": gold.source}
+                for index, gold in enumerate(question.gold_facts, start=1)
             ],
-            "must_not_claim": list(question.must_not_claim),
+            "must_not_claim": [trap.claim for trap in question.must_not_claim],
             "notes": question.notes,
             "answer": row.answer,
             "context": row.context,
@@ -834,12 +1129,9 @@ async def judge_answer(
     return apply_must_not_claim_floor(verdict, question.must_not_claim, row.answer)
 
 
-def coverage(verdict: JudgeVerdict) -> Optional[float]:
-    """covered / (covered + missed), or ``None`` when the judge listed no gold facts."""
-    total = len(verdict.gold_facts_covered) + len(verdict.gold_facts_missed)
-    if total == 0:
-        return None
-    return len(verdict.gold_facts_covered) / total
+def coverage(verdict: JudgeVerdict, question: Question) -> Optional[float]:
+    """Fraction of the *question's* gold facts the judge marked covered."""
+    return score_gold_facts(verdict, question).coverage
 
 
 @dataclass
@@ -856,6 +1148,9 @@ class VerdictRow:
     wrong_claims: list[str] = field(default_factory=list)
     fabricated_claims: list[str] = field(default_factory=list)
     stance_errors: list[str] = field(default_factory=list)
+    # The judge's own mistakes: an index it invented, or a fact it put on both
+    # lists. Surfaced in the report so a grader quietly going wrong is visible.
+    judge_mismatch: list[str] = field(default_factory=list)
     notes: str = ""
     error: Optional[str] = None
     error_class: Optional[str] = None
@@ -873,7 +1168,25 @@ class VerdictRow:
         return cls(**known)
 
 
-def verdict_row(row: AnswerRow, verdict: JudgeVerdict) -> VerdictRow:
+def verdict_row(
+    row: AnswerRow, verdict: JudgeVerdict, question: Optional[Question] = None
+) -> VerdictRow:
+    """Build the stored row, mapping the judge's indices back to fact texts.
+
+    The wire format is indices, but a report and a spot-check need to read, so
+    the row keeps the texts. ``question`` is optional only for the paths that
+    have no question to score against (an unknown question id).
+    """
+    if question is None:
+        score = GoldFactScore()
+        covered_text: list[str] = []
+        missed_text: list[str] = []
+    else:
+        score = score_gold_facts(verdict, question)
+        facts = question.gold_facts
+        covered_text = [facts[index - 1].fact for index in score.covered]
+        missed_text = [facts[index - 1].fact for index in score.missed]
+
     return VerdictRow(
         dataset=row.dataset,
         search_type=row.search_type,
@@ -881,12 +1194,13 @@ def verdict_row(row: AnswerRow, verdict: JudgeVerdict) -> VerdictRow:
         category=row.category,
         question=row.question,
         answer=row.answer,
-        coverage=coverage(verdict),
-        gold_facts_covered=list(verdict.gold_facts_covered),
-        gold_facts_missed=list(verdict.gold_facts_missed),
+        coverage=score.coverage,
+        gold_facts_covered=covered_text,
+        gold_facts_missed=missed_text,
         wrong_claims=list(verdict.wrong_claims),
         fabricated_claims=list(verdict.fabricated_claims),
         stance_errors=list(verdict.stance_errors),
+        judge_mismatch=list(score.mismatch),
         notes=verdict.notes,
         error=row.error,
         error_class=row.error_class,
@@ -917,8 +1231,12 @@ async def run_judge(
                 row.error or f"no question with id {row.question_id!r} in the question files"
             )
         elif row.error:
+            # Nothing was answered, so nothing is covered - but coverage stays
+            # None rather than 0 so an unanswered cell never drags the mean.
             out = verdict_row(
-                row, JudgeVerdict(gold_facts_missed=[g.fact for g in question.gold_facts])
+                row,
+                JudgeVerdict(gold_facts_missed=list(range(1, len(question.gold_facts) + 1))),
+                question,
             )
             out.coverage = None
         else:
@@ -926,9 +1244,9 @@ async def run_judge(
                 verdict = await judge_answer(
                     row, question, read_prompt=read_prompt, render_prompt=render_prompt
                 )
-                out = verdict_row(row, verdict)
+                out = verdict_row(row, verdict, question)
             except Exception as error:  # noqa: BLE001 - recorded, not raised
-                out = verdict_row(row, JudgeVerdict())
+                out = verdict_row(row, JudgeVerdict(), question)
                 out.coverage = None
                 out.error = f"judge: {type(error).__name__}: {error}"
         verdicts.append(out)
@@ -952,6 +1270,7 @@ class Aggregate:
     wrong_claims: int = 0
     fabricated_claims: int = 0
     stance_errors: int = 0
+    judge_mismatches: int = 0
     errors: int = 0
 
 
@@ -977,6 +1296,7 @@ def aggregate(rows: Iterable[VerdictRow]) -> list[Aggregate]:
         bucket.wrong_claims += len(row.wrong_claims)
         bucket.fabricated_claims += len(row.fabricated_claims)
         bucket.stance_errors += len(row.stance_errors)
+        bucket.judge_mismatches += len(row.judge_mismatch)
 
     for key, bucket in buckets.items():
         values = coverages[key]
@@ -1041,20 +1361,24 @@ def render_report(
 
     header = (
         "| dataset | search type | n | answered | mean coverage | wrong claims | "
-        "fabricated claims | stance errors | errors |"
+        "fabricated claims | stance errors | judge issues | errors |"
     )
     lines.append(header)
-    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for item in aggregates:
         lines.append(
             f"| {item.dataset} | {item.search_type} | {item.n} | {item.answered} | "
             f"{_format_coverage(item.mean_coverage)} | {item.wrong_claims} | "
-            f"{item.fabricated_claims} | {item.stance_errors} | {item.errors} |"
+            f"{item.fabricated_claims} | {item.stance_errors} | "
+            f"{item.judge_mismatches} | {item.errors} |"
         )
     lines.append("")
     lines.append(
-        "Coverage is the mean over graded questions of "
-        "covered / (covered + missed) gold facts. Claim counts are totals, not rates."
+        "Coverage is the mean over graded questions of covered / *all* the question's "
+        "gold facts - the judge answers with indices, so it cannot shrink its own "
+        "denominator, and a fact it never classified counts as missed. Claim counts "
+        "are totals, not rates. `judge issues` counts indices the judge invented or "
+        "put on both lists; anything above zero means read those rows by hand."
     )
     if error_histogram:
         lines.append("")
@@ -1120,6 +1444,7 @@ def format_spot_check(rows: Sequence[VerdictRow], questions: Sequence[Question])
                     f"  Wrong claims: {row.wrong_claims or '-'}",
                     f"  Fabricated: {row.fabricated_claims or '-'}",
                     f"  Stance errors: {row.stance_errors or '-'}",
+                    f"  Judge issues: {row.judge_mismatch or '-'}",
                     f"  Judge notes: {row.notes or '-'}",
                     f"  Error: {row.error}" if row.error else "",
                 ]
@@ -1217,12 +1542,27 @@ def default_run_directory(root: str | Path) -> Path:
 
 
 def write_jsonl(path: str | Path, rows: Iterable[Any]) -> Path:
+    """Write every row, atomically.
+
+    Via a temp file in the same directory and ``os.replace``, so a crash or a
+    full disk mid-write leaves the previous file intact instead of a truncated
+    one. These files are the only record of a run that cost hours of searches
+    and judge calls; a half-written ``answers.jsonl`` is worse than an old one.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            payload = row.to_dict() if hasattr(row, "to_dict") else row
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                payload = row.to_dict() if hasattr(row, "to_dict") else row
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -1276,13 +1616,112 @@ def clear_partial_files(directory: str | Path) -> None:
 
 
 def read_jsonl(path: str | Path) -> list[dict]:
+    """Read a JSONL file, tolerating one torn line at the end.
+
+    A crash journal is appended line by line, so the process can die halfway
+    through writing the last one. That single truncated line is expected and is
+    skipped with a warning. A torn line anywhere *else* is corruption we must not
+    paper over: silently dropping a middle row would quietly shrink the matrix
+    and move the numbers.
+    """
+    path = Path(path)
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    populated = [index for index, line in enumerate(raw_lines) if line.strip()]
+    last = populated[-1] if populated else None
+
     rows: list[dict] = []
-    with Path(path).open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
+    for index in populated:
+        line = raw_lines[index].strip()
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            if index == last:
+                print(
+                    f"WARNING {path}: skipping a torn trailing line "
+                    f"(line {index + 1}); the run that wrote it was interrupted.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            raise ValueError(
+                f"{path}: line {index + 1} is not valid JSON and is not the last line, "
+                f"so the file is corrupt rather than merely interrupted ({error})"
+            ) from error
     return rows
+
+
+def _git_head(directory: str | Path) -> Optional[str]:
+    """The commit of the checkout the harness runs from, or ``None``.
+
+    Never fatal: a run in a tarball or a dirty worktree is still a run, and the
+    manifest says what it could find.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(directory),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def file_digest(path: str | Path) -> str:
+    """sha256 of a question file, so a report can be tied to the gold it graded."""
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def write_manifest(
+    directory: str | Path,
+    base_url: str,
+    question_paths: Sequence[str | Path],
+    datasets: Sequence[str],
+    search_types: Sequence[str],
+    top_k: int,
+    timeout: float,
+    pause_seconds: float,
+    label: Optional[str] = None,
+) -> Path:
+    """Record what this run was, before it runs.
+
+    A coverage number is meaningless without the gold it was scored against, the
+    server it asked and the protocol it used, and none of that is recoverable
+    from ``answers.jsonl`` a week later. Credentials are not inputs and never
+    appear here.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "started_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "base_url": base_url,
+        # The harness's own checkout - NOT the server's code, which this process
+        # cannot see. ``label`` is where the server's version goes.
+        "harness_checkout_commit": _git_head(Path(__file__).resolve().parent),
+        "label": label,
+        "question_files": [
+            {"path": str(item), "sha256": file_digest(item)} for item in question_paths
+        ],
+        "datasets": list(datasets),
+        "search_types": list(search_types),
+        "top_k": top_k,
+        "timeout_seconds": timeout,
+        "pause_seconds": pause_seconds,
+        # Protocol flags: what the numbers in this directory mean.
+        "session_per_cell": True,
+        "context_before_answer": True,
+    }
+    path = directory / MANIFEST_FILENAME
+    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
 
 
 def resolve_search_types(names: Sequence[str]) -> list[str]:
