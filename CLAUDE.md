@@ -267,7 +267,7 @@ Available search types (from `cognee/modules/search/types/SearchType.py`), passe
 - **CODING_RULES** - Code-specific search rules
 - **SKILLS** - Semantic discovery of skill playbooks (metadata-only, no LLM; requires exactly one dataset)
 
-`recall()` picks one of these automatically when `query_type` is omitted. The CLI is narrower: `cognee-cli recall --query-type` accepts only the choices in `cognee/cli/config.py:SEARCH_TYPE_CHOICES` and defaults to `HYBRID_COMPLETION`; the rest are SDK-only.
+`recall()` picks one of these automatically when `query_type` is omitted. Hybrid and graph-completion lane sizes are env-tunable — see "Retrieval budgets" under the Legal Extraction Profile. The CLI is narrower: `cognee-cli recall --query-type` accepts only the choices in `cognee/cli/config.py:SEARCH_TYPE_CHOICES` and defaults to `HYBRID_COMPLETION`; the rest are SDK-only.
 
 Key files:
 - `cognee/api/v1/search/search.py`
