@@ -9,3 +9,4 @@ from .extract_graph_from_data import extract_graph_from_data
 from .extract_graph_from_code import extract_graph_from_code
 from .detect_contradictions import detect_contradictions
 from .resolve_temporal_contradictions import resolve_temporal_contradictions
+from .resolve_assertion_references import resolve_assertion_references

@@ -25,9 +25,9 @@ SOURCE = Path("/Users/jimmyxie/Downloads/counseldesk-worlds-1of2/adams-family-re
 DATASET = "adams_family_legal"
 
 
-def source_files() -> list[str]:
+def source_files(source: Path) -> list[str]:
     return sorted(
-        str(path) for path in SOURCE.rglob("*") if path.is_file() and not path.name.startswith(".")
+        str(path) for path in source.rglob("*") if path.is_file() and not path.name.startswith(".")
     )
 
 
@@ -42,6 +42,12 @@ async def main() -> int:
         default=[],
         help="ingest only files whose name contains this substring (repeatable)",
     )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=SOURCE,
+        help="Directory of counseldesk documents to ingest (default: the Adams v0.0.2 path).",
+    )
     args = parser.parse_args()
 
     if not os.environ.get("LLM_API_KEY"):
@@ -51,7 +57,7 @@ async def main() -> int:
     import cognee
     from cognee.domains.legal import legal_profile
 
-    files = source_files()
+    files = source_files(args.source)
     if args.match:
         files = [f for f in files if any(m.lower() in f.lower() for m in args.match)]
     if args.limit:

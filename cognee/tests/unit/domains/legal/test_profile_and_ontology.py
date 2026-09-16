@@ -12,6 +12,7 @@ from cognee.domains.legal import (
     legal_profile,
 )
 from cognee.modules.ontology.rdf_xml.RDFLibOntologyResolver import RDFLibOntologyResolver
+from cognee.tasks.graph import resolve_assertion_references
 
 # Every class local name from the legal OWL vocabulary hierarchy, lowercased the way
 # RDFLibOntologyResolver._uri_to_key would key them.
@@ -78,7 +79,13 @@ class TestLegalProfile:
     def test_default_profile_shape(self):
         profile = legal_profile()
 
-        assert set(profile) == {"graph_model", "custom_prompt", "chunk_size", "config"}
+        assert set(profile) == {
+            "graph_model",
+            "custom_prompt",
+            "chunk_size",
+            "config",
+            "enrichment_tasks",
+        }
         assert profile["graph_model"] is LegalKnowledgeGraph
         assert isinstance(profile["custom_prompt"], str) and profile["custom_prompt"]
         assert profile["chunk_size"] == DEFAULT_LEGAL_CHUNK_SIZE == 512
@@ -90,11 +97,33 @@ class TestLegalProfile:
         assert isinstance(resolver, RDFLibOntologyResolver)
         assert resolver.matching_strategy.cutoff == LEGAL_FUZZY_CUTOFF == 0.9
 
+        enrichment_tasks = profile["enrichment_tasks"]
+        assert len(enrichment_tasks) == 1
+        resolve_task = enrichment_tasks[0]
+        assert resolve_task.executable is resolve_assertion_references
+        assert resolve_task.default_params["kwargs"]["scope"] == "touched"
+        # The discriminating behavioural guarantee -- a populated graph, allow_llm=False,
+        # tracer never called, no document text read -- is
+        # test_the_tail_never_calls_the_llm_and_never_reads_a_document in
+        # cognee/tests/unit/tasks/graph/test_resolve_assertion_references.py; this
+        # assertion only pins that the shipped profile carries the kwarg.
+        assert resolve_task.default_params["kwargs"]["allow_llm"] is False
+
     def test_include_ontology_false_omits_config(self):
         profile = legal_profile(include_ontology=False)
 
-        assert set(profile) == {"graph_model", "custom_prompt", "chunk_size"}
+        assert set(profile) == {
+            "graph_model",
+            "custom_prompt",
+            "chunk_size",
+            "enrichment_tasks",
+        }
         assert "config" not in profile
+
+    def test_resolve_references_false_omits_enrichment_tasks(self):
+        profile = legal_profile(resolve_references=False)
+
+        assert "enrichment_tasks" not in profile
 
     def test_ontology_mode_passthrough(self):
         profile = legal_profile(ontology_mode="strict")
@@ -124,7 +153,7 @@ class TestCogneeContract:
 
     def test_graph_model_and_config_are_cognify_only_in_remember(self):
         remember_module = importlib.import_module("cognee.api.v1.remember.remember")
-        assert {"graph_model", "config"} <= remember_module._COGNIFY_ONLY
+        assert {"graph_model", "config", "enrichment_tasks"} <= remember_module._COGNIFY_ONLY
 
 
 class TestRealResolver:

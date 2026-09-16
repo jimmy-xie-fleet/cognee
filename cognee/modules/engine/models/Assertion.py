@@ -68,6 +68,21 @@ class Assertion(Entity):
     source_quote: Optional[str] = None
     source_quote_verified: bool = False
     responds_to: Optional[str] = None  # locator text, e.g. "Complaint ¶17"
+    # Once a reference is resolved the field above holds the id of the node it points at,
+    # ``<field>_text`` keeps the locator text the document actually wrote, and
+    # ``<field>_resolution`` records how that answer was reached. None of them take part in
+    # identity: resolving a reference must not give the assertion a new id.
+    responds_to_text: Optional[str] = None
+    responds_to_resolution: Optional[dict] = None
+    # The structured reference extraction emitted, verbatim, when the answered/attributed
+    # statement lives in another document -- a plain dict rather than the typed
+    # ``LegalReference`` model, because core cannot import ``cognee.domains`` and readers
+    # already normalize Ladybug dicts vs. Neo4j JSON strings for ``responds_to_resolution``.
+    # Never resolved, never fed to ``_resolve_reference``, and no edge is derived from it.
+    responds_to_ref: Optional[dict] = None
+    attributed_to_text: Optional[str] = None
+    attributed_to_resolution: Optional[dict] = None
+    attributed_to_ref: Optional[dict] = None
     source_chunk_id: Optional[str] = None
     occurrence: int = 1
     metadata: dict = {

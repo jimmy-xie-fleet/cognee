@@ -2,12 +2,15 @@ from enum import Enum
 from typing import Optional
 from uuid import UUID
 
+from pydantic import BaseModel
+
 from cognee.infrastructure.databases.provenance import EdgeIdentity
 from cognee.infrastructure.engine.models.Edge import Edge
 from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.engine.models import Entity, EntityType
 from cognee.modules.engine.models.Assertion import Assertion, verify_source_quote
 from cognee.modules.engine.utils import generate_edge_name, generate_node_name
+from cognee.modules.graph.utils.reference_resolution import derived_edge_text
 from cognee.shared.data_models import Edge as KGEdge
 from cognee.shared.data_models import KnowledgeGraph, Node
 
@@ -17,20 +20,6 @@ _ASSERTION_REFERENCE_FIELDS = (
     ("attributed_to", "attributed_to"),
     ("responds_to", "responds_to"),
 )
-
-# How a derived asserted_by edge words the speaker's stance. The unknown phrase reads
-# "takes an unrecorded stance on X" rather than "... on that X": the verb takes its object
-# directly, and the text is embedded and shown to a reader, so it has to be a sentence.
-_STANCE_VERB_BY_POLARITY = {
-    "positive": "affirms that",
-    "negative": "denies that",
-}
-_UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
-
-_DERIVED_EDGE_VERBS = {
-    "attributed_to": "is attributed to",
-    "responds_to": "responds to",
-}
 
 
 def _strip_nonblank_text(value: str | None) -> str | None:
@@ -309,6 +298,29 @@ def _assertion_occurrences(
     return occurrence_by_extracted_node_id
 
 
+def _reference_payload(extracted_node: Node, field_name: str) -> Optional[dict]:
+    """The structured reference an extraction emitted for ``field_name``, as a plain dict.
+
+    Core cannot import ``cognee.domains``, so this duck-types instead of importing the real
+    ``LegalReference`` model: a pydantic ``BaseModel`` is dumped (``mode="json"`` renders its
+    enums as their string values), a plain ``dict`` passes through unchanged, and anything
+    else -- a bare string, ``None`` -- yields ``None``. Blank values ("", "none") are dropped
+    the same way ``_strip_nonblank_text`` drops them for the string reference fields, and a
+    payload left empty by that filtering collapses to ``None`` rather than an empty dict.
+
+    Never calls ``_resolve_reference``: the value is stored verbatim, not resolved against
+    the extracted graph, and derives no edge.
+    """
+    value = getattr(extracted_node, field_name, None)
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json", exclude_none=True)
+    if not isinstance(value, dict):
+        return None
+
+    payload = {key: item for key, item in value.items() if item not in (None, "", "none")}
+    return payload or None
+
+
 def _create_assertion(
     extracted_node: Node,
     entity_type: EntityType,
@@ -328,6 +340,7 @@ def _create_assertion(
         polarity=_polarity_value(extracted_node),
         asserted_by=reference_names["asserted_by"],
         attributed_to=reference_names["attributed_to"],
+        attributed_to_ref=_reference_payload(extracted_node, "attributed_to_ref"),
         applicable_time=getattr(extracted_node, "applicable_time", None),
         applies_from=getattr(extracted_node, "applies_from", None),
         applies_to=getattr(extracted_node, "applies_to", None),
@@ -338,6 +351,7 @@ def _create_assertion(
         source_quote=source_quote,
         source_quote_verified=verify_source_quote(source_quote, getattr(data_chunk, "text", None)),
         responds_to=reference_names["responds_to"],
+        responds_to_ref=_reference_payload(extracted_node, "responds_to_ref"),
         source_chunk_id=str(data_chunk.id),
         occurrence=occurrence,
     )
@@ -602,30 +616,23 @@ def _derived_edge_description(
     relationship_name: str,
     target_node: Optional[Node],
 ) -> Optional[str]:
-    """The text a derived edge carries, stating the stance the assertion was made with.
+    """The text a derived edge carries, for an extraction still in ``KnowledgeGraph`` form.
 
-    Without it the edge reaches storage with no ``edge_text``, and
-    ``ensure_default_edge_properties`` synthesizes one from the endpoint labels — for an
-    assertion that is its affirmative ``name``, so a denial is embedded and shown as the
-    fact it denies. The stance therefore has to travel with the edge, not be reconstructed
-    from the endpoints, which no longer carry it.
+    The wording lives in ``derived_edge_text`` so the resolver that writes reference edges
+    against stored nodes words them exactly the same way; this reads the same values off
+    an extracted node.
     """
     if target_node is None:
         return None
 
-    proposition = _proposition_clause(extracted_node)
-    polarity = _polarity_value(extracted_node)
-    if relationship_name == "asserted_by":
-        stance_verb = _STANCE_VERB_BY_POLARITY.get(polarity, _UNRECORDED_STANCE_VERB)
-        head = f"{_reference_label(target_node)} {stance_verb} {proposition}"
-    else:
-        head = (
-            f"{proposition} ({_statement_type_value(extracted_node)}, {polarity} stance) "
-            f"{_DERIVED_EDGE_VERBS[relationship_name]} {_reference_label(target_node)}"
-        )
-
-    description = _strip_nonblank_text(extracted_node.description)
-    return " ".join(_sentence(part) for part in (head, description) if part)
+    return derived_edge_text(
+        _proposition_clause(extracted_node),
+        _statement_type_value(extracted_node),
+        _polarity_value(extracted_node),
+        relationship_name,
+        _reference_label(target_node),
+        extracted_node.description,
+    )
 
 
 def _derive_assertion_edges(

@@ -17,7 +17,7 @@ from cognee.domains.legal import legal_profile
 
 remember_module = sys.modules["cognee.api.v1.remember.remember"]
 
-PROFILE_OPTIONS = ("graph_model", "custom_prompt", "config", "chunk_size")
+PROFILE_OPTIONS = ("graph_model", "custom_prompt", "config", "chunk_size", "enrichment_tasks")
 
 
 @pytest.mark.asyncio
@@ -44,6 +44,7 @@ async def test_session_remember_rejects_the_whole_legal_profile():
         ("custom_prompt", "extract legal assertions"),
         ("config", {"ontology_config": {"ontology_resolver": None}}),
         ("chunk_size", 512),
+        ("enrichment_tasks", [object()]),
     ],
 )
 async def test_session_remember_rejects_each_extraction_option(option, value):
@@ -74,3 +75,4 @@ async def test_permanent_remember_still_accepts_the_profile():
     assert forwarded["custom_prompt"] == profile["custom_prompt"]
     assert forwarded["graph_model"] is profile["graph_model"]
     assert forwarded["config"] is profile["config"]
+    assert forwarded["enrichment_tasks"] is profile["enrichment_tasks"]

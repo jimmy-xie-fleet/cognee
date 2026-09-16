@@ -1,6 +1,6 @@
 import asyncio
 from pydantic import BaseModel
-from typing import Collection, Literal, Union, Optional
+from typing import Collection, Literal, Sequence, Union, Optional
 from uuid import UUID
 
 from cognee.modules.cognify.config import get_cognify_config
@@ -125,6 +125,7 @@ async def cognify(
     dry_run: bool = False,
     raise_on_error: bool = True,
     chunk_attachment: Optional[Literal["direct", "all"]] = None,
+    enrichment_tasks: Optional[Sequence[Task]] = None,
     **kwargs,
 ):
     """
@@ -215,6 +216,15 @@ async def cognify(
                  Cost of "all": index_graph_edges embeds one EdgeType per distinct edge text,
                  and contains edge text is "<chunk label> contains <node label>." - so a model
                  yielding N nodes per chunk means roughly N extra embedded rows per chunk.
+        enrichment_tasks: Extra `Task` objects appended to the very end of the default
+                 pipeline, after any opt-in tail item (record_provenance,
+                 detect_contradictions, resolve_temporal_contradictions). Lets a caller
+                 (typically a domain profile) run a deterministic post-pass without core
+                 importing that domain's task. Must be a list (or tuple) and every entry
+                 must be a `Task` instance.
+                 Raises with temporal_cognify=True (the temporal pipeline does not use
+                 get_default_tasks) or while connected to a remote instance (tasks cannot
+                 be serialized to a remote instance).
 
     Returns:
         Union[dict, list[PipelineRunInfo], DryRunEstimate]:
@@ -309,6 +319,27 @@ async def cognify(
                 "pipeline does not attach extracted graphs to chunks."
             )
 
+    if enrichment_tasks:
+        # An empty list behaves like None; a non-empty one has to be all Tasks, since
+        # get_default_tasks appends these straight into the pipeline it returns. A bare
+        # Task is truthy but not iterable, so the shape is checked before the entries.
+        if not isinstance(enrichment_tasks, (list, tuple)):
+            raise ValueError(
+                "enrichment_tasks must be a list of Task instances, got "
+                f"{type(enrichment_tasks).__name__!r}."
+            )
+        for enrichment_task in enrichment_tasks:
+            if not isinstance(enrichment_task, Task):
+                raise ValueError(
+                    "enrichment_tasks entries must be Task instances, got "
+                    f"{type(enrichment_task).__name__!r}."
+                )
+        if temporal_cognify:
+            raise ValueError(
+                "enrichment_tasks is not supported with temporal_cognify=True; the temporal "
+                "pipeline does not use get_default_tasks."
+            )
+
     # Route to remote instance if connected via serve()
     from cognee.api.v1.serve.state import get_remote_client
 
@@ -318,6 +349,11 @@ async def cognify(
             raise ValueError(
                 "chunk_attachment is not supported while connected to a remote Cognee "
                 "instance. Call cognee.disconnect() to use it locally."
+            )
+        if enrichment_tasks:
+            raise ValueError(
+                "enrichment_tasks is not supported while connected to a remote Cognee "
+                "instance; tasks cannot be serialized to a remote instance."
             )
         if dry_run:
             raise ValueError(
@@ -388,6 +424,7 @@ async def cognify(
                 chunks_per_batch=chunks_per_batch,
                 functional_relationships=functional_relationships,
                 chunk_attachment=chunk_attachment,
+                enrichment_tasks=enrichment_tasks,
                 **kwargs,
             )
 
@@ -483,6 +520,7 @@ async def get_default_tasks(  # TODO: Find out a better way to do this (Boris's 
     chunks_per_batch: int = None,
     functional_relationships: Optional[Collection[str]] = None,
     chunk_attachment: Optional[Literal["direct", "all"]] = None,
+    enrichment_tasks: Optional[Sequence[Task]] = None,
     **kwargs,
 ) -> list[Task]:
     cognify_config = get_cognify_config()
@@ -552,6 +590,15 @@ async def get_default_tasks(  # TODO: Find out a better way to do this (Boris's 
                 functional_relationships=functional_relationships,
                 task_config={"batch_size": chunks_per_batch},
             )
+        )
+
+    # OPTIONAL: caller-supplied post-passes (e.g. a domain profile's own deterministic
+    # task), appended after every other optional tail item above. with_config returns a
+    # new Task, so the caller's own Task objects are never mutated.
+    if enrichment_tasks:
+        default_tasks.extend(
+            enrichment_task.with_config(batch_size=chunks_per_batch)
+            for enrichment_task in enrichment_tasks
         )
 
     return default_tasks

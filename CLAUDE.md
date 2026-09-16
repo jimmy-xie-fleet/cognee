@@ -783,11 +783,14 @@ await cognee.remember(text, dataset_name="case_123", self_improvement=False, **l
 ```
 
 `legal_profile()` returns `graph_model` (`LegalKnowledgeGraph`), `custom_prompt` (the legal
-extraction prompt), `chunk_size`, and `config` (the OWL ontology resolver, fuzzy-matched,
-`ontology_mode="annotate"` by default) — splat it into `remember()` or `cognify()`. Everything
-lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGraph`),
-`profile.py` (`legal_profile()`, `legal_ontology_resolver()`), `prompt.py`
-(`load_legal_extraction_prompt()`), `ontology/legal.owl`, and `prompts/legal_extraction_system.txt`.
+extraction prompt), `chunk_size`, `config` (the OWL ontology resolver, fuzzy-matched,
+`ontology_mode="annotate"` by default), and `enrichment_tasks`
+(`[Task(resolve_assertion_references, scope="touched", allow_llm=False)]`, appended to the
+cognify tail; empty when `resolve_references=False`) — splat it into `remember()` or
+`cognify()`. Everything lives under `cognee/domains/legal/`: `models.py` (`LegalNode`,
+`LegalReference`, `LegalKnowledgeGraph`), `profile.py` (`legal_profile()`,
+`legal_ontology_resolver()`), `prompt.py` (`load_legal_extraction_prompt()`),
+`ontology/legal.owl`, and `prompts/legal_extraction_system.txt`.
 
 - **Identity rule**: each statement occurrence becomes its own `Assertion` node (an `Entity`
   subclass), keyed on name + chunk + statement type + speaker + occurrence — `name` is the
@@ -799,10 +802,118 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   `Entity_name`.
 - **Explicit kwargs, no env var** — there is no global switch; every call that wants legal
   extraction must splat `legal_profile()` in.
-- **`improve()` covers assertions**: its default enrichment streams every triplet straight from
-  the graph, so assertion triplets are embedded and indexed like any other node. Only the
+- **`improve()` covers assertions**: with `TRIPLET_EMBEDDING=true` its default enrichment
+  streams every triplet straight from the graph, so assertion triplets are embedded and
+  indexed like any other node; with the default `false` the default extraction task list is
+  empty, so a default `improve()` run indexes nothing for assertions. Either way it never
+  re-indexes edge texts — that is `index_graph_edges`, a separate collection. Only the
   opt-in memify consolidation pipelines (`consolidate_entities`, `cross_connect_entities`)
   filter on `type == "Entity"`, and those skip assertions.
+- **Reference resolution** — three stages: the extraction LLM emits a structured reference, the
+  ingest tail resolves only what it can resolve for free, and the `improve()`/memify pass traces
+  the rest with a budgeted agent. Writing is unchanged, so any stage that writes an edge needs
+  the embedding provider up: new edge texts go through `index_graph_edges` like any other edge.
+  - **Extraction.** The legal prompt asks for a structured `LegalReference` (`document_hint`,
+    `locator_kind`, `locator_value`, `date`, `basis`) whenever the answered or attributed
+    statement lives in another document. It is stored verbatim on the `Assertion` as a plain
+    dict in `responds_to_ref` / `attributed_to_ref` (core cannot import `cognee.domains`);
+    `responds_to` / `attributed_to` stay string slots, holding either the id of a target in
+    **this** passage or the name of an entity (`"Norman Fester"`) the `entity_name` step
+    resolves. A responsive pleading's bare `"13. Denied."` is `basis="positional"` with
+    `locator_value` set to the answering paragraph's own number; a reference the model is
+    unsure of is a null `_ref`. Nothing composes a `¶N` string any more.
+  - **Ingest tail** — `Task(resolve_assertion_references, scope="touched", allow_llm=False)`.
+    Two cascade steps only: `existing_id` (the field already holds a node id) and `entity_name`.
+    A legacy plain string already sitting in the field is looked up as it stands; the gate is on
+    the hint path, where `entity_name` reads `document_hint` only when the hint carries no
+    locator and `basis != "positional"`, so `"the Complaint ¶13"` is never linked to a
+    `Complaint` stub entity. No retrieval, no LLM call, no document text (decision D1). A
+    reference it cannot answer is left dangling with nothing written, so every forward reference
+    waits for the pass.
+  - **Pass** — `resolve_references_pipeline(dataset=…)` (recommended), `improve(dataset,
+    enrichment_tasks=[Task(resolve_assertion_references)], data=[{}])`, or HTTP
+    `POST /api/v1/improve {"enrichment_tasks": ["resolve_references"], "datasetName": "…"}` —
+    the `data=[{}]` seed is SDK-only (the endpoint's `data` is a string), so over HTTP the
+    graph projection runs first and the task's `scope="all"` once-per-run memo keeps that to a
+    single pass. Per reference the same two cheap steps run first, then two guards skip a
+    reference that has already been answered: a `responds_to`/`attributed_to` edge out of this
+    assertion carrying `resolved_by="reference_resolver"`, or a stored `<field>_resolution`
+    holding an `llm_trace`/`llm_inferred` attempt with the same `fingerprint`. A record that
+    gave up at the step cap stores that cap in `max_iter`, so raising `tracer_max_iter` re-opens
+    it without `force` (a record written before the cap was stored still counts as an attempt).
+    What survives both guards gets seed retrieval (`search_candidates` — vector over
+    `Assertion_name`, `DocumentChunk_text`, `TextSummary_text` and each `<DocumentType>_name`,
+    plus BM25 over the view's chunk texts and assertion names, never over a filename;
+    `SAME_DOCUMENT_PENALTY` discounts a candidate in the referring statement's own document when
+    the field is `responds_to`); then the tracer.
+  - **Tracer** (`trace_reference`) — a structured "next action" loop, because cognee has no
+    native function calling: each step is one `TracerStep` (a `thought` plus exactly one
+    `tool_call` or one `finish`) off `LLMGateway.acreate_structured_output`. Five read-only
+    tools — `search`, `list_documents`, `open_document`, `read_chunk`, `locate_paragraph` — and
+    every node reaches the model as a per-trace opaque label issued by a `LabelRegistry` (`A3`
+    assertion, `P2` passage, `D1` document — a summary hit is folded onto its chunk, so it never
+    becomes a candidate), never as a node id, so
+    `finish(candidate_label | null, confidence, reason)` can only name a label or abstain.
+    Strategies: `llm_trace` for a reference the document stated, `llm_inferred` for an unstated
+    denial/admission link.
+  - **Gateway-call allowance** (env, on `CognifyConfig`): `REFERENCE_LLM_MAX_CALLS` (300 gateway
+    invocations per pass, shared by every trace), `REFERENCE_TRACER_MAX_ITER` (4, per reference
+    — each iteration is one tool step or one finish, with no extra gateway invocation at the cap),
+    `REFERENCE_LLM_CONFIDENCE_THRESHOLD` (0.6), `REFERENCE_INFER_UNSTATED` (false),
+    `REFERENCE_INFER_CONFIDENCE_THRESHOLD` (0.75). `resolve_references_pipeline()` and
+    `resolve_assertion_references()` take the same five as `llm_max_calls`, `tracer_max_iter`,
+    `llm_confidence_threshold`, `infer_unstated`, `infer_confidence_threshold` (`None` = config).
+    The summary declares `llm_budget_unit="gateway_calls"`: `llm_calls` counts successful
+    gateway invocations and `llm_calls_attempted` includes failed invocations. The latter
+    reaches `llm_budget` when exhausted. Adapters can retry validation, schema negotiation,
+    fallback models and transient errors inside one invocation, so these settings do not cap
+    provider requests or monetary spend. Seed retrieval's embedding requests are also outside
+    this allowance.
+  - **What gets written.** The edge and patch plumbing is unchanged: a typed edge carrying
+    `resolution_strategy`, `resolution_confidence`, `resolved_by="reference_resolver"` and a
+    stance-preserving `edge_text`, and — for `llm_trace`, the one `patch_mode="full"` strategy —
+    the field rewritten to the resolved node id, the original wording kept in `<field>_text`,
+    and the audit trail in `<field>_resolution`, which now also carries `reason`, `fingerprint`,
+    `iterations`, `max_iter` (set only on a record that ran out of steps) and `trace` (one
+    `{tool, args, result_preview, ok}` record per step). An abstain, an iteration cap or a
+    below-threshold pick writes a `resolution_only` record — fingerprint and note, no field —
+    so a field the extraction left null is never overwritten and a re-run over unchanged text
+    spends nothing; the note names the cause (`llm_abstained`, `llm_below_threshold`,
+    `llm_iteration_cap`, `llm_unknown_label` for a label this trace never issued,
+    `llm_malformed_step` for a step naming neither a tool call nor a finish, and
+    `llm_self_reference` for an answer naming the asking statement itself). A budget-exhausted
+    or failed trace writes **nothing**, so the next pass retries it; three consecutive traces
+    whose call failed trip a circuit breaker (`llm_circuit_broken`); `llm_max_calls=0` is the
+    seed-only estimate (`llm_estimate_only`, with `traces_started` counting references that
+    could be traced); it makes no tracer gateway calls but may make paid embedding requests.
+    `dry_run=True` still runs the tracer, it only withholds the writes.
+    **Idempotency**: a second pass writes nothing new — a reference an edge or a matching
+    `fingerprint` says was answered is not traced again, a field already holding its resolved id
+    counts as `already_resolved`, and a resolution whose edges are all in the graph already is
+    at most patched, never re-written (so a tuned `feedback_weight` survives). `force=True`
+    re-resolves from `<field>_ref`, falling back to the preserved `<field>_text`, and still
+    writes only what changed: a forced re-check that comes back empty leaves the answer and the
+    audit blob the field already holds exactly where they are, and the summary says so once
+    with `force_kept_prior`. A field holding an id that
+    is no longer in the graph — the target was forgotten, or an amended document was re-chunked
+    under new ids — re-resolves without `force`, records a `stale_id` note and is counted in the
+    summary's `stale_ids` (an `entity_name` answer replaces the dead id there, the wording
+    staying in `<field>_text`); `asserted_by` (the identity field) is never touched.
+  - **Unstated inference** (`REFERENCE_INFER_UNSTATED=true`, off by default) runs from the same
+    budget, strictly after every stated reference was offered a trace: a `denial` or `admission`
+    with a blank `responds_to`, no `responds_to_ref` and a `source_quote` is seeded on its
+    proposition alone and traced with `trace_reference_system.txt` rendered with
+    `unstated=True`, which appends the higher-bar block to the same prompt. An answer above
+    `reference_infer_confidence_threshold` writes an `llm_inferred` edge carrying `inferred=True`
+    and `feedback_weight=0.2`, and patches **only** `<field>_resolution` — the graph never claims
+    the document wrote a reference it did not write.
+  - **Operator scripts** (`scripts/legal/`): `resolve_references_report.py <dataset> [--apply]
+    [--force] [--llm-max-calls N] [--tracer-max-iter N] [--llm-confidence-threshold F]
+    [--infer-unstated] [--show-traces]` plans a pass (`--apply` writes it; a plan-only run
+    still spends), printing the intended spend before the first call and every `llm_*` /
+    `traces_*` / `tool_calls_by_name` / `inferred_*` summary key after it; `find_disputes.py`
+    prints a `resolution_strategy` breakdown and lists `inferred=True` edges separately;
+    `ingest_adams_legal.py --source <dir>` ingests a document directory with the profile.
 - **Limitations**: fuzzy grounding runs at a 0.9 cutoff, which is sensitive to pluralization —
   a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
   enum-constrained `statement_type` still drives the assertion property, so only the OWL `is_a`
@@ -817,7 +928,47 @@ lives under `cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalKnowledgeGr
   chunk size; `remember(session_id=…)` rejects the profile outright (session memory is bridged
   into the graph by `improve()`, which cognifies with the default extraction); do not combine
   with `temporal_cognify=True`, which ignores `custom_prompt`/`graph_model` and would silently
-  drop the profile.
+  drop the profile. The reference resolver adds its own limits: the pass is budget-bounded, so a
+  run can leave references unresolved and says so — `llm_budget_exhausted` in the summary's
+  `notes` plus one WARNING naming the count, and nothing is written for them; traces run
+    sequentially (they share one mutable `CallBudget`), so a pass takes as long as its reference
+    count; every uncached trace needs at least one gateway invocation, and seed retrieval runs for every pending
+  reference, including the ones the budget will never reach; a `finish` naming a label this trace
+  never issued is counted `llm_unknown_label` and treated as an abstain;
+  `TracerToolCall.arguments` is a `Dict[str, Any]`, which not every structured-output framework
+  will emit a strict schema for — under the default `litellm_native` with OpenAI the strict
+  schema is rejected once per process and demoted to non-strict `json_schema` with a WARNING,
+  and under
+  `STRUCTURED_OUTPUT_FRAMEWORK=baml` every tracer call fails outright, so the circuit breaks
+  after three slots and the pass yields nothing; `locate_paragraph`'s marker regexes run only
+  over document text, with a `(kind, value)` pair the model supplied —
+  nothing parses reference text anywhere — and they read that text through `DocumentTextCache`,
+  which degrades to the stored chunks when the derived text file is missing or unreadable; a
+  legacy free-text reference from a pre-structured dataset reaches the tracer as a `legacy_text`
+  hint, its own words unparsed, and an old `<field>_resolution` blob with no `fingerprint` is
+  reconsidered once, so the first pass over such a dataset spends budget on it; an
+  inferred link can land on a sibling assertion in the same pleading rather than the one it
+  answers (the same-document discount is a penalty, not a filter), which is why
+  `REFERENCE_INFER_UNSTATED` is false by default and wants a spot-check before it is turned on;
+  a bare `"the Complaint"` short-circuits to whatever `Complaint` stub entity extraction minted,
+  before the tracer sees it; re-resolution never deletes a superseded edge; `update_node`
+  is implemented only on the Ladybug adapter, so other graph backends get the reference edges
+  without the field rewrite and store no `<field>_resolution` — there the resolver-owned edge is
+  the only record that a reference was answered, which is what stops the next pass re-tracing it
+  and re-emitting its edges, so a reference that *abstained* (no edge, and no record to store)
+  is traced and paid for again on every pass, and a changed reference on an already-linked field
+  needs `force` (so does a stated reference that later appears on a field an `llm_inferred` edge
+  already answers); edges the memify pipeline writes are owned by the resolver's sentinel data id
+  (`REFERENCE_RESOLUTION_DATA_ID`),
+  not the ingesting document, so they do not follow that document's `forget()`; there are no
+  edge-evidence rows for resolved references; `update()` takes no `enrichment_tasks` parameter,
+  so editing a document ingested with the profile re-extracts it without the resolver tail, and
+  its re-chunked assertions become stale targets for references elsewhere — which the `stale_id`
+  fall-through repairs on the next resolver pass; a `find_disputes.py`-style consumer must read
+  `responds_to` **edges**, not the field, since a paragraph anchor can be a chunk id shared by
+  several allegations; and because the tail is LLM-free, **every** cross-document reference —
+  not only a bulk load's earliest documents — needs one
+  `resolve_references_pipeline(dataset=…)` pass after ingestion.
 
 ### Skills (Procedural Memory)
 Dataset-scoped `SKILL.md` playbooks agents can discover, load on demand, execute, and improve from run history.

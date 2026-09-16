@@ -77,6 +77,7 @@ class RememberKwargs(TypedDict, total=False):
     embedding_config: Any
     config: Any  # per-call ontology config, see cognee.modules.ontology.ontology_config.Config
     temporal_cognify: bool  # routed to cognify(); ignores graph_model/custom_prompt
+    enrichment_tasks: list  # routed to cognify(); appended to the pipeline tail
 
 
 # Kwarg routing: which RememberKwargs go to add(), cognify(), or both.
@@ -92,7 +93,9 @@ _ADD_ONLY = frozenset(
         "max_rows_per_table",
     }
 )
-_COGNIFY_ONLY = frozenset({"graph_model", "chunks_per_batch", "config", "temporal_cognify"})
+_COGNIFY_ONLY = frozenset(
+    {"graph_model", "chunks_per_batch", "config", "temporal_cognify", "enrichment_tasks"}
+)
 _SHARED = frozenset(
     {
         "user",
@@ -700,9 +703,9 @@ async def remember(
         session_id: Optional session ID. When set, stores data in the
             session cache instead of the permanent graph. The extraction
             options (``graph_model``, ``custom_prompt``, ``config``,
-            ``chunk_size``) are rejected with it: the session is bridged
-            into the graph by ``improve()``, which cognifies with the
-            default extraction.
+            ``chunk_size``, ``enrichment_tasks``) are rejected with it: the
+            session is bridged into the graph by ``improve()``, which
+            cognifies with the default extraction.
         chunk_size: Max tokens per chunk. Auto-calculated when *None*.
         chunker: Text chunking strategy. Defaults to *TextChunker*.
         custom_prompt: Custom prompt for entity extraction.
@@ -875,6 +878,7 @@ async def remember(
                 ("custom_prompt", custom_prompt is not None),
                 ("config", kwargs.get("config") is not None),
                 ("chunk_size", chunk_size is not None),
+                ("enrichment_tasks", kwargs.get("enrichment_tasks") is not None),
             )
             if is_supplied
         ]
@@ -989,6 +993,11 @@ async def _remember_inner(
 
     client = get_remote_client()
     if client is not None:
+        if kwargs.get("enrichment_tasks"):
+            raise ValueError(
+                "enrichment_tasks is not supported while connected to a remote Cognee "
+                "instance; tasks cannot be serialized to a remote instance."
+            )
         span.set_attribute(COGNEE_OPERATION_MODE, "cloud")
         return await client.remember(
             data,

@@ -1,0 +1,34 @@
+# The referring statement
+
+Document: {{ source_document }}
+Speaker: {{ speaker }}
+Statement type: {{ statement_type }} (stance on the proposition: {{ polarity }})
+Proposition: {{ proposition }}
+As written in the document: "{{ source_quote }}"
+Reference field being resolved: {{ field }}
+
+# The reference as made
+
+{% if reference -%}
+As written: {{ reference['text'] }}
+{% if reference['document_hint'] %}Document named: {{ reference['document_hint'] }}
+{% endif %}{% if reference['locator_kind'] and reference['locator_value'] %}Place named: {{ reference['locator_kind'] }} {{ reference['locator_value'] }}
+{% endif %}{% if reference['date'] %}Date named: {{ reference['date'] }}
+{% endif %}{% if reference['basis'] %}Stated basis: {{ reference['basis'] }}
+{% endif %}{%- else -%}
+This statement records no reference of its own.
+{%- endif %}
+
+# Tools
+
+{{ tools }}
+
+# What you have seen so far
+
+Seed candidates found by search, then the result of every step you have taken.
+
+{{ context }}
+
+This is step {{ step }} of {{ max_steps }}.
+
+Which labelled node is the referent of this reference? Emit exactly one TracerStep.

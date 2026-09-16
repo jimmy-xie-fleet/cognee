@@ -6,8 +6,11 @@ from pydantic import ValidationError
 from cognee.domains.legal import (
     LegalKnowledgeGraph,
     LegalNode,
+    LegalReference,
+    LocatorKind,
     Polarity,
     Precision,
+    ReferenceBasis,
     load_legal_extraction_prompt,
 )
 from cognee.modules.engine.models.Assertion import STATEMENT_TYPE_NAMES, StatementType
@@ -99,6 +102,29 @@ class TestSchema:
         statement_type_def = defs["StatementType"]
         assert set(statement_type_def["enum"]) == set(STATEMENT_TYPE_NAMES)
 
+    def test_schema_defs_contain_the_structured_reference_types(self):
+        schema = LegalKnowledgeGraph.model_json_schema()
+        defs = schema.get("$defs", {})
+        assert "LegalReference" in defs
+        assert "LocatorKind" in defs
+        assert "ReferenceBasis" in defs
+
+    def test_locator_kind_enum_values_are_lower_case(self):
+        defs = LegalKnowledgeGraph.model_json_schema().get("$defs", {})
+        assert set(defs["LocatorKind"]["enum"]) == {
+            "paragraph",
+            "section",
+            "exhibit",
+            "count",
+            "article",
+            "page",
+            "none",
+        }
+
+    def test_reference_basis_enum_values_are_lower_case(self):
+        defs = LegalKnowledgeGraph.model_json_schema().get("$defs", {})
+        assert set(defs["ReferenceBasis"]["enum"]) == {"cited", "positional", "described"}
+
     def test_field_descriptions_are_present(self):
         schema = LegalKnowledgeGraph.model_json_schema()
         defs = schema.get("$defs", {})
@@ -125,8 +151,22 @@ class TestSchema:
             "Verbatim contiguous passage copied from the input that supports this claim."
         )
         assert properties["responds_to"]["description"] == (
-            "Locator of the statement this responds to, e.g. 'Complaint ¶17', or that "
-            "node's id when present."
+            "id of the node this statement responds to when that node appears in THIS "
+            "passage; for a statement in another document use `responds_to_ref`."
+        )
+        assert properties["attributed_to"]["description"] == (
+            "id of the original author's node when that author appears in THIS passage; "
+            "for a statement in another document use `attributed_to_ref`."
+        )
+        assert properties["responds_to_ref"]["description"] == (
+            "Structured reference to the statement this responds to when it is in "
+            "another document; null when the answered statement appears in THIS "
+            "passage (use responds_to for that) or when there is no response."
+        )
+        assert properties["attributed_to_ref"]["description"] == (
+            "Structured reference to the original author's source when it is in "
+            "another document; null when that author appears in THIS passage (use "
+            "attributed_to for that) or there is no attribution."
         )
 
 
@@ -224,7 +264,9 @@ class TestSamplePayload:
                     "statement_type": "denial",
                     "polarity": "negative",
                     "asserted_by": "meridian",
-                    "responds_to": "Complaint ¶18",
+                    # The allegation it answers is in this passage, so responds_to
+                    # carries that node's own id, not a composed locator string.
+                    "responds_to": "complaint-p18",
                 },
                 {
                     # Polarity is the stance, not the speech act: a negated allegation is
@@ -247,7 +289,7 @@ class TestSamplePayload:
                     "statement_type": "denial",
                     "polarity": "positive",
                     "asserted_by": "meridian",
-                    "responds_to": "Complaint ¶19",
+                    "responds_to": "complaint-p19",
                 },
             ],
             "edges": [
@@ -278,7 +320,7 @@ class TestSamplePayload:
         assert allegation.name == denial.name
         assert allegation.polarity == Polarity.POSITIVE
         assert denial.polarity == Polarity.NEGATIVE
-        assert denial.responds_to == "Complaint ¶18"
+        assert denial.responds_to == "complaint-p18"
         # And polarity is independent of the speech act: an allegation can be negative.
         assert by_id["complaint-p19"].polarity == Polarity.NEGATIVE
         # A denial's polarity follows the speaker's stance, not the speech act: denying
@@ -287,6 +329,92 @@ class TestSamplePayload:
         assert denial_of_negated_allegation.name == by_id["complaint-p19"].name
         assert denial_of_negated_allegation.statement_type == "denial"
         assert denial_of_negated_allegation.polarity == Polarity.POSITIVE
+
+    def test_responds_to_ref_payload_round_trips(self):
+        # The answered statement lives in a document the passage never quotes, so
+        # responds_to is null and the cross-document reference carries the pointer.
+        payload = {
+            "nodes": [
+                {
+                    "id": "meridian",
+                    "name": "Meridian Holdings LLC",
+                    "type": "Company",
+                    "description": "Defendant company.",
+                },
+                {
+                    "id": "answer-p18-denial",
+                    "name": "The Meridian warehouse roof leaked after the March 2022 storm.",
+                    "type": "Denial",
+                    "description": "Meridian denies paragraph 18 of the Complaint.",
+                    "statement_type": "denial",
+                    "polarity": "negative",
+                    "asserted_by": "meridian",
+                    "responds_to": None,
+                    "responds_to_ref": {
+                        "document_hint": "the Complaint",
+                        "locator_kind": "paragraph",
+                        "locator_value": "18",
+                        "basis": "cited",
+                    },
+                },
+            ],
+            "edges": [],
+        }
+
+        graph = LegalKnowledgeGraph.model_validate(payload)
+        dumped = graph.model_dump()
+        round_tripped = LegalKnowledgeGraph.model_validate(dumped)
+
+        by_id = {node.id: node for node in round_tripped.nodes}
+        denial = by_id["answer-p18-denial"]
+
+        assert denial.responds_to is None
+        assert denial.responds_to_ref.document_hint == "the Complaint"
+        assert denial.responds_to_ref.locator_kind is LocatorKind.PARAGRAPH
+        assert denial.responds_to_ref.locator_value == "18"
+        assert denial.responds_to_ref.basis is ReferenceBasis.CITED
+
+
+class TestLegalReference:
+    def test_defaults(self):
+        reference = LegalReference()
+
+        assert reference.document_hint == ""
+        assert reference.locator_kind is LocatorKind.NONE
+        assert reference.locator_value is None
+        assert reference.date is None
+        assert reference.basis is ReferenceBasis.DESCRIBED
+
+    def test_enum_fields_are_case_folded(self):
+        reference = LegalReference(locator_kind="PARAGRAPH", basis=" Cited ")
+
+        assert reference.locator_kind is LocatorKind.PARAGRAPH
+        assert reference.basis is ReferenceBasis.CITED
+
+    def test_legal_node_coerces_a_plain_dict_into_a_legal_reference(self):
+        node = LegalNode(
+            id="answer-p18-denial",
+            type="Denial",
+            description="Meridian denies paragraph 18 of the Complaint.",
+            responds_to_ref={
+                "document_hint": "the Complaint",
+                "locator_kind": "paragraph",
+                "locator_value": "18",
+                "basis": "cited",
+            },
+        )
+
+        assert isinstance(node.responds_to_ref, LegalReference)
+        assert node.responds_to_ref.document_hint == "the Complaint"
+        assert node.responds_to_ref.locator_kind is LocatorKind.PARAGRAPH
+        assert node.responds_to_ref.locator_value == "18"
+        assert node.responds_to_ref.basis is ReferenceBasis.CITED
+
+    def test_legal_node_defaults_the_ref_fields_to_none(self):
+        node = LegalNode(id="n1", type="Statement", description="d")
+
+        assert node.responds_to_ref is None
+        assert node.attributed_to_ref is None
 
 
 class TestPrompt:
@@ -328,6 +456,15 @@ class TestPrompt:
             'name "The audit identified falsified entries", statement_type statement, '
             "polarity negative" in prompt
         )
+
+    def test_prompt_asks_for_structured_references_not_composed_strings(self):
+        # The old rule manufactured a "Complaint ¶N" string; the new one asks for the
+        # structured LegalReference fields instead.
+        prompt = load_legal_extraction_prompt()
+        assert "Complaint ¶" not in prompt
+        assert "responds_to_ref" in prompt
+        assert "basis" in prompt
+        assert "positional" in prompt
 
 
 class TestForbiddenFieldNames:
