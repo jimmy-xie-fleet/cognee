@@ -199,14 +199,15 @@ async def run(args: argparse.Namespace) -> int:
     )
     from cognee.infrastructure.databases.relational import get_relational_engine
     from cognee.modules.data.models import Dataset
+    from cognee.modules.graph.utils.reference_resolution import (
+        parse_reference_hint,
+        reference_display_text,
+    )
+    from cognee.tasks.graph.reference_graph_view import DocumentTextCache, _load_graph_view
     from cognee.tasks.graph.resolve_assertion_references import (
         REFERENCE_FIELDS,
         REFERENCE_RESOLUTION_DATA_ID,
-        DocumentTextCache,
-        _load_graph_view,
-        parse_reference_hint,
         plan_resolutions,
-        reference_display_text,
         write_resolutions,
     )
 

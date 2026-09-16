@@ -39,7 +39,7 @@ async def main() -> int:
     from cognee.infrastructure.databases.graph import get_graph_engine
     from cognee.infrastructure.databases.relational import get_relational_engine
     from cognee.modules.data.models import Dataset
-    from cognee.tasks.graph.resolve_assertion_references import DOCUMENT_NODE_TYPES
+    from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES
     from sqlalchemy import select
 
     relational_engine = get_relational_engine()

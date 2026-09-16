@@ -40,11 +40,17 @@ from cognee.modules.graph.utils.reference_resolution import (
 )
 from cognee.modules.pipelines.models import PipelineContext
 from cognee.modules.pipelines.tasks.task import Task
+from cognee.tasks.graph.reference_graph_view import DOCUMENT_NODE_TYPES
 from cognee.tasks.graph.reference_tracer import TracerFinish, TracerStep, TracerToolCall
 from cognee.tasks.graph.reference_pass import (
     INFERRED_EDGE_FEEDBACK_WEIGHT,
     NOTE_FORCE_KEPT_PRIOR,
+    NOTE_LLM_ABSTAINED,
+    NOTE_LLM_BELOW_THRESHOLD,
+    NOTE_LLM_BUDGET_EXHAUSTED,
+    NOTE_LLM_CIRCUIT_BROKEN,
     NOTE_LLM_ESTIMATE_ONLY,
+    NOTE_LLM_ITERATION_CAP,
     NOTE_LLM_MALFORMED_STEP,
     NOTE_LLM_SELF_REFERENCE,
     NOTE_LLM_UNKNOWN_LABEL,
@@ -52,13 +58,7 @@ from cognee.tasks.graph.reference_pass import (
     UNSTATED_BASIS,
 )
 from cognee.tasks.graph.resolve_assertion_references import (
-    DOCUMENT_NODE_TYPES,
     NOTE_STALE_ID,
-    NOTE_LLM_ABSTAINED,
-    NOTE_LLM_BELOW_THRESHOLD,
-    NOTE_LLM_BUDGET_EXHAUSTED,
-    NOTE_LLM_CIRCUIT_BROKEN,
-    NOTE_LLM_ITERATION_CAP,
     REFERENCE_FIELDS,
     REFERENCE_RESOLUTION_DATA_ID,
     _touched_ids,
@@ -69,8 +69,8 @@ from cognee.tasks.graph.resolve_assertion_references import (
 from cognee.tests.unit.tasks.graph._reference_fakes import FakeVectorEngine, scored
 
 MODULE = "cognee.tasks.graph.resolve_assertion_references"
-# The trace pass lives in its own module (the task module imports its names back and
-# re-exports them), so a seam inside the pass has to be patched where the pass reads it.
+# The trace pass lives in its own module, so a seam inside the pass has to be patched
+# where the pass reads it.
 PASS = "cognee.tasks.graph.reference_pass"
 # ``cognee/tasks/graph/__init__.py`` re-exports the task function under its own module's
 # name, so the package attribute ``resolve_assertion_references`` is the *function*. The
@@ -552,6 +552,13 @@ def test_reference_fields_never_include_the_identity_field():
         "AudioDocument",
         "ImageDocument",
     )
+
+
+def test_the_pass_module_never_imports_the_task_module_back():
+    """The layering only works one way round: a cycle here would break every importer."""
+    source = import_module(PASS).__file__
+    with open(source, encoding="utf-8") as handle:
+        assert "resolve_assertion_references import" not in handle.read()
 
 
 # --------------------------------------------------------------------------- #
@@ -2065,7 +2072,7 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         document_by_chunk={},
         node_ids={"gone"},
     )
-    entry = resolve_module._Pending(
+    entry = pass_module._Pending(
         assertion_id="a1",
         field_name="responds_to",
         props={},
@@ -2076,7 +2083,7 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         stale=False,
         own_chunk_touched=True,
     )
-    answer = resolve_module._TraceAnswer(
+    answer = pass_module._TraceAnswer(
         finish=TracerFinish(candidate_label="D1", confidence=0.9, reason="r"),
         trace=(),
         iterations=1,
@@ -2085,7 +2092,7 @@ def test_a_picked_document_the_view_no_longer_holds_never_raises():
         capped=False,
     )
 
-    outcome = resolve_module._answer_to_outcome(entry, answer, view, threshold=0.6, counters={})
+    outcome = pass_module._answer_to_outcome(entry, answer, view, threshold=0.6, counters={})
 
     assert outcome.kind == "resolved"
     assert outcome.resolution.anchor_id == "gone"
