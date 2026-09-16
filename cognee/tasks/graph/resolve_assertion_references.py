@@ -558,8 +558,8 @@ async def plan_resolutions(
     ``touched`` restricts the pass to one ingestion: a reference is in scope when the
     assertion carrying it came from a touched chunk. A reference on an untouched
     statement is left to the whole-graph pass rather than traced and then discarded
-    (R26) -- a cheap answer that happens to name a touched document is still kept, so an
-    earlier document pointing at the one just ingested is recorded when it costs nothing.
+    (R26); an earlier document's reference to the one just ingested is resolved by the
+    whole-graph pass, not here.
 
     ``allow_llm=False`` stops after the entity-name step -- the ingest tail's contract,
     and the one setting under which the unstated inference never runs at all.

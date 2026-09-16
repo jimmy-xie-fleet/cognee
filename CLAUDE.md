@@ -873,7 +873,7 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
     stance-preserving `edge_text`, and — for `llm_trace`, the one `patch_mode="full"` strategy —
     the field rewritten to the resolved node id, the original wording kept in `<field>_text`,
     and the audit trail in `<field>_resolution`, which now also carries `reason`, `fingerprint`,
-    `iterations`, `max_iter` (only on a record that ran out of steps) and `trace` (one
+    `iterations`, `max_iter` (set only on a record that ran out of steps) and `trace` (one
     `{tool, args, result_preview, ok}` record per step). An abstain, an iteration cap or a
     below-threshold pick writes a `resolution_only` record — fingerprint and note, no field —
     so a field the extraction left null is never overwritten and a re-run over unchanged text
@@ -931,10 +931,11 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   sequentially (they share one mutable `CallBudget`), so a pass takes as long as its reference
   count; every trace costs at least one LLM call, and seed retrieval runs for every pending
   reference, including the ones the budget will never reach; a `finish` naming a label this trace
-  never issued is counted `llm_unknown_label` and treated as an abstain; `TracerStep.arguments`
-  is a `Dict[str, Any]`, which not every structured-output framework will emit a strict schema
-  for — under the default `litellm_native` with OpenAI the strict schema is rejected once per
-  process and demoted to non-strict `json_schema` with a WARNING, and under
+  never issued is counted `llm_unknown_label` and treated as an abstain;
+  `TracerToolCall.arguments` is a `Dict[str, Any]`, which not every structured-output framework
+  will emit a strict schema for — under the default `litellm_native` with OpenAI the strict
+  schema is rejected once per process and demoted to non-strict `json_schema` with a WARNING,
+  and under
   `STRUCTURED_OUTPUT_FRAMEWORK=baml` every tracer call fails outright, so the circuit breaks
   after three slots and the pass yields nothing; `locate_paragraph`'s marker regexes run only
   over document text, with a `(kind, value)` pair the model supplied —
@@ -955,7 +956,8 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   the only record that a reference was answered, which is what stops the next pass re-tracing it
   and re-emitting its edges, so a reference that *abstained* (no edge, and no record to store)
   is traced and paid for again on every pass, and a changed reference on an already-linked field
-  needs `force`; edges the memify pipeline writes are owned by the resolver's sentinel data id
+  needs `force` (so does a stated reference that later appears on a field an `llm_inferred` edge
+  already answers); edges the memify pipeline writes are owned by the resolver's sentinel data id
   (`REFERENCE_RESOLUTION_DATA_ID`),
   not the ingesting document, so they do not follow that document's `forget()`; there are no
   edge-evidence rows for resolved references; `update()` takes no `enrichment_tasks` parameter,
