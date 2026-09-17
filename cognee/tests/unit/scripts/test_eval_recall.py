@@ -1999,3 +1999,59 @@ def test_judge_only_into_a_new_directory_copies_the_manifest(tmp_path, monkeypat
 
     assert code == 0
     assert json.loads((destination / lib.MANIFEST_FILENAME).read_text()) == {"label": "server=main"}
+
+
+def test_run_judge_overlaps_calls_up_to_the_concurrency_bound(monkeypatch):
+    """Four verdicts in flight at once; the returned list keeps input order."""
+    in_flight = {"now": 0, "peak": 0}
+
+    async def slow_judge(row, question, read_prompt=None, render_prompt=None):
+        in_flight["now"] += 1
+        in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        await asyncio.sleep(0.01)
+        in_flight["now"] -= 1
+        return lib.JudgeVerdict(gold_facts_covered=[1], gold_facts_missed=[2])
+
+    monkeypatch.setattr(lib, "judge_answer", slow_judge)
+    rows = [answer_row(f"q{i}") for i in range(6)]
+    questions = [make_question(f"q{i}") for i in range(6)]
+    seen: list[str] = []
+
+    verdicts = asyncio.run(
+        lib.run_judge(rows, questions, on_row=lambda v: seen.append(v.question_id), concurrency=4)
+    )
+
+    assert [v.question_id for v in verdicts] == [f"q{i}" for i in range(6)]  # input order kept
+    assert sorted(seen) == [f"q{i}" for i in range(6)]
+    assert in_flight["peak"] == 4
+
+
+def test_run_judge_with_concurrency_one_is_sequential(monkeypatch):
+    in_flight = {"now": 0, "peak": 0}
+
+    async def slow_judge(row, question, read_prompt=None, render_prompt=None):
+        in_flight["now"] += 1
+        in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        await asyncio.sleep(0.005)
+        in_flight["now"] -= 1
+        return lib.JudgeVerdict(gold_facts_covered=[1], gold_facts_missed=[2])
+
+    monkeypatch.setattr(lib, "judge_answer", slow_judge)
+    rows = [answer_row(f"q{i}") for i in range(3)]
+    questions = [make_question(f"q{i}") for i in range(3)]
+
+    asyncio.run(lib.run_judge(rows, questions, concurrency=1))
+
+    assert in_flight["peak"] == 1
+
+
+def test_the_cli_rejects_a_judge_concurrency_below_one(tmp_path, capsys):
+    path = write_question_file(tmp_path, question_document())
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            ["--judge-only", str(tmp_path), "--questions", str(path), "--judge-concurrency", "0"]
+        )
+
+    assert excinfo.value.code == 2
+    assert "judge-concurrency" in capsys.readouterr().err

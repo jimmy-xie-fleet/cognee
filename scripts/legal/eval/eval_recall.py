@@ -125,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--judge-concurrency",
+        type=int,
+        default=4,
+        help="Judge calls in flight at once (default 4; 1 = one verdict at a time).",
+    )
+    parser.add_argument(
         "--spot-check",
         type=float,
         default=0.0,
@@ -336,6 +342,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--judge-only with --no-judge would do nothing at all")
     if not 0.0 <= args.spot_check <= 1.0:
         parser.error(f"--spot-check must be a fraction in [0, 1], not {args.spot_check}")
+    if args.judge_concurrency < 1:
+        parser.error("--judge-concurrency must be at least 1")
+
     if args.top_k < 1:
         parser.error(f"--top-k must be at least 1, not {args.top_k}")
 
@@ -476,7 +485,11 @@ def main(argv: list[str] | None = None) -> int:
         report_verdict = _verdict_reporter(
             len(pending), run_directory / lib.PARTIAL_VERDICTS_FILENAME
         )
-        fresh = asyncio.run(lib.run_judge(pending, questions, on_row=report_verdict))
+        fresh = asyncio.run(
+            lib.run_judge(
+                pending, questions, on_row=report_verdict, concurrency=args.judge_concurrency
+            )
+        )
         verdict_rows = lib.merge_verdict_rows(existing_verdicts, fresh, answer_rows)
         backup = args.resume and run_directory == Path(args.resume)
         if backup:

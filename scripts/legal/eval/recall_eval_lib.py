@@ -21,6 +21,7 @@ directory.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -1213,17 +1214,24 @@ async def run_judge(
     read_prompt: Callable[[str], str] = _default_read_prompt,
     render_prompt: Callable[[str, dict], str] = _default_render_prompt,
     on_row: Optional[Callable[[VerdictRow], None]] = None,
+    concurrency: int = 1,
 ) -> list[VerdictRow]:
     """Grade every answer row.
 
     An answer row that already failed is not sent to the judge - there is nothing
     to grade - but it still produces a verdict row so the ``n`` and ``errors``
     columns of the report agree with the matrix that was attempted.
+
+    ``concurrency`` bounds how many judge calls are in flight at once. A verdict is
+    a minute of LLM time on a long context, so a 200-row run judged one at a time
+    is a three-hour pass; the calls are independent, so four at a time cuts that to
+    under an hour without changing a single verdict. ``on_row`` fires as each
+    verdict lands (journal order), while the returned list keeps the input order.
     """
     by_id = {question.id: question for question in questions}
-    verdicts: list[VerdictRow] = []
+    gate = asyncio.Semaphore(max(1, int(concurrency)))
 
-    for row in rows:
+    async def grade(row: AnswerRow) -> VerdictRow:
         question = by_id.get(row.question_id)
         if question is None:
             out = verdict_row(row, JudgeVerdict())
@@ -1240,19 +1248,21 @@ async def run_judge(
             )
             out.coverage = None
         else:
-            try:
-                verdict = await judge_answer(
-                    row, question, read_prompt=read_prompt, render_prompt=render_prompt
-                )
-                out = verdict_row(row, verdict, question)
-            except Exception as error:  # noqa: BLE001 - recorded, not raised
-                out = verdict_row(row, JudgeVerdict(), question)
-                out.coverage = None
-                out.error = f"judge: {type(error).__name__}: {error}"
-        verdicts.append(out)
+            async with gate:
+                try:
+                    verdict = await judge_answer(
+                        row, question, read_prompt=read_prompt, render_prompt=render_prompt
+                    )
+                    out = verdict_row(row, verdict, question)
+                except Exception as error:  # noqa: BLE001 - recorded, not raised
+                    out = verdict_row(row, JudgeVerdict(), question)
+                    out.coverage = None
+                    out.error = f"judge: {type(error).__name__}: {error}"
         if on_row is not None:
             on_row(out)
-    return verdicts
+        return out
+
+    return list(await asyncio.gather(*(grade(row) for row in rows)))
 
 
 # --------------------------------------------------------------------------------------

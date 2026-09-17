@@ -137,6 +137,7 @@ environment and from `.env`; fix it and `--resume` the run.
 | `--judge-only RUN_DIR` | - | Re-grade a finished run's `answers.jsonl`; no search calls. |
 | `--resume RUN_DIR` | - | Re-run only that run's failed rows; re-judge only what changed. |
 | `--spot-check 0.2` | `0` | Print a seeded sample of verdicts for hand review (must be in [0, 1]). |
+| `--judge-concurrency N` | `4` | Judge calls in flight at once; `1` grades one row at a time. Verdicts are independent, so this only changes wall-clock time. |
 | `--seed N` | `0` | Seed for that sample. |
 | `--label TEXT` | - | Free text for the manifest, e.g. the server's code version. |
 | `--validate-only` | off | Validate the question files and exit. |
