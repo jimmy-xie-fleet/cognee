@@ -1018,24 +1018,29 @@ Still open: statement ids are not part of `extract_context_object_ids`, access t
 
 #### Retrieval budgets
 
-Hybrid and graph-completion recall over a legal graph needs to feed the LLM as much
-relevant context as the plain graph gets — richer graphs (assertions, pair edges,
-statements) get truncated by the same lane sizes a plain-entity graph uses otherwise.
-Lane sizes are per-request (`retriever_specific_config`), but that dict is not reachable
-over HTTP, so a UI can never raise them; `RetrievalConfig`
-(`cognee/modules/retrieval/config.py`) makes the defaults tunable by env instead. An
-explicit `retriever_specific_config` value always wins over the config; the config's
-default wins over the request's own `top_k`.
+Hybrid recall over a legal graph needs to feed the LLM as much relevant context as the
+plain graph gets — richer graphs (assertions, pair edges, statements) get truncated by the
+same lane sizes a plain-entity graph uses otherwise (measured: 15.7k characters of hybrid
+context on the legal graph against 57.7k on a plain graph of the same corpus). Lane sizes
+are per-request (`retriever_specific_config`), but that dict is not reachable over HTTP,
+so a UI can never raise them; `RetrievalConfig` (`cognee/modules/retrieval/config.py`)
+makes them tunable by env instead. The knobs are **opt-in**: resolution is (1) an explicit
+`retriever_specific_config` value, else (2) a *set* env budget, which replaces the
+request's `top_k` outright (not a ceiling), else (3) the request's own `top_k` capped at
+10 — so with nothing set a default search is byte-identical to the pre-config behaviour.
+An empty `HYBRID_CHUNKS_TOP_K=` is a startup error, not "unset". Raising the four lane
+knobs is a cost decision too: every hybrid completion in the deployment pays for the
+bigger context.
 
-| Env var | Field | Default |
-|---|---|---|
-| `HYBRID_CHUNKS_TOP_K` | `hybrid_chunks_top_k` | 30 |
-| `HYBRID_ENTITIES_TOP_K` | `hybrid_entities_top_k` | 30 |
-| `HYBRID_FACTS_TOP_K` | `hybrid_facts_top_k` | 30 |
-| `HYBRID_STATEMENTS_TOP_K` | `hybrid_statements_top_k` | 20 |
-| `HYBRID_MAX_EDGES_PER_ENTITY` | `hybrid_max_edges_per_entity` | 20 |
-| `DISPUTES_TOP_K` | `disputes_top_k` | 50 |
-| `GRAPH_COMPLETION_PAIR_EXPANSION` | `graph_completion_pair_expansion` | `true` |
+| Env var | Field | Default | Legal-graph eval used |
+|---|---|---|---|
+| `HYBRID_CHUNKS_TOP_K` | `hybrid_chunks_top_k` | unset (request `top_k`, cap 10) | 30 |
+| `HYBRID_ENTITIES_TOP_K` | `hybrid_entities_top_k` | unset (request `top_k`, cap 10) | 30 |
+| `HYBRID_FACTS_TOP_K` | `hybrid_facts_top_k` | unset (request `top_k`, cap 10) | 30 |
+| `HYBRID_MAX_EDGES_PER_ENTITY` | `hybrid_max_edges_per_entity` | 10 | 20 |
+| `HYBRID_STATEMENTS_TOP_K` | `hybrid_statements_top_k` | 20 | 20 |
+| `DISPUTES_TOP_K` | `disputes_top_k` | 50 | 50 |
+| `GRAPH_COMPLETION_PAIR_EXPANSION` | `graph_completion_pair_expansion` | `true` | `true` |
 
 `graph_completion_pair_expansion` gates the assertion pair-expansion described above
 (`cognee/modules/retrieval/utils/assertion_pairs.py`) — set it `false` to render an

@@ -40,9 +40,9 @@ from cognee.modules.retrieval.skills_retriever import SkillsRetriever
 from cognee.context_global_variables import session_user
 
 
-# Lane key -> the RetrievalConfig field that carries its env-configurable default
-# (Task 7). Keys not listed here (e.g. max_edges_per_entity) are resolved directly
-# against their own config field, with no request-top_k tier.
+# Lane key -> the RetrievalConfig field that carries its env-configurable budget.
+# Keys not listed here (e.g. max_edges_per_entity) are resolved directly against
+# their own config field, with no request-top_k tier.
 _HYBRID_LANE_CONFIG_FIELDS = {
     "chunks_top_k": "hybrid_chunks_top_k",
     "entities_top_k": "hybrid_entities_top_k",
@@ -55,8 +55,8 @@ def _hybrid_lane_top_k(config: dict, key: str, search_top_k: int | None) -> int 
     """Resolve a hybrid lane budget: explicit request -> RetrievalConfig -> request top_k.
 
     1. An explicit `retriever_specific_config[key]` always wins and is not capped.
-    2. Otherwise the matching `RetrievalConfig` field (env-configurable, raised default)
-       is used, when set.
+    2. Otherwise the matching `RetrievalConfig` field is used, when an operator set it
+       (the request lanes default to None, so this tier is opt-in).
     3. Only when neither is available does the request's own `top_k` apply, capped at
        `DEFAULT_HYBRID_LANE_TOP_K` so an uncapped request doesn't blow out the lane
        (unchanged from before RetrievalConfig existed). `None` is left unset so the

@@ -1,11 +1,11 @@
-"""RetrievalConfig: env-backed recall lane budgets (Task 7).
+"""RetrievalConfig: env-backed recall lane budgets.
 
-Effectiveness over efficiency (user decision) -- the legal graph starved hybrid
-recall of context because lane sizes were hard-coded per request and
-``retriever_specific_config`` is not reachable over HTTP, so the UI could never
-raise them. These tests only exercise the settings object: defaults, env
-overrides, and the ``to_dict`` shape. No LLM, vector store, graph backend, or
-network is touched.
+The legal graph starved hybrid recall of context because lane sizes were
+hard-coded per request and ``retriever_specific_config`` is not reachable over
+HTTP, so the UI could never raise them. The knobs are opt-in: unset, a default
+search behaves exactly as before the config existed. These tests only exercise
+the settings object: defaults, env overrides, and the ``to_dict`` shape. No LLM,
+vector store, graph backend, or network is touched.
 """
 
 import pytest
@@ -21,14 +21,15 @@ def clear_retrieval_config_cache():
     get_retrieval_config.cache_clear()
 
 
-def test_defaults_are_the_raised_lane_budgets():
+def test_defaults_leave_the_request_lanes_unset():
+    """Unset means "the request's top_k, capped at 10" -- the pre-config behaviour."""
     config = RetrievalConfig()
 
-    assert config.hybrid_chunks_top_k == 30
-    assert config.hybrid_entities_top_k == 30
-    assert config.hybrid_facts_top_k == 30
+    assert config.hybrid_chunks_top_k is None
+    assert config.hybrid_entities_top_k is None
+    assert config.hybrid_facts_top_k is None
     assert config.hybrid_statements_top_k == 20
-    assert config.hybrid_max_edges_per_entity == 20
+    assert config.hybrid_max_edges_per_entity == 10
     assert config.disputes_top_k == 50
     assert config.graph_completion_pair_expansion is True
 
@@ -95,11 +96,20 @@ def test_to_dict_reports_every_field():
     config = RetrievalConfig()
 
     assert config.to_dict() == {
-        "hybrid_chunks_top_k": 30,
-        "hybrid_entities_top_k": 30,
-        "hybrid_facts_top_k": 30,
+        "hybrid_chunks_top_k": None,
+        "hybrid_entities_top_k": None,
+        "hybrid_facts_top_k": None,
         "hybrid_statements_top_k": 20,
-        "hybrid_max_edges_per_entity": 20,
+        "hybrid_max_edges_per_entity": 10,
         "disputes_top_k": 50,
         "graph_completion_pair_expansion": True,
     }
+
+
+@pytest.mark.parametrize("env_name", ["HYBRID_CHUNKS_TOP_K", "HYBRID_ENTITIES_TOP_K"])
+def test_an_empty_budget_variable_is_an_error_not_unset(monkeypatch, env_name):
+    """``HYBRID_CHUNKS_TOP_K=`` is not "leave the lane alone"; leave the variable out."""
+    monkeypatch.setenv(env_name, "")
+
+    with pytest.raises(ValidationError):
+        RetrievalConfig()
