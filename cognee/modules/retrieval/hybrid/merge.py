@@ -20,6 +20,7 @@ def merge_hybrid_results(
     chunks_limit: int,
     entities_limit: int,
     facts_limit: int,
+    statements_limit: Optional[int] = None,
 ) -> dict:
     """Merge each hybrid channel while preserving the result shape and its budgets."""
     primary = primary or {}
@@ -49,6 +50,27 @@ def merge_hybrid_results(
         key: value for key, value in primary.items() if key not in _DERIVED_KEYS
     }
     merged.update(channels)
+
+    # ``statements`` is merged like every other channel, but it cannot be one of the
+    # channels above: the lane sets the key only when it found something, so it is absent
+    # from ``empty_hybrid_result`` and would otherwise ride through as an unowned primary
+    # key. That matters on the default concurrent session path, which retrieves twice -- the
+    # conversational rewrite is the lane that understands "and what did he say about it", so
+    # taking the primary's list wholesale discarded the statement the follow-up turn was
+    # asking about. A raw lane that raised arrives here as ``None`` outright.
+    #
+    # ``statements_limit`` is optional rather than required like the others because the
+    # default belongs to the retriever and importing it here would close an import cycle;
+    # no limit means no cap. Either way the key still does not appear when neither lane
+    # found anything.
+    statements = merge_ranked(
+        primary.get("statements"),
+        secondary.get("statements"),
+        limit=statements_limit,
+        secondary_reserve=conversational_reserve(statements_limit),
+    )
+    if statements:
+        merged["statements"] = statements
 
     chunk_ids = [chunk_id for chunk in channels["chunks"] if (chunk_id := result_id(chunk))]
     primary_summaries = primary.get("chunk_summaries", {})

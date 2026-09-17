@@ -267,7 +267,7 @@ Available search types (from `cognee/modules/search/types/SearchType.py`), passe
 - **CODING_RULES** - Code-specific search rules
 - **SKILLS** - Semantic discovery of skill playbooks (metadata-only, no LLM; requires exactly one dataset)
 
-`recall()` picks one of these automatically when `query_type` is omitted. The CLI is narrower: `cognee-cli recall --query-type` accepts only the choices in `cognee/cli/config.py:SEARCH_TYPE_CHOICES` and defaults to `HYBRID_COMPLETION`; the rest are SDK-only.
+`recall()` picks one of these automatically when `query_type` is omitted. Hybrid and graph-completion lane sizes are env-tunable — see "Retrieval budgets" under the Legal Extraction Profile. The CLI is narrower: `cognee-cli recall --query-type` accepts only the choices in `cognee/cli/config.py:SEARCH_TYPE_CHOICES` and defaults to `HYBRID_COMPLETION`; the rest are SDK-only.
 
 Key files:
 - `cognee/api/v1/search/search.py`
@@ -799,7 +799,9 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   with identical wording, and are never merged across speakers, statement types, or chunks;
   an omitted polarity is stored as `unknown`, never assumed positive.
 - **Search**: assertions are embedded in the `Assertion_name` vector collection, separate from
-  `Entity_name`.
+  `Entity_name`. Recall renders them with their stance and pulls in the statements they answer
+  — see "Recall over assertions" below; `DISPUTES` reads the graph's denial→allegation structure
+  directly.
 - **Explicit kwargs, no env var** — there is no global switch; every call that wants legal
   extraction must splat `legal_profile()` in.
 - **`improve()` covers assertions**: with `TRIPLET_EMBEDDING=true` its default enrichment
@@ -918,11 +920,8 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   a node typed `Terms` or `Companies` grounds to nothing (`Term`/`Company` do), and the
   enum-constrained `statement_type` still drives the assertion property, so only the OWL `is_a`
   link is lost; speaker context is resolved per chunk, not across the whole document;
-  `HYBRID_COMPLETION` searches `Entity_name` only, so it misses assertions unless paired with a
-  search type that also queries `Assertion_name`; relationship names (e.g. `asserted_by`,
-  `supersedes`) are not ontology-grounded, only node types are; `polarity` and
-  `statement_type` are not projected into retrieval contexts today — the stance reaches a
-  completion through derived-edge text and descriptions, not as fields; `update()` takes
+  relationship names (e.g. `asserted_by`, `supersedes`) are not ontology-grounded, only node
+  types are; `update()` takes
   `graph_model`/`custom_prompt` but has no `config` or `chunk_size` parameter, so editing a
   document ingested with the profile re-extracts it without the ontology and at the default
   chunk size; `remember(session_id=…)` rejects the profile outright (session memory is bridged
@@ -969,6 +968,97 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   several allegations; and because the tail is LLM-free, **every** cross-document reference —
   not only a bulk load's earliest documents — needs one
   `resolve_references_pipeline(dataset=…)` pass after ingestion.
+
+#### Recall over assertions
+
+`Assertion.name` is the proposition phrased affirmatively, so a renderer that prints only
+`name` + `description` shows a denial as the fact it denies — which is how an early legal graph
+"found" a contradiction the documents never contained. Three retrieval changes close that gap;
+all three are no-ops on a graph without assertions, with one deliberate exception to the plain
+rendering: the graph projection is a whitelist that fills every key it asks for, so a node type
+with no `description` field (a `Document`, a `NodeSet`) used to render the literal `None` as its
+body, and a nameless one used to title itself `None`. Those now render the node's name and
+`Unnamed Node`. Everything else is byte-identical, and the golden tests pin it.
+
+- **Stance-aware rendering.** One shared renderer, `node_context_text`
+  (`cognee/modules/graph/utils/node_context_text.py`), is used by `resolve_edges_to_text` (the
+  `GRAPH_COMPLETION` family) and by the hybrid entity/statement blocks. An assertion renders as
+  `[<statement_type>] <speaker> <stance verb> <proposition>` — the headline *is* the stance
+  sentence, built from the same verb table the resolver's edge texts use (`[denial] Defendants
+  denies that Adams breached the lease`; `polarity=unknown` reads "takes an unrecorded stance
+  on"). An earlier format tagged the stance and printed the bare proposition after it, and the
+  eval showed the model reading that proposition as the node's claim and reporting the quote
+  denying it as a contradiction; nothing skimmable may state the affirmative proposition on its
+  own. The body repeats the stance sentence, then the verbatim `source_quote` with
+  its `(verified)` mark, then `Responds to: <responds_to_text>` / `Attributed to:
+  <attributed_to_text>` (the reference as the document wrote it, e.g. `the Complaint ¶17` —
+  printed whether or not a resolver pass has turned it into an edge, because a responsive
+  pleading's assertion is often *only* "the allegations of paragraph 17 are true" and the
+  locator is what says which statement is answered), then the description. A nameless node
+  that carries `text` (a `DocumentChunk` a paragraph reference was anchored on) is labelled
+  by its first words in pair lines and edge bullets, never by its id. The fields reach the
+  renderer because a `DataPoint` subclass may declare `metadata["context_fields"]` —
+  `Assertion` declares `statement_type`, `polarity`, `asserted_by`, `source_quote`,
+  `source_quote_verified`, `responds_to_text`, `attributed_to_text` — and
+  `get_memory_fragment` unions every subclass's context fields into the graph projection
+  (`brute_force_triplet_search.py`, `default_node_properties_to_project()`); edges also project
+  `resolution_confidence` and `resolution_strategy`. Because that union is global rather than
+  per-node-type, the assertion fields are projected onto *every* node — carrying `None` on the
+  ones that do not declare them — so they show up as null keys on plain nodes in
+  `objects_result` and in `search(verbose=True)` responses.
+- **Pair expansion.** After the lane merge, `GraphCompletionRetriever.resolve_edges_to_text`
+  calls `expand_assertion_pairs` (`cognee/modules/retrieval/utils/assertion_pairs.py`): one
+  `get_neighborhood(depth=1, edge_types=["responds_to", "attributed_to", "asserted_by"])` call
+  over the retrieved assertions, keeping only edges that touch a retrieved one, so a retrieved
+  denial brings the allegation it answers and its speaker into the context. Pair edges are
+  context-only: they are not in the evidence ids, and the agentic `memory_search` tool, which
+  calls the module-level renderer, does not get them. Gate: `GRAPH_COMPLETION_PAIR_EXPANSION`.
+- **Hybrid statements lane.** `HYBRID_COMPLETION` searches `Assertion_name` as a fourth lane
+  (`cognee/modules/retrieval/hybrid/statements.py`) and renders a `## Relevant statements`
+  section between the passages and the entities: one stance-aware block per hit, then
+  `↳ responds to: …`, `↳ answered by: …`, `↳ speaker: …` lines from the same pair expansion, in a
+  fixed relationship order. A dataset without an `Assertion_name` collection grows no section
+  and no result key. Under a NodeSet-scoped search a counterpart outside the scope is dropped
+  (untagged counts as outside, like the entity lane); in concurrent session mode both lanes
+  contribute statements through `merge_ranked`, primary first, under the same budget and
+  conversational reserve the other lanes use. Budget: `HYBRID_STATEMENTS_TOP_K` (default 20).
+
+Still open: statement ids are not part of `extract_context_object_ids`, access tracking or
+`include_references`, so per-turn feedback cannot attribute a rendered statement;
+`TRIPLET_COMPLETION` has no assertion pairing; and the legal extraction prompt still lets a
+responsive pleading's assertion be the positional proposition ("the allegations of paragraph
+17 of the complaint are true") rather than the substantive one — retrieval renders the locator,
+but only an ingestion change can put the answered claim in the assertion itself.
+
+#### Retrieval budgets
+
+Hybrid recall over a legal graph needs to feed the LLM as much relevant context as the
+plain graph gets — richer graphs (assertions, pair edges, statements) get truncated by the
+same lane sizes a plain-entity graph uses otherwise (measured: 15.7k characters of hybrid
+context on the legal graph against 57.7k on a plain graph of the same corpus). Lane sizes
+are per-request (`retriever_specific_config`), but that dict is not reachable over HTTP,
+so a UI can never raise them; `RetrievalConfig` (`cognee/modules/retrieval/config.py`)
+makes them tunable by env instead. The knobs are **opt-in**: resolution is (1) an explicit
+`retriever_specific_config` value, else (2) a *set* env budget, which replaces the
+request's `top_k` outright (not a ceiling), else (3) the request's own `top_k` capped at
+10 — so with nothing set a default search is byte-identical to the pre-config behaviour.
+An empty `HYBRID_CHUNKS_TOP_K=` is a startup error, not "unset". Raising the four lane
+knobs is a cost decision too: every hybrid completion in the deployment pays for the
+bigger context.
+
+| Env var | Field | Default | Legal-graph eval used |
+|---|---|---|---|
+| `HYBRID_CHUNKS_TOP_K` | `hybrid_chunks_top_k` | unset (request `top_k`, cap 10) | 30 |
+| `HYBRID_ENTITIES_TOP_K` | `hybrid_entities_top_k` | unset (request `top_k`, cap 10) | 30 |
+| `HYBRID_FACTS_TOP_K` | `hybrid_facts_top_k` | unset (request `top_k`, cap 10) | 30 |
+| `HYBRID_MAX_EDGES_PER_ENTITY` | `hybrid_max_edges_per_entity` | 10 | 20 |
+| `HYBRID_STATEMENTS_TOP_K` | `hybrid_statements_top_k` | 20 | 20 |
+| `DISPUTES_TOP_K` | `disputes_top_k` | 50 | 50 |
+| `GRAPH_COMPLETION_PAIR_EXPANSION` | `graph_completion_pair_expansion` | `true` | `true` |
+
+`graph_completion_pair_expansion` gates the assertion pair-expansion described above
+(`cognee/modules/retrieval/utils/assertion_pairs.py`) — set it `false` to render an
+assertion without pulling in the statement it answers.
 
 ### Skills (Procedural Memory)
 Dataset-scoped `SKILL.md` playbooks agents can discover, load on demand, execute, and improve from run history.

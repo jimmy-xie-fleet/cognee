@@ -235,9 +235,25 @@ async def test_hybrid_completion_retriever_receives_config():
     assert retriever_instance.facts_top_k == 4
 
 
+@pytest.fixture(autouse=True)
+def _clear_retrieval_config_cache():
+    from cognee.modules.retrieval.config import get_retrieval_config
+
+    get_retrieval_config.cache_clear()
+    yield
+    get_retrieval_config.cache_clear()
+
+
 @pytest.mark.asyncio
-async def test_hybrid_completion_caps_default_channel_limits():
+async def test_hybrid_completion_falls_back_to_request_top_k_capped_at_10(monkeypatch):
+    """With no lane budget set in the environment, a default search behaves exactly as
+    it did before RetrievalConfig existed: each request lane is the request's top_k,
+    capped at DEFAULT_HYBRID_LANE_TOP_K. The statements lane and the per-entity edge cap
+    carry their own defaults."""
     import cognee.modules.search.methods.get_search_type_retriever_instance as mod
+
+    for name in ("HYBRID_CHUNKS_TOP_K", "HYBRID_ENTITIES_TOP_K", "HYBRID_FACTS_TOP_K"):
+        monkeypatch.delenv(name, raising=False)
 
     retriever_instance = await mod.get_search_type_retriever_instance(
         SearchType.HYBRID_COMPLETION,
@@ -251,12 +267,19 @@ async def test_hybrid_completion_caps_default_channel_limits():
     assert retriever_instance.text_summaries_top_k is None
     assert retriever_instance.use_importance_weight is True
     assert retriever_instance.facts_top_k == 10
+    assert retriever_instance.statements_top_k == 20
+    assert retriever_instance.max_edges_per_entity == 10
     assert retriever_instance.include_references is False
 
 
 @pytest.mark.asyncio
-async def test_hybrid_completion_leaves_lane_defaults_when_top_k_is_none():
+async def test_hybrid_completion_with_no_top_k_uses_the_retriever_defaults(monkeypatch):
+    """No request top_k and no env budget: the lane is left unset and the retriever's own
+    constructor default (5) applies."""
     import cognee.modules.search.methods.get_search_type_retriever_instance as mod
+
+    for name in ("HYBRID_CHUNKS_TOP_K", "HYBRID_ENTITIES_TOP_K", "HYBRID_FACTS_TOP_K"):
+        monkeypatch.delenv(name, raising=False)
 
     retriever_instance = await mod.get_search_type_retriever_instance(
         SearchType.HYBRID_COMPLETION,
@@ -267,11 +290,16 @@ async def test_hybrid_completion_leaves_lane_defaults_when_top_k_is_none():
     assert retriever_instance.chunks_top_k == 5
     assert retriever_instance.entities_top_k == 5
     assert retriever_instance.facts_top_k == 5
+    assert retriever_instance.statements_top_k == 20
 
 
 @pytest.mark.asyncio
-async def test_hybrid_completion_keeps_search_top_k_when_below_lane_cap():
+async def test_hybrid_completion_small_request_top_k_is_not_raised(monkeypatch):
+    """A caller asking for five gets five; nothing widens the lanes behind its back."""
     import cognee.modules.search.methods.get_search_type_retriever_instance as mod
+
+    for name in ("HYBRID_CHUNKS_TOP_K", "HYBRID_ENTITIES_TOP_K", "HYBRID_FACTS_TOP_K"):
+        monkeypatch.delenv(name, raising=False)
 
     retriever_instance = await mod.get_search_type_retriever_instance(
         SearchType.HYBRID_COMPLETION,
@@ -282,6 +310,51 @@ async def test_hybrid_completion_keeps_search_top_k_when_below_lane_cap():
     assert retriever_instance.chunks_top_k == 5
     assert retriever_instance.entities_top_k == 5
     assert retriever_instance.facts_top_k == 5
+
+
+@pytest.mark.asyncio
+async def test_hybrid_completion_env_budget_replaces_the_request_top_k(monkeypatch):
+    """A set env budget is the second tier: it replaces the request top_k outright --
+    not merely a ceiling -- so an operator who set 30 gets 30 even when the request
+    asked for five. The other two lanes, left unset, keep the request behaviour."""
+    import cognee.modules.search.methods.get_search_type_retriever_instance as mod
+    from cognee.modules.retrieval.config import get_retrieval_config
+
+    monkeypatch.setenv("HYBRID_CHUNKS_TOP_K", "30")
+    monkeypatch.setenv("HYBRID_MAX_EDGES_PER_ENTITY", "20")
+    for name in ("HYBRID_ENTITIES_TOP_K", "HYBRID_FACTS_TOP_K"):
+        monkeypatch.delenv(name, raising=False)
+    get_retrieval_config.cache_clear()
+
+    retriever_instance = await mod.get_search_type_retriever_instance(
+        SearchType.HYBRID_COMPLETION,
+        query_text="q",
+        top_k=5,
+    )
+
+    assert retriever_instance.chunks_top_k == 30
+    assert retriever_instance.max_edges_per_entity == 20
+    assert retriever_instance.entities_top_k == 5
+    assert retriever_instance.facts_top_k == 5
+
+
+@pytest.mark.asyncio
+async def test_hybrid_completion_explicit_config_beats_the_env_budget(monkeypatch):
+    """First tier: an explicit retriever_specific_config value wins over a set env budget."""
+    import cognee.modules.search.methods.get_search_type_retriever_instance as mod
+    from cognee.modules.retrieval.config import get_retrieval_config
+
+    monkeypatch.setenv("HYBRID_CHUNKS_TOP_K", "30")
+    get_retrieval_config.cache_clear()
+
+    retriever_instance = await mod.get_search_type_retriever_instance(
+        SearchType.HYBRID_COMPLETION,
+        query_text="q",
+        top_k=5,
+        retriever_specific_config={"chunks_top_k": 7},
+    )
+
+    assert retriever_instance.chunks_top_k == 7
 
 
 @pytest.mark.asyncio

@@ -20,11 +20,12 @@ deployment as an agent would see it.
 | `eval_recall.py` | The CLI. Import-light: `--help` never imports cognee. |
 | `recall_eval_lib.py` | The logic (question files, HTTP, judge, report). Unit tested. |
 | `*_questions.json` | One question set per corpus. |
-| `runs/<UTC timestamp>/` | Per-run output: `run.json`, `answers.jsonl`, `verdicts.jsonl`, `report.md`, and the crash journals. Git-ignored. |
+| `runs/<UTC timestamp>/` | Per-run output: `run.json`, `answers.jsonl`, `verdicts.jsonl`, `report.md`, `attribution.jsonl` (with `--attribute` / `--analyze`), and the crash journals. A `--repeats` run holds `repeat-<i>/` children plus a pooled `report.md`. Git-ignored. |
 
 The judge prompts live with the other cognee prompts:
 `cognee/infrastructure/llm/prompts/eval_judge_system.txt` and
-`eval_judge_user.txt`.
+`eval_judge_user.txt`; the miss-attribution grader's are `eval_attribution_system.txt`
+and `eval_attribution_user.txt` next to them.
 
 Tests: `cognee/tests/unit/scripts/test_eval_recall.py` (no network, no LLM, no
 `~/.cognee`).
@@ -141,6 +142,10 @@ environment and from `.env`; fix it and `--resume` the run.
 | `--seed N` | `0` | Seed for that sample. |
 | `--label TEXT` | - | Free text for the manifest, e.g. the server's code version. |
 | `--validate-only` | off | Validate the question files and exit. |
+| `--repeats N` | `1` | Run the whole matrix N times into `RUN_DIR/repeat-<i>/` on fresh sessions and report the mean and spread per dataset x search type. See "Repeats". |
+| `--attribute` | off | After judging, attribute every missed gold fact to retrieval or generation (one extra LLM call per cell with misses). See "Miss attribution". |
+| `--analyze RUN_DIR` | - | Run miss attribution on a finished, judged run; no search calls. Writes `attribution.jsonl` and re-renders `report.md` in place. |
+| `--per-question` | off | Add a per-question table (one line per graded cell) to the report. |
 
 `AUTO` is not a `SearchType`: it posts to `/api/v1/recall` with
 `search_type: null` and lets the router choose. Everything else posts to
@@ -222,6 +227,67 @@ Under the table is an error histogram by class:
 `--spot-check 0.2` prints a seeded 20% of verdicts with question, gold facts,
 answer and verdict. Read them. The judge is an LLM and a coverage number you
 have never sanity-checked by hand is not evidence.
+
+Under the main table the report always adds a `## By category` table: the same
+columns per dataset x search type x question category, so a five-point move on
+the main table can be traced to the disputes questions or the timeline
+questions. `--per-question` adds the raw grid under it.
+
+### Repeats
+
+One run of a 19-question set graded by an LLM is one draw, and both the
+answering model and the judge are nondeterministic. A delta between two
+branches is a result only if it is larger than the spread between two runs of
+the *same* branch. `--repeats 3` answers and judges the whole matrix three
+times, each into `RUN_DIR/repeat-<i>/` with its own manifest, answers, verdicts
+and report, on sessions namespaced per repeat so no two repeats share one. The
+parent `RUN_DIR/report.md` then carries the pooled main table plus a
+`## Repeats` table:
+
+| column | meaning |
+| --- | --- |
+| `coverage mean` | mean of the per-repeat mean coverages |
+| `stdev` | sample standard deviation of those means, in percentage points |
+| `min` / `max` | the lowest and highest repeat |
+| `wrong / run` etc. | the claim counts averaged per repeat, so they stay comparable to a single run's table |
+
+Rule of thumb: a delta smaller than about two `stdev` is the noise floor, not a
+change. `--repeats` needs a fresh, empty `--out`, and needs the judge (it
+measures graded coverage), so it cannot be combined with `--no-judge`,
+`--judge-only` or `--resume`.
+
+### Miss attribution
+
+Coverage says how many gold facts the answer missed; it does not say why. A
+missed fact was either never retrieved (the context the answer was generated
+from did not contain it - a **retrieval miss**, fixed in ingestion, lanes or
+budgets) or was retrieved and then left out of the answer (a **generation
+miss**, fixed in the prompt or the rendering). Those are different bugs.
+
+`--attribute` on a run, or `--analyze RUN_DIR` on a finished one, asks a second
+grader one narrow question per cell with misses: of these numbered missed
+facts, which does the retrieved context contain? It answers with the facts'
+gold indices (the same index protocol as the judge, so it cannot drop a fact),
+and each fact becomes one row of `attribution.jsonl`:
+
+| field | meaning |
+| --- | --- |
+| `fact_index`, `fact` | which gold fact, 1-based in the question's list |
+| `in_context` | `true` = generation miss, `false` = retrieval miss, `null` = the grader did not classify it (see `notes`) |
+| `literals`, `literals_in_context` | the amounts, dates, paragraph and docket numbers in the fact, and whether every one of them occurs in the context - a deterministic cross-check recorded beside the grader's answer, never in place of it |
+| `error` | the grader call failed for this cell; the row is counted under `errors` |
+
+A cell that retrieved no context at all is attributed without a grader call:
+every miss is a retrieval miss by definition. The report gains a
+`## Miss attribution` table with a total per dataset x search type followed by
+the per-category breakdown. Its `literal disagreements` column counts facts
+where the literal check and the grader point different ways; a handful is
+normal (a context can paraphrase a date), a large number means read those rows
+before trusting the split.
+
+`--analyze` works on runs written before the index fields existed: the missed
+fact texts are mapped back to the question file, which is why it needs
+`--questions` too. It never opens an HTTP client.
 
 ## What a run directory contains
 

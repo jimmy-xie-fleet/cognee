@@ -94,6 +94,20 @@ class Assertion(Entity):
             "asserted_by",
             "occurrence",
         ],
+        # ``name`` is the affirmative proposition, so these have to survive the graph
+        # projection whitelist or a denial reaches a prompt as the fact it denies. Read by
+        # ``context_fields_for_datapoints``; they take no part in identity or indexing.
+        "context_fields": [
+            "statement_type",
+            "polarity",
+            "asserted_by",
+            "source_quote",
+            "source_quote_verified",
+            # The reference as written ("the Complaint ¶17"): the only pointer to the
+            # answered statement until a resolver pass turns it into an edge.
+            "responds_to_text",
+            "attributed_to_text",
+        ],
     }
 
 

@@ -1,5 +1,11 @@
 from typing import Any, Optional
 
+from cognee.modules.graph.utils.node_context_text import (
+    context_fields_for_datapoints,
+    is_assertion_props,
+    node_context_label,
+    node_context_text,
+)
 from cognee.modules.retrieval.hybrid.chunks import search_collection
 from cognee.modules.retrieval.hybrid.facts import connection_edge_type_id
 from cognee.modules.retrieval.hybrid.results import (
@@ -165,7 +171,7 @@ def format_entities(entities: list[dict]) -> str:
 def _entity_from_result(result: Any) -> dict:
     result_payload = payload(result)
     entity_id = result_id(result) or ""
-    return {
+    entity = {
         "id": entity_id,
         "name": first_display_value(
             result_payload.get("name"), result_payload.get("text"), entity_id
@@ -175,6 +181,29 @@ def _entity_from_result(result: Any) -> dict:
         "type": _entity_type(result_payload),
         "edges": [],
     }
+    for field, value in _context_properties(result_payload).items():
+        # Never overwrite a computed key: ``name`` is normalized, ``edges`` is filled in
+        # by the graph lane, and a subclass is free to declare either as a context field.
+        if field not in entity:
+            entity[field] = value
+    return entity
+
+
+def _context_properties(result_payload: dict) -> dict:
+    """The extra rendering properties a node type declares, when the payload carries them.
+
+    Added only for a node whose text cannot be rendered from name/description alone -- an
+    assertion, whose ``name`` is the affirmative proposition and whose stance lives in
+    ``polarity`` -- so a plain entity keeps exactly the fields it always had.
+    """
+    if not is_assertion_props(result_payload):
+        return {}
+
+    return {
+        field: result_payload[field]
+        for field in context_fields_for_datapoints()
+        if field in result_payload
+    }
 
 
 def _format_entity(entity: dict) -> str:
@@ -183,12 +212,10 @@ def _format_entity(entity: dict) -> str:
         return ""
 
     entity_type = _entity_type(entity)
-    header = f"### {name} ({entity_type})" if entity_type else f"### {name}"
+    title, body_lines = _entity_title_and_body(entity, name)
+    header = f"### {title} ({entity_type})" if entity_type else f"### {title}"
 
-    lines = [header]
-    description = display_value(entity.get("description"))
-    if description:
-        lines.append(description)
+    lines = [header, *body_lines]
 
     for edge in entity.get("edges", []):
         edge_text = display_value(edge.get("text"))
@@ -196,6 +223,21 @@ def _format_entity(entity: dict) -> str:
             lines.append(f"- {edge_text}")
 
     return "\n".join(lines)
+
+
+def _entity_title_and_body(entity: dict, name: str) -> tuple[str, list[str]]:
+    """The header text and body lines of one entity block.
+
+    An assertion renders through the shared node renderer, which states the speaker and the
+    stance outright: printed as ``name`` alone a denial reads as the fact it denies. Every
+    other entity keeps the name + description block it always had.
+    """
+    if is_assertion_props(entity):
+        title, body = node_context_text({**entity, "name": name})
+        return title, [line for line in body.splitlines() if line]
+
+    description = display_value(entity.get("description"))
+    return name, [description] if description else []
 
 
 def _entity_type(result_payload: dict) -> Optional[str]:
@@ -312,4 +354,5 @@ def _nested_edge_text(edge: dict) -> Optional[str]:
 
 
 def _node_label(node: dict) -> Optional[str]:
-    return first_display_value(node.get("name"), node.get("id"))
+    """The shared one-line node label; "nothing to show" stays None for its callers."""
+    return node_context_label(node) or None

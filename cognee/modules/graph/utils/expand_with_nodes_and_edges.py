@@ -10,7 +10,11 @@ from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.engine.models import Entity, EntityType
 from cognee.modules.engine.models.Assertion import Assertion, verify_source_quote
 from cognee.modules.engine.utils import generate_edge_name, generate_node_name
-from cognee.modules.graph.utils.reference_resolution import derived_edge_text
+from cognee.modules.graph.utils.reference_resolution import (
+    UNNAMED_PROPOSITION,
+    UNNAMED_SPEAKER,
+    derived_edge_text,
+)
 from cognee.shared.data_models import Edge as KGEdge
 from cognee.shared.data_models import KnowledgeGraph, Node
 
@@ -597,9 +601,9 @@ def _proposition_clause(extracted_node: Node) -> str:
     """The proposition as it reads inside a sentence, without doubling its full stop."""
     name = _strip_nonblank_text(extracted_node.name)
     if name is None:
-        return "this statement"
+        return UNNAMED_PROPOSITION
 
-    return name.rstrip(".").strip() or "this statement"
+    return name.rstrip(".").strip() or UNNAMED_PROPOSITION
 
 
 def _reference_label(extracted_node: Node) -> str:
@@ -607,7 +611,7 @@ def _reference_label(extracted_node: Node) -> str:
     return (
         _strip_nonblank_text(extracted_node.name)
         or _strip_nonblank_text(extracted_node.type)
-        or "an unnamed party"
+        or UNNAMED_SPEAKER
     )
 
 

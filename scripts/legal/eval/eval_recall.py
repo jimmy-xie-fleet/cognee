@@ -131,6 +131,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Judge calls in flight at once (default 4; 1 = one verdict at a time).",
     )
     parser.add_argument(
+        "--answer-concurrency",
+        type=int,
+        default=1,
+        help=(
+            "Cells answered at once (default 1: one at a time, in matrix order). Cells are "
+            "independent, so 4 cuts a repeat run's wall clock by about 4x on a local server; "
+            "keep it at 1 against a server other people are using."
+        ),
+    )
+    parser.add_argument(
         "--spot-check",
         type=float,
         default=0.0,
@@ -150,6 +160,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--validate-only",
         action="store_true",
         help="Validate the question files and exit (0 valid, 1 invalid).",
+    )
+    parser.add_argument(
+        "--analyze",
+        default=None,
+        metavar="RUN_DIR",
+        help=(
+            "Attribute the missed gold facts of a finished, judged run to retrieval "
+            "(the fact was not in the retrieved context) or generation (it was, and the "
+            "answer left it out). Makes no search calls; one attribution call per cell "
+            "with misses. Writes attribution.jsonl and re-renders report.md in place."
+        ),
+    )
+    parser.add_argument(
+        "--attribute",
+        action="store_true",
+        help="After judging a run, also run miss attribution on it (see --analyze).",
+    )
+    parser.add_argument(
+        "--per-question",
+        action="store_true",
+        help="Add a per-question table to the report (one line per graded cell).",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Run the whole matrix N times, each into RUN_DIR/repeat-<i>/ on fresh sessions, "
+            "and report the mean and spread of coverage per dataset x search type. This is "
+            "how you tell a five-point delta from the noise floor. Default 1."
+        ),
     )
     return parser
 
@@ -277,8 +319,35 @@ _PROCESS_NONCE = uuid.uuid4().hex[:8]
 
 
 def _session_prefix(run_directory: Path) -> str:
-    """Namespace for this run's per-cell sessions, so two runs never share one."""
+    """Namespace for this run's per-cell sessions, so two runs never share one.
+
+    A ``--repeats`` child is namespaced by its parent too, so ``repeat-1`` of two
+    different runs in one process (the nonce is per process) cannot collide.
+    """
+    if run_directory.name.startswith(lib.REPEAT_DIRECTORY_PREFIX):
+        return f"eval-{run_directory.parent.name}-{run_directory.name}-{_PROCESS_NONCE}"
     return f"eval-{run_directory.name}-{_PROCESS_NONCE}"
+
+
+def _attribution_reporter(total_cells: int, journal: Path | None = None):
+    """Per-fact progress line, plus an append to the attribution journal when given one."""
+    state = {"done": 0}
+
+    def report(row: lib.AttributionRow) -> None:
+        state["done"] += 1
+        verdict = (
+            "error"
+            if row.error
+            else {True: "generation", False: "retrieval", None: "unclassified"}[row.in_context]
+        )
+        _progress(
+            f"[attribute {state['done']}] {row.question_id} ({row.search_type}) "
+            f"fact {row.fact_index}: {verdict}"
+        )
+        if journal is not None:
+            lib.append_jsonl(journal, row)
+
+    return report
 
 
 def _run_matrix(args, questions, datasets, search_types, run_directory: Path) -> list:
@@ -294,6 +363,7 @@ def _run_matrix(args, questions, datasets, search_types, run_directory: Path) ->
             top_k=args.top_k,
             session_prefix=_session_prefix(run_directory),
             on_row=_progress_reporter(total, journal),
+            concurrency=args.answer_concurrency,
         )
     finally:
         client.close()
@@ -327,6 +397,216 @@ def _answer_rows(args, failed, by_id, run_directory: Path) -> list:
     return rows
 
 
+def _fresh_run(
+    args,
+    questions,
+    question_paths,
+    datasets,
+    search_types,
+    run_directory: Path,
+    repeats: int | None = None,
+    repeat_index: int | None = None,
+) -> list:
+    """Answer the whole matrix into ``run_directory`` (manifest, pending matrix, journal)."""
+    run_directory.mkdir(parents=True, exist_ok=True)
+    manifest_path = lib.write_manifest(
+        run_directory,
+        base_url=args.base_url,
+        question_paths=question_paths,
+        datasets=datasets,
+        search_types=search_types,
+        top_k=args.top_k,
+        timeout=args.timeout,
+        pause_seconds=args.pause_seconds,
+        label=args.label,
+        repeats=repeats,
+        repeat_index=repeat_index,
+    )
+    _progress(f"Wrote {manifest_path}")
+
+    # The whole matrix, marked not attempted, before the first request. A run
+    # killed in its first pass used to leave --resume nothing to resume from;
+    # now the matrix is always on disk and the journal decides what is done.
+    pending = lib.pending_matrix(questions, datasets, search_types, top_k=args.top_k)
+    _write_answers(run_directory, pending, backup=False)
+
+    fresh = _run_matrix(args, questions, datasets, search_types, run_directory)
+    answer_rows = lib.merge_answer_rows(pending, fresh)
+    _write_answers(run_directory, answer_rows, backup=False)
+    return answer_rows
+
+
+def _judge_rows(args, run_directory: Path, answer_rows, existing_verdicts, reanswered, questions):
+    """Grade what still needs grading and write ``verdicts.jsonl``."""
+    lib.configure_llm_environment()
+    if args.resume:
+        pending = lib.rows_needing_verdicts(answer_rows, existing_verdicts, reanswered)
+        _progress(
+            f"Judging {len(pending)} of {len(answer_rows)} row(s); "
+            f"{len(answer_rows) - len(pending)} already graded"
+        )
+    else:
+        pending = list(answer_rows)
+    report_verdict = _verdict_reporter(len(pending), run_directory / lib.PARTIAL_VERDICTS_FILENAME)
+    fresh = asyncio.run(
+        lib.run_judge(pending, questions, on_row=report_verdict, concurrency=args.judge_concurrency)
+    )
+    verdict_rows = lib.merge_verdict_rows(existing_verdicts, fresh, answer_rows)
+    backup = bool(args.resume) and run_directory == Path(args.resume)
+    if backup:
+        lib.backup_file(run_directory / lib.VERDICTS_FILENAME)
+    lib.write_jsonl(run_directory / lib.VERDICTS_FILENAME, verdict_rows)
+    _progress(f"Wrote {run_directory / lib.VERDICTS_FILENAME}")
+    return verdict_rows
+
+
+def _attribute_rows(args, run_directory: Path, answer_rows, verdict_rows, questions) -> list:
+    """Run miss attribution over graded cells and write ``attribution.jsonl``."""
+    lib.configure_llm_environment()
+    graded = [row for row in verdict_rows if not row.error and row.coverage is not None]
+    _progress(f"Attributing the misses of {len(graded)} graded cell(s)")
+    report = _attribution_reporter(len(graded), run_directory / lib.PARTIAL_ATTRIBUTION_FILENAME)
+    rows = asyncio.run(
+        lib.run_attribution(
+            answer_rows,
+            verdict_rows,
+            questions,
+            on_row=report,
+            concurrency=args.judge_concurrency,
+        )
+    )
+    lib.backup_file(run_directory / lib.ATTRIBUTION_FILENAME)
+    lib.write_jsonl(run_directory / lib.ATTRIBUTION_FILENAME, rows)
+    _progress(f"Wrote {run_directory / lib.ATTRIBUTION_FILENAME}")
+    partial = run_directory / lib.PARTIAL_ATTRIBUTION_FILENAME
+    if partial.exists():
+        partial.unlink()
+    return rows
+
+
+def _load_verdicts(directory: Path, order) -> list | None:
+    verdicts_path = directory / lib.VERDICTS_FILENAME
+    if not verdicts_path.exists():
+        print(f"No {lib.VERDICTS_FILENAME} in {directory}; judge the run first", file=sys.stderr)
+        return None
+    return _fold_verdict_journal(directory, directory, order, write=True)
+
+
+def _write_report(
+    run_directory: Path,
+    aggregates,
+    histogram,
+    verdict_rows,
+    args,
+    attribution_rows=None,
+    repeats=None,
+    title: str | None = None,
+) -> str:
+    report = lib.render_report(
+        aggregates,
+        title=title or f"Recall evaluation - {run_directory.name}",
+        error_histogram=histogram,
+        categories=lib.aggregate_by_category(verdict_rows) if verdict_rows else None,
+        questions=lib.per_question_lines(verdict_rows)
+        if args.per_question and verdict_rows
+        else None,
+        attribution=lib.aggregate_attribution(attribution_rows) if attribution_rows else None,
+        repeats=repeats,
+    )
+    (run_directory / lib.REPORT_FILENAME).write_text(report, encoding="utf-8")
+    return report
+
+
+def _analyze(args, questions) -> int:
+    """``--analyze RUN_DIR``: attribute a judged run's misses, re-render its report."""
+    run_directory = Path(args.analyze)
+    answer_rows = _load_answers(run_directory)
+    if answer_rows is None:
+        return 1
+    answer_rows = _fold_journals(run_directory, run_directory, answer_rows)
+    verdict_rows = _load_verdicts(run_directory, answer_rows)
+    if verdict_rows is None:
+        return 1
+
+    attribution_rows = _attribute_rows(args, run_directory, answer_rows, verdict_rows, questions)
+    aggregates = lib.aggregate(verdict_rows)
+    histogram = lib.error_histogram(verdict_rows)
+    report = _write_report(
+        run_directory, aggregates, histogram, verdict_rows, args, attribution_rows=attribution_rows
+    )
+    print(report)
+    return 0
+
+
+def _repeat_runs(args, parser, questions, question_paths, datasets, search_types) -> int:
+    """``--repeats N``: N fresh runs into ``RUN_DIR/repeat-<i>/``, then the spread."""
+    run_directory = Path(args.out) if args.out else lib.default_run_directory(DEFAULT_RUNS_ROOT)
+    if run_directory.exists() and any(run_directory.iterdir()):
+        parser.error(f"{run_directory} is not empty; --repeats needs a fresh --out")
+    run_directory.mkdir(parents=True, exist_ok=True)
+    lib.write_manifest(
+        run_directory,
+        base_url=args.base_url,
+        question_paths=question_paths,
+        datasets=datasets,
+        search_types=search_types,
+        top_k=args.top_k,
+        timeout=args.timeout,
+        pause_seconds=args.pause_seconds,
+        label=args.label,
+        repeats=args.repeats,
+    )
+
+    runs: list[list] = []
+    all_attribution: list = []
+    for index in range(1, args.repeats + 1):
+        child = run_directory / f"{lib.REPEAT_DIRECTORY_PREFIX}{index}"
+        _progress(f"=== repeat {index} of {args.repeats} -> {child}")
+        answer_rows = _fresh_run(
+            args,
+            questions,
+            question_paths,
+            datasets,
+            search_types,
+            child,
+            repeats=args.repeats,
+            repeat_index=index,
+        )
+        verdict_rows = _judge_rows(args, child, answer_rows, [], [], questions)
+        attribution_rows = (
+            _attribute_rows(args, child, answer_rows, verdict_rows, questions)
+            if args.attribute
+            else None
+        )
+        lib.clear_partial_files(child)
+        _write_report(
+            child,
+            lib.aggregate(verdict_rows),
+            lib.error_histogram(verdict_rows),
+            verdict_rows,
+            args,
+            attribution_rows=attribution_rows,
+            title=f"Recall evaluation - {run_directory.name} / {child.name}",
+        )
+        runs.append(verdict_rows)
+        if attribution_rows:
+            all_attribution.extend(attribution_rows)
+
+    pooled = [row for run in runs for row in run]
+    report = _write_report(
+        run_directory,
+        lib.aggregate(pooled),
+        lib.error_histogram(pooled),
+        pooled,
+        args,
+        attribution_rows=all_attribution or None,
+        repeats=lib.aggregate_repeats(runs),
+        title=f"Recall evaluation - {run_directory.name} ({args.repeats} repeats, pooled)",
+    )
+    print(report)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -344,9 +624,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--spot-check must be a fraction in [0, 1], not {args.spot_check}")
     if args.judge_concurrency < 1:
         parser.error("--judge-concurrency must be at least 1")
-
+    if args.answer_concurrency < 1:
+        parser.error("--answer-concurrency must be at least 1")
     if args.top_k < 1:
         parser.error(f"--top-k must be at least 1, not {args.top_k}")
+    if args.repeats < 1:
+        parser.error(f"--repeats must be at least 1, not {args.repeats}")
+    if args.analyze and (args.judge_only or args.resume or args.no_judge or args.repeats > 1):
+        parser.error("--analyze takes a finished run directory and nothing else")
+    if args.attribute and args.no_judge:
+        parser.error("--attribute needs verdicts; drop --no-judge")
+    if args.repeats > 1 and (args.judge_only or args.resume):
+        parser.error(
+            "--repeats runs the matrix afresh; it cannot be combined with --judge-only or --resume"
+        )
+    if args.repeats > 1 and args.no_judge:
+        parser.error("--repeats measures the spread of graded coverage; drop --no-judge")
 
     if args.validate_only:
         return _validate_only(question_paths)
@@ -364,6 +657,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.judge_only and args.resume:
         parser.error("--judge-only and --resume are mutually exclusive")
+
+    if args.analyze:
+        return _analyze(args, questions)
 
     existing_verdicts: list[lib.VerdictRow] = []
     reanswered: list[lib.AnswerRow] = []
@@ -435,6 +731,9 @@ def main(argv: list[str] | None = None) -> int:
             print(str(error), file=sys.stderr)
             return 1
 
+        if args.repeats > 1:
+            return _repeat_runs(args, parser, questions, question_paths, datasets, search_types)
+
         run_directory = Path(args.out) if args.out else lib.default_run_directory(DEFAULT_RUNS_ROOT)
         if (run_directory / lib.ANSWERS_FILENAME).exists():
             # The pending matrix is written before the first request, so a fresh run
@@ -443,71 +742,32 @@ def main(argv: list[str] | None = None) -> int:
                 f"{run_directory} already holds {lib.ANSWERS_FILENAME}; "
                 "use --resume to continue it or a fresh --out"
             )
-        run_directory.mkdir(parents=True, exist_ok=True)
-
-        manifest_path = lib.write_manifest(
-            run_directory,
-            base_url=args.base_url,
-            question_paths=question_paths,
-            datasets=datasets,
-            search_types=search_types,
-            top_k=args.top_k,
-            timeout=args.timeout,
-            pause_seconds=args.pause_seconds,
-            label=args.label,
+        answer_rows = _fresh_run(
+            args, questions, question_paths, datasets, search_types, run_directory
         )
-        _progress(f"Wrote {manifest_path}")
 
-        # The whole matrix, marked not attempted, before the first request. A run
-        # killed in its first pass used to leave --resume nothing to resume from;
-        # now the matrix is always on disk and the journal decides what is done.
-        pending = lib.pending_matrix(questions, datasets, search_types, top_k=args.top_k)
-        _write_answers(run_directory, pending, backup=False)
-
-        fresh = _run_matrix(args, questions, datasets, search_types, run_directory)
-        answer_rows = lib.merge_answer_rows(pending, fresh)
-        _write_answers(run_directory, answer_rows, backup=False)
-
+    attribution_rows = None
     if args.no_judge:
         aggregates = lib.aggregate_answers_only(answer_rows)
         verdict_rows: list[lib.VerdictRow] = []
         histogram = lib.error_histogram(answer_rows)
     else:
-        lib.configure_llm_environment()
-        if args.resume:
-            pending = lib.rows_needing_verdicts(answer_rows, existing_verdicts, reanswered)
-            _progress(
-                f"Judging {len(pending)} of {len(answer_rows)} row(s); "
-                f"{len(answer_rows) - len(pending)} already graded"
-            )
-        else:
-            pending = list(answer_rows)
-        report_verdict = _verdict_reporter(
-            len(pending), run_directory / lib.PARTIAL_VERDICTS_FILENAME
+        verdict_rows = _judge_rows(
+            args, run_directory, answer_rows, existing_verdicts, reanswered, questions
         )
-        fresh = asyncio.run(
-            lib.run_judge(
-                pending, questions, on_row=report_verdict, concurrency=args.judge_concurrency
+        if args.attribute:
+            attribution_rows = _attribute_rows(
+                args, run_directory, answer_rows, verdict_rows, questions
             )
-        )
-        verdict_rows = lib.merge_verdict_rows(existing_verdicts, fresh, answer_rows)
-        backup = args.resume and run_directory == Path(args.resume)
-        if backup:
-            lib.backup_file(run_directory / lib.VERDICTS_FILENAME)
-        lib.write_jsonl(run_directory / lib.VERDICTS_FILENAME, verdict_rows)
-        _progress(f"Wrote {run_directory / lib.VERDICTS_FILENAME}")
         aggregates = lib.aggregate(verdict_rows)
         histogram = lib.error_histogram(verdict_rows)
 
     # Both main files are complete now; the journals have nothing left to protect.
     lib.clear_partial_files(run_directory)
 
-    report = lib.render_report(
-        aggregates,
-        title=f"Recall evaluation - {run_directory.name}",
-        error_histogram=histogram,
+    report = _write_report(
+        run_directory, aggregates, histogram, verdict_rows, args, attribution_rows=attribution_rows
     )
-    (run_directory / lib.REPORT_FILENAME).write_text(report, encoding="utf-8")
     print(report)
 
     if args.spot_check > 0 and verdict_rows:

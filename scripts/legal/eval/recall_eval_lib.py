@@ -73,6 +73,12 @@ AUTO_SEARCH_TYPE = "AUTO"
 
 JUDGE_SYSTEM_PROMPT_FILE = "eval_judge_system.txt"
 JUDGE_USER_PROMPT_FILE = "eval_judge_user.txt"
+# Miss attribution: the second grader, asked one narrower question per cell -
+# of the gold facts the judge marked missed, which ones were in the retrieved
+# context at all. Splits a coverage gap into "retrieval never surfaced it" and
+# "it was there and the answer left it out", which point at different fixes.
+ATTRIBUTION_SYSTEM_PROMPT_FILE = "eval_attribution_system.txt"
+ATTRIBUTION_USER_PROMPT_FILE = "eval_attribution_user.txt"
 
 QUESTION_CATEGORIES = (
     "summary",
@@ -116,6 +122,11 @@ NEGATION_CUES = (
 PARTIAL_ANSWERS_FILENAME = "answers.partial.jsonl"
 PARTIAL_VERDICTS_FILENAME = "verdicts.partial.jsonl"
 REPORT_FILENAME = "report.md"
+ATTRIBUTION_FILENAME = "attribution.jsonl"
+PARTIAL_ATTRIBUTION_FILENAME = "attribution.partial.jsonl"
+#: ``--repeats N`` writes each repetition to ``<run>/repeat-<i>/`` and the roll-up
+#: to ``<run>/report.md``; the prefix is what tells the two layouts apart.
+REPEAT_DIRECTORY_PREFIX = "repeat-"
 
 
 # --------------------------------------------------------------------------------------
@@ -878,24 +889,54 @@ def run_answers(
     top_k: int = DEFAULT_TOP_K,
     session_prefix: str = DEFAULT_SESSION_PREFIX,
     on_row: Optional[Callable[[AnswerRow], None]] = None,
+    concurrency: int = 1,
 ) -> list[AnswerRow]:
     """Answer every ``dataset x search_type x question`` cell.
 
     Two calls per cell - the retrieval context, then the answer - each on a
     session of its own. A failure is recorded on the row and the run continues:
     one dead search type should not cost the whole matrix.
+
+    ``concurrency`` bounds how many cells are in flight at once. Cells are
+    independent (each has its own session), so answering four at a time changes
+    nothing but the wall clock - a 342-cell repeat run takes 15 minutes instead of
+    an hour. Keep it at 1 against a server other people are using. ``on_row``
+    fires as each cell lands (journal order); the returned list keeps matrix order.
     """
-    rows: list[AnswerRow] = []
-    for dataset in datasets:
-        for search_type in search_types:
-            for question in questions:
-                row = _answer_one_cell(
-                    session, question, dataset, search_type, top_k, session_prefix
-                )
-                rows.append(row)
-                if on_row is not None:
+    cells = [
+        (dataset, search_type, question)
+        for dataset in datasets
+        for search_type in search_types
+        for question in questions
+    ]
+
+    def answer(cell) -> AnswerRow:
+        dataset, search_type, question = cell
+        return _answer_one_cell(session, question, dataset, search_type, top_k, session_prefix)
+
+    if concurrency <= 1:
+        rows: list[AnswerRow] = []
+        for cell in cells:
+            row = answer(cell)
+            rows.append(row)
+            if on_row is not None:
+                on_row(row)
+        return rows
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: dict[int, AnswerRow] = {}
+    report_lock = threading.Lock()
+    with ThreadPoolExecutor(max_workers=int(concurrency)) as pool:
+        futures = {pool.submit(answer, cell): index for index, cell in enumerate(cells)}
+        for future in as_completed(futures):
+            row = future.result()
+            results[futures[future]] = row
+            if on_row is not None:
+                with report_lock:
                     on_row(row)
-    return rows
+    return [results[index] for index in range(len(cells))]
 
 
 # --------------------------------------------------------------------------------------
@@ -1155,6 +1196,12 @@ class VerdictRow:
     notes: str = ""
     error: Optional[str] = None
     error_class: Optional[str] = None
+    # The same two lists as 1-based gold-fact indices. The texts above are what
+    # a reader wants; the indices are what miss attribution needs, and a question
+    # with two identically worded gold facts cannot be reverse-mapped from text.
+    # Absent on rows written before this field existed (``from_dict`` tolerates it).
+    gold_facts_covered_index: list[int] = field(default_factory=list)
+    gold_facts_missed_index: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.error and not self.error_class:
@@ -1205,6 +1252,8 @@ def verdict_row(
         notes=verdict.notes,
         error=row.error,
         error_class=row.error_class,
+        gold_facts_covered_index=list(score.covered),
+        gold_facts_missed_index=list(score.missed),
     )
 
 
@@ -1282,18 +1331,40 @@ class Aggregate:
     stance_errors: int = 0
     judge_mismatches: int = 0
     errors: int = 0
+    # Set only by ``aggregate_by_category``; the main table never reads it.
+    category: str = ""
 
 
 def aggregate(rows: Iterable[VerdictRow]) -> list[Aggregate]:
     """Roll verdict rows up per dataset x search type, preserving first-seen order."""
-    buckets: dict[tuple[str, str], Aggregate] = {}
-    coverages: dict[tuple[str, str], list[float]] = {}
+    return _aggregate_by(rows, lambda row: (row.dataset, row.search_type))
+
+
+def aggregate_by_category(rows: Iterable[VerdictRow]) -> list[Aggregate]:
+    """Roll verdict rows up per dataset x search type x question category.
+
+    The main table says a search type moved five points; this says whether it
+    was the disputes questions or the timeline questions that moved, which is
+    what decides where the next change goes. Same columns as ``aggregate``.
+    """
+    return _aggregate_by(rows, lambda row: (row.dataset, row.search_type, row.category))
+
+
+def _aggregate_by(
+    rows: Iterable[VerdictRow], key_of: Callable[[VerdictRow], tuple]
+) -> list[Aggregate]:
+    buckets: dict[tuple, Aggregate] = {}
+    coverages: dict[tuple, list[float]] = {}
 
     for row in rows:
-        key = (row.dataset, row.search_type)
+        key = key_of(row)
         bucket = buckets.get(key)
         if bucket is None:
-            bucket = Aggregate(dataset=row.dataset, search_type=row.search_type)
+            bucket = Aggregate(
+                dataset=row.dataset,
+                search_type=row.search_type,
+                category=row.category if len(key) > 2 else "",
+            )
             buckets[key] = bucket
             coverages[key] = []
         bucket.n += 1
@@ -1330,6 +1401,466 @@ def aggregate_answers_only(rows: Iterable[AnswerRow]) -> list[Aggregate]:
     return list(buckets.values())
 
 
+@dataclass
+class QuestionLine:
+    """One row of the per-question table: a single cell's grade, readable at a glance."""
+
+    question_id: str
+    category: str
+    dataset: str
+    search_type: str
+    coverage: Optional[float] = None
+    wrong_claims: int = 0
+    fabricated_claims: int = 0
+    stance_errors: int = 0
+    error_class: str = ""
+
+
+def per_question_lines(rows: Iterable[VerdictRow]) -> list[QuestionLine]:
+    """Every graded cell as one line, in run order.
+
+    The tables above are means; this is the raw grid, so a reviewer can see that
+    the five-point gain on ``disputes`` is one question going from 0 to 100 and
+    the other two not moving.
+    """
+    return [
+        QuestionLine(
+            question_id=row.question_id,
+            category=row.category,
+            dataset=row.dataset,
+            search_type=row.search_type,
+            coverage=row.coverage,
+            wrong_claims=len(row.wrong_claims),
+            fabricated_claims=len(row.fabricated_claims),
+            stance_errors=len(row.stance_errors),
+            error_class=(row.error_class or "") if row.error else "",
+        )
+        for row in rows
+    ]
+
+
+# --------------------------------------------------------------------------------------
+# Miss attribution
+# --------------------------------------------------------------------------------------
+
+
+class AttributionVerdict(BaseModel):
+    """Which of a cell's missed gold facts were in the retrieved context.
+
+    Same index protocol as :class:`JudgeVerdict`, for the same reason: the grader
+    answers with the numbers it was shown, so it cannot leave a fact out. The
+    numbers are the facts' indices in the *question's* gold list, not a fresh
+    1..k, so a row of the attribution file lines up with the verdict's indices.
+    """
+
+    facts_in_context: list[int] = Field(default_factory=list)
+    facts_not_in_context: list[int] = Field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass
+class AttributionRow:
+    """One missed gold fact of one cell, and whether the context carried it.
+
+    ``in_context`` is the attribution grader's answer: ``True`` means the answer
+    had the fact in front of it and left it out (a *generation* miss), ``False``
+    means retrieval never surfaced it (a *retrieval* miss), ``None`` means the
+    grader did not classify it or the call failed (see ``notes``/``error``).
+
+    ``literals`` and ``literals_in_context`` are the deterministic cross-check:
+    the amounts, dates and paragraph numbers in the fact, and whether every one of
+    them occurs in the context. Recorded beside the grader's answer, never in
+    place of it - a context can paraphrase a date - so a grader that drifts shows
+    up as a disagreement count in the report rather than as a quietly wrong table.
+    """
+
+    dataset: str
+    search_type: str
+    question_id: str
+    category: str
+    fact_index: int
+    fact: str
+    in_context: Optional[bool] = None
+    literals: list[str] = field(default_factory=list)
+    literals_in_context: Optional[bool] = None
+    notes: str = ""
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "AttributionRow":
+        known = {key: payload.get(key) for key in cls.__dataclass_fields__ if key in payload}
+        return cls(**known)
+
+    @property
+    def literal_disagreement(self) -> bool:
+        """The lexical check and the grader point different ways."""
+        return (
+            self.in_context is not None
+            and self.literals_in_context is not None
+            and self.in_context != self.literals_in_context
+        )
+
+
+def missed_fact_indices(verdict: VerdictRow, question: Question) -> tuple[list[int], list[str]]:
+    """The 1-based indices of the gold facts a verdict marked missed, plus problems.
+
+    New rows carry the indices. A row written before ``gold_facts_missed_index``
+    existed carries only the texts, which are reverse-mapped against the question;
+    that works unless the question has two gold facts with the same wording, in
+    which case both indices are returned and the ambiguity is reported.
+    """
+    total = len(question.gold_facts)
+    if verdict.gold_facts_missed_index:
+        indices = sorted(
+            {int(index) for index in verdict.gold_facts_missed_index if 1 <= int(index) <= total}
+        )
+        return indices, []
+
+    problems: list[str] = []
+    indices: list[int] = []
+    for text in verdict.gold_facts_missed:
+        wanted = normalize_claim(text)
+        matches = [
+            index
+            for index, gold in enumerate(question.gold_facts, start=1)
+            if normalize_claim(gold.fact) == wanted
+        ]
+        if not matches:
+            problems.append(f"missed fact text not in question {question.id!r}: {text!r}")
+            continue
+        if len(matches) > 1:
+            problems.append(
+                f"question {question.id!r} has {len(matches)} gold facts worded {text!r}; "
+                "attributing all of them"
+            )
+        indices.extend(index for index in matches if index not in indices)
+    return sorted(indices), problems
+
+
+_MONTHS = (
+    "january|february|march|april|may|june|july|august|september|october|november|december|"
+    "jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+)
+#: What counts as a literal worth checking for: the specifics a paraphrase keeps.
+_LITERAL_PATTERNS = (
+    # $1,850,000.00 / $9 million
+    re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:million|billion|thousand))?", re.I),
+    # June 18, 2026 / 18 June 2026 / Sept. 22, 2026
+    re.compile(r"\b(?:" + _MONTHS + r")\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b", re.I),
+    re.compile(r"\b\d{1,2}\s+(?:" + _MONTHS + r")\.?,?\s+\d{4}\b", re.I),
+    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    # ¶ 17 / paragraph 17 / para. 17
+    re.compile(r"(?:¶|\bparagraphs?|\bparas?\.?)\s*\d+", re.I),
+    # Resolution No. 2026-118 / Ordinance 2026-21 / PAS-L-001884-26 / 2026-PB-07
+    re.compile(r"\b(?:[A-Z]{1,4}-){0,2}\d{2,6}(?:-[A-Z]*-?\d{2,})+\b"),
+)
+
+
+def fact_literals(fact: str) -> list[str]:
+    """The amounts, dates, paragraph numbers and docket-style numbers in a fact."""
+    found: list[str] = []
+    for pattern in _LITERAL_PATTERNS:
+        for match in pattern.finditer(fact or ""):
+            literal = match.group(0).strip()
+            if literal and literal not in found:
+                found.append(literal)
+    return found
+
+
+def _normalize_literal(text: str) -> str:
+    # A literal survives a paraphrase in spirit, not in bytes: "$1,850,000.00" is
+    # the same amount as "1,850,000", "¶ 17" the same anchor as "paragraph 17",
+    # "Sept. 22, 2026" the same day as "September 22, 2026".
+    lowered = normalize_claim(text)
+    lowered = (
+        lowered.replace("¶", "paragraph ")
+        .replace("para.", "paragraph")
+        .replace("paras", "paragraph")
+    )
+    lowered = re.sub(r"\bparagraphs\b", "paragraph", lowered)
+    lowered = lowered.replace("$", "").replace(",", "")
+    lowered = re.sub(r"\.0+\b", "", lowered)
+    lowered = re.sub(r"(\d)(?:st|nd|rd|th)\b", r"\1", lowered)
+    lowered = re.sub(r"\b(sept|sep)\b\.?", "september", lowered)
+    for short, long in (
+        ("jan", "january"),
+        ("feb", "february"),
+        ("mar", "march"),
+        ("apr", "april"),
+        ("jun", "june"),
+        ("jul", "july"),
+        ("aug", "august"),
+        ("oct", "october"),
+        ("nov", "november"),
+        ("dec", "december"),
+    ):
+        lowered = re.sub(rf"\b{short}\b\.?", long, lowered)
+    lowered = lowered.replace(".", "")
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def literals_present(literals: Sequence[str], context: str) -> Optional[bool]:
+    """Whether every literal occurs in the context. ``None`` when there is nothing to check."""
+    if not literals:
+        return None
+    haystack = _normalize_literal(context)
+    return all(_normalize_literal(literal) in haystack for literal in literals)
+
+
+def _attribution_rows(
+    answer: AnswerRow, verdict: VerdictRow, question: Question, indices: Sequence[int]
+) -> list[AttributionRow]:
+    rows: list[AttributionRow] = []
+    for index in indices:
+        fact = question.gold_facts[index - 1].fact
+        literals = fact_literals(fact)
+        rows.append(
+            AttributionRow(
+                dataset=answer.dataset,
+                search_type=answer.search_type,
+                question_id=answer.question_id,
+                category=answer.category,
+                fact_index=index,
+                fact=fact,
+                literals=literals,
+                literals_in_context=literals_present(literals, answer.context),
+            )
+        )
+    return rows
+
+
+async def attribute_misses(
+    answer: AnswerRow,
+    verdict: VerdictRow,
+    question: Question,
+    read_prompt: Callable[[str], str] = _default_read_prompt,
+    render_prompt: Callable[[str, dict], str] = _default_render_prompt,
+) -> list[AttributionRow]:
+    """Attribute one cell's missed gold facts to retrieval or to generation.
+
+    One LLM call for the whole cell, and none at all when the cell retrieved no
+    context - every miss is then a retrieval miss by definition. A fact the grader
+    classified neither way, or both ways, is left ``in_context=None`` with a note,
+    never guessed.
+    """
+    indices, problems = missed_fact_indices(verdict, question)
+    rows = _attribution_rows(answer, verdict, question, indices)
+    for row in rows:
+        row.notes = "; ".join(problems)
+    if not rows:
+        return rows
+
+    if not normalize_claim(answer.context):
+        for row in rows:
+            row.in_context = False
+            row.notes = "; ".join(filter(None, [row.notes, "no context was retrieved"]))
+        return rows
+
+    system_prompt = read_prompt(ATTRIBUTION_SYSTEM_PROMPT_FILE)
+    if not system_prompt.strip():
+        raise RuntimeError(
+            f"Attribution system prompt is missing or empty: {ATTRIBUTION_SYSTEM_PROMPT_FILE}"
+        )
+    user_prompt = render_prompt(
+        ATTRIBUTION_USER_PROMPT_FILE,
+        {
+            "question": question.question,
+            "missed_facts": [{"index": row.fact_index, "fact": row.fact} for row in rows],
+            "context": answer.context,
+        },
+    )
+    graded = await LLMGateway.acreate_structured_output(
+        text_input=user_prompt,
+        system_prompt=system_prompt,
+        response_model=AttributionVerdict,
+    )
+
+    def clean(values: Sequence[Any]) -> set[int]:
+        out: set[int] = set()
+        for raw in values:
+            try:
+                out.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    present, absent = clean(graded.facts_in_context), clean(graded.facts_not_in_context)
+    for row in rows:
+        if row.fact_index in present and row.fact_index in absent:
+            row.notes = "; ".join(filter(None, [row.notes, "grader listed the fact on both sides"]))
+        elif row.fact_index in present:
+            row.in_context = True
+        elif row.fact_index in absent:
+            row.in_context = False
+        else:
+            row.notes = "; ".join(filter(None, [row.notes, "grader did not classify the fact"]))
+    return rows
+
+
+async def run_attribution(
+    answers: Sequence[AnswerRow],
+    verdicts: Sequence[VerdictRow],
+    questions: Sequence[Question],
+    read_prompt: Callable[[str], str] = _default_read_prompt,
+    render_prompt: Callable[[str, dict], str] = _default_render_prompt,
+    on_row: Optional[Callable[[AttributionRow], None]] = None,
+    concurrency: int = 1,
+) -> list[AttributionRow]:
+    """Attribute every graded cell's misses. Cells without a grade are skipped.
+
+    Joins verdicts to answers on the cell key to recover the retrieved context -
+    the verdict row does not carry it. A failed grader call is recorded on each of
+    the cell's rows rather than raised, like ``run_judge``.
+    """
+    by_id = {question.id: question for question in questions}
+    answers_by_key = {row_key(row): row for row in answers}
+    gate = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def attribute(verdict: VerdictRow) -> list[AttributionRow]:
+        question = by_id.get(verdict.question_id)
+        answer = answers_by_key.get(row_key(verdict))
+        if question is None or answer is None or verdict.error or verdict.coverage is None:
+            return []
+        async with gate:
+            try:
+                rows = await attribute_misses(
+                    answer, verdict, question, read_prompt=read_prompt, render_prompt=render_prompt
+                )
+            except Exception as error:  # noqa: BLE001 - recorded, not raised
+                indices, _problems = missed_fact_indices(verdict, question)
+                rows = _attribution_rows(answer, verdict, question, indices)
+                for row in rows:
+                    row.error = f"attribution: {type(error).__name__}: {error}"
+        if on_row is not None:
+            for row in rows:
+                on_row(row)
+        return rows
+
+    nested = await asyncio.gather(*(attribute(verdict) for verdict in verdicts))
+    return [row for rows in nested for row in rows]
+
+
+@dataclass
+class AttributionAggregate:
+    dataset: str
+    search_type: str
+    category: str = ""
+    missed: int = 0
+    retrieval_misses: int = 0
+    generation_misses: int = 0
+    unclassified: int = 0
+    literal_disagreements: int = 0
+    errors: int = 0
+
+
+def aggregate_attribution(rows: Iterable[AttributionRow]) -> list[AttributionAggregate]:
+    """Roll attribution rows up per dataset x search type, then per category under each.
+
+    The "all" row for a dataset x search type comes first (``category == ""``),
+    then one row per category, so the table reads as a total with its breakdown.
+    """
+    totals: dict[tuple[str, str], AttributionAggregate] = {}
+    by_category: dict[tuple[str, str, str], AttributionAggregate] = {}
+
+    for row in rows:
+        total_key = (row.dataset, row.search_type)
+        total = totals.setdefault(
+            total_key, AttributionAggregate(dataset=row.dataset, search_type=row.search_type)
+        )
+        category = by_category.setdefault(
+            (*total_key, row.category),
+            AttributionAggregate(
+                dataset=row.dataset, search_type=row.search_type, category=row.category
+            ),
+        )
+        for bucket in (total, category):
+            bucket.missed += 1
+            if row.error:
+                bucket.errors += 1
+            elif row.in_context is True:
+                bucket.generation_misses += 1
+            elif row.in_context is False:
+                bucket.retrieval_misses += 1
+            else:
+                bucket.unclassified += 1
+            if row.literal_disagreement:
+                bucket.literal_disagreements += 1
+
+    ordered: list[AttributionAggregate] = []
+    for total_key, total in totals.items():
+        ordered.append(total)
+        ordered.extend(bucket for key, bucket in by_category.items() if key[:2] == total_key)
+    return ordered
+
+
+# --------------------------------------------------------------------------------------
+# Repeats
+# --------------------------------------------------------------------------------------
+
+
+@dataclass
+class RepeatAggregate:
+    """The spread of one dataset x search type across the repetitions of a run."""
+
+    dataset: str
+    search_type: str
+    repeats: int = 0
+    coverages: list[float] = field(default_factory=list)
+    mean_coverage: Optional[float] = None
+    stdev_coverage: Optional[float] = None
+    min_coverage: Optional[float] = None
+    max_coverage: Optional[float] = None
+    mean_wrong_claims: float = 0.0
+    mean_fabricated_claims: float = 0.0
+    mean_stance_errors: float = 0.0
+
+
+def _sample_stdev(values: Sequence[float]) -> Optional[float]:
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
+
+
+def aggregate_repeats(runs: Sequence[Sequence[VerdictRow]]) -> list[RepeatAggregate]:
+    """Mean and spread of each dataset x search type's coverage across ``runs``.
+
+    A single run of a 19-question set graded by an LLM is one draw. This is what
+    says whether a five-point delta between two branches is a change or the
+    noise floor. Each run contributes its own mean coverage (over the cells it
+    graded); the spread is the sample standard deviation across runs. Claim
+    counts are averaged per run so they stay comparable to a single run's table.
+    """
+    buckets: dict[tuple[str, str], RepeatAggregate] = {}
+    counts: dict[tuple[str, str], list[tuple[int, int, int]]] = {}
+    for run in runs:
+        for item in aggregate(run):
+            key = (item.dataset, item.search_type)
+            bucket = buckets.setdefault(
+                key, RepeatAggregate(dataset=item.dataset, search_type=item.search_type)
+            )
+            bucket.repeats += 1
+            if item.mean_coverage is not None:
+                bucket.coverages.append(item.mean_coverage)
+            counts.setdefault(key, []).append(
+                (item.wrong_claims, item.fabricated_claims, item.stance_errors)
+            )
+    for key, bucket in buckets.items():
+        if bucket.coverages:
+            bucket.mean_coverage = sum(bucket.coverages) / len(bucket.coverages)
+            bucket.stdev_coverage = _sample_stdev(bucket.coverages)
+            bucket.min_coverage = min(bucket.coverages)
+            bucket.max_coverage = max(bucket.coverages)
+        tallies = counts[key]
+        bucket.mean_wrong_claims = sum(t[0] for t in tallies) / len(tallies)
+        bucket.mean_fabricated_claims = sum(t[1] for t in tallies) / len(tallies)
+        bucket.mean_stance_errors = sum(t[2] for t in tallies) / len(tallies)
+    return list(buckets.values())
+
+
 def error_histogram(rows: Iterable[Any]) -> dict[str, int]:
     """Count failures by class over answer rows or verdict rows.
 
@@ -1352,10 +1883,18 @@ def _format_coverage(value: Optional[float]) -> str:
     return "-" if value is None else f"{value * 100:.1f}%"
 
 
+def _format_float(value: Optional[float], digits: int = 1) -> str:
+    return "-" if value is None else f"{value:.{digits}f}"
+
+
 def render_report(
     aggregates: Sequence[Aggregate],
     title: str = "Recall evaluation",
     error_histogram: Optional[dict] = None,
+    categories: Optional[Sequence[Aggregate]] = None,
+    questions: Optional[Sequence[QuestionLine]] = None,
+    attribution: Optional[Sequence[AttributionAggregate]] = None,
+    repeats: Optional[Sequence[RepeatAggregate]] = None,
 ) -> str:
     """One markdown table, one row per dataset x search type, plus error triage.
 
@@ -1363,6 +1902,10 @@ def render_report(
     showed plausible-looking rows while every single cell had failed, because a
     run with no answers and a run with no gold facts both render coverage as
     ``-``. With ``answered`` the difference is the second column.
+
+    The optional sections are appended after the main table, in this order:
+    repeats, by category, miss attribution, per question, errors by class. Each
+    is omitted when not given, so a report from an older run reads as before.
     """
     lines = [f"# {title}", ""]
     if not aggregates:
@@ -1390,6 +1933,14 @@ def render_report(
         "are totals, not rates. `judge issues` counts indices the judge invented or "
         "put on both lists; anything above zero means read those rows by hand."
     )
+    if repeats:
+        lines.extend(_render_repeats(repeats))
+    if categories:
+        lines.extend(_render_categories(categories))
+    if attribution:
+        lines.extend(_render_attribution(attribution))
+    if questions:
+        lines.extend(_render_questions(questions))
     if error_histogram:
         lines.append("")
         lines.append("## Errors by class")
@@ -1409,6 +1960,97 @@ def render_report(
             "--timeout, or slow the harness down with --pause-seconds."
         )
     return "\n".join(lines) + "\n"
+
+
+def _render_repeats(repeats: Sequence[RepeatAggregate]) -> list[str]:
+    lines = [
+        "",
+        "## Repeats",
+        "",
+        "| dataset | search type | repeats | coverage mean | stdev | min | max | "
+        "wrong / run | fabricated / run | stance / run |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in repeats:
+        stdev = "-" if item.stdev_coverage is None else f"{item.stdev_coverage * 100:.1f} pts"
+        lines.append(
+            f"| {item.dataset} | {item.search_type} | {item.repeats} | "
+            f"{_format_coverage(item.mean_coverage)} | {stdev} | "
+            f"{_format_coverage(item.min_coverage)} | {_format_coverage(item.max_coverage)} | "
+            f"{_format_float(item.mean_wrong_claims)} | "
+            f"{_format_float(item.mean_fabricated_claims)} | "
+            f"{_format_float(item.mean_stance_errors)} |"
+        )
+    lines.append("")
+    lines.append(
+        "Each repeat is a fresh run of the whole matrix on fresh sessions; `stdev` is the "
+        "sample standard deviation of the per-repeat mean coverage, in percentage points. "
+        "A delta between two branches smaller than about two stdevs is not a result."
+    )
+    return lines
+
+
+def _render_categories(categories: Sequence[Aggregate]) -> list[str]:
+    lines = [
+        "",
+        "## By category",
+        "",
+        "| dataset | search type | category | n | answered | mean coverage | wrong claims | "
+        "fabricated claims | stance errors |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in categories:
+        lines.append(
+            f"| {item.dataset} | {item.search_type} | {item.category} | {item.n} | "
+            f"{item.answered} | {_format_coverage(item.mean_coverage)} | {item.wrong_claims} | "
+            f"{item.fabricated_claims} | {item.stance_errors} |"
+        )
+    return lines
+
+
+def _render_attribution(attribution: Sequence[AttributionAggregate]) -> list[str]:
+    lines = [
+        "",
+        "## Miss attribution",
+        "",
+        "| dataset | search type | category | missed | retrieval misses | generation misses | "
+        "unclassified | literal disagreements | errors |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in attribution:
+        lines.append(
+            f"| {item.dataset} | {item.search_type} | {item.category or '(all)'} | "
+            f"{item.missed} | {item.retrieval_misses} | {item.generation_misses} | "
+            f"{item.unclassified} | {item.literal_disagreements} | {item.errors} |"
+        )
+    lines.append("")
+    lines.append(
+        "A *retrieval miss* is a missed gold fact the retrieved context did not contain - "
+        "fix ingestion, lanes or budgets. A *generation miss* was in the context and the "
+        "answer left it out - fix the prompt or the rendering. `literal disagreements` "
+        "counts facts where the amounts, dates and paragraph numbers in the fact say one "
+        "thing about the context and the attribution grader said the other; above a "
+        "handful, read those rows in attribution.jsonl before trusting the split."
+    )
+    return lines
+
+
+def _render_questions(questions: Sequence[QuestionLine]) -> list[str]:
+    lines = [
+        "",
+        "## Per question",
+        "",
+        "| question | category | dataset | search type | coverage | wrong | fabricated | "
+        "stance | error |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for item in questions:
+        lines.append(
+            f"| {item.question_id} | {item.category} | {item.dataset} | {item.search_type} | "
+            f"{_format_coverage(item.coverage)} | {item.wrong_claims} | "
+            f"{item.fabricated_claims} | {item.stance_errors} | {item.error_class or ''} |"
+        )
+    return lines
 
 
 def spot_check_sample(
@@ -1700,6 +2342,8 @@ def write_manifest(
     timeout: float,
     pause_seconds: float,
     label: Optional[str] = None,
+    repeats: Optional[int] = None,
+    repeat_index: Optional[int] = None,
 ) -> Path:
     """Record what this run was, before it runs.
 
@@ -1729,6 +2373,11 @@ def write_manifest(
         "session_per_cell": True,
         "context_before_answer": True,
     }
+    if repeats is not None:
+        # The parent of a --repeats run says how many; each child says which.
+        manifest["repeats"] = repeats
+    if repeat_index is not None:
+        manifest["repeat_index"] = repeat_index
     path = directory / MANIFEST_FILENAME
     path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path

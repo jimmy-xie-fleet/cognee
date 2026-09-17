@@ -2055,3 +2055,610 @@ def test_the_cli_rejects_a_judge_concurrency_below_one(tmp_path, capsys):
 
     assert excinfo.value.code == 2
     assert "judge-concurrency" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# per-category, per-question, miss attribution, repeats
+# ---------------------------------------------------------------------------
+
+
+def _fact_question(question_id="adams-01", category="disputes", facts=None):
+    facts = facts or [
+        "By letter dated June 10, 2026 the City offered $1,850,000.00 for the property.",
+        "The defendants deny paragraph 12.",
+        "The council adopted Resolution No. 2026-118 on May 5, 2026.",
+    ]
+    return lib.Question(
+        id=question_id,
+        category=category,
+        question="q",
+        gold_facts=tuple(lib.GoldFact(fact=fact, source="doc") for fact in facts),
+        corpus="adams",
+    )
+
+
+def _answer(question_id="adams-01", context="", category="disputes", **overrides):
+    payload = dict(
+        dataset="adams",
+        search_type="HYBRID_COMPLETION",
+        question_id=question_id,
+        category=category,
+        question="q",
+        answer="an answer",
+        context=context,
+    )
+    payload.update(overrides)
+    return lib.AnswerRow(**payload)
+
+
+def test_verdict_row_records_the_gold_fact_indices_beside_the_texts():
+    question = _fact_question()
+    row = lib.verdict_row(
+        _answer(), lib.JudgeVerdict(gold_facts_covered=[2], gold_facts_missed=[1, 3]), question
+    )
+
+    assert row.gold_facts_covered_index == [2]
+    assert row.gold_facts_missed_index == [1, 3]
+    assert row.gold_facts_missed == [question.gold_facts[0].fact, question.gold_facts[2].fact]
+    # a row written before the field existed still loads
+    old = {key: value for key, value in row.to_dict().items() if not key.endswith("_index")}
+    assert lib.VerdictRow.from_dict(old).gold_facts_missed_index == []
+
+
+def test_aggregate_by_category_splits_the_buckets_and_renders_a_section():
+    rows = [
+        verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], []),
+        verdict("adams", "HYBRID_COMPLETION", "q2", [], ["b"]),
+    ]
+    rows[1].category = "timeline"
+
+    by_category = {item.category: item for item in lib.aggregate_by_category(rows)}
+    assert by_category["disputes"].mean_coverage == pytest.approx(1.0)
+    assert by_category["timeline"].mean_coverage == pytest.approx(0.0)
+    assert all(item.category == "" for item in lib.aggregate(rows))
+
+    report = lib.render_report(lib.aggregate(rows), categories=lib.aggregate_by_category(rows))
+    assert "## By category" in report
+    assert "| adams | HYBRID_COMPLETION | disputes | 1 | 1 | 100.0% |" in report
+    assert "| adams | HYBRID_COMPLETION | timeline | 1 | 1 | 0.0% |" in report
+    # the main table is untouched by the extra section
+    assert "| adams | HYBRID_COMPLETION | 2 | 2 | 50.0% |" in report
+
+
+def test_per_question_lines_render_one_row_per_cell():
+    rows = [
+        verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], [], wrong_claims=["x"]),
+        verdict("adams", "GRAPH_COMPLETION", "q1", [], [], error="answer: HTTP 500"),
+    ]
+    lines = lib.per_question_lines(rows)
+
+    assert [line.search_type for line in lines] == ["HYBRID_COMPLETION", "GRAPH_COMPLETION"]
+    assert lines[0].wrong_claims == 1 and lines[0].error_class == ""
+    assert lines[1].error_class == "5xx"
+    report = lib.render_report(lib.aggregate(rows), questions=lines)
+    assert "## Per question" in report
+    assert "| q1 | disputes | adams | HYBRID_COMPLETION | 100.0% | 1 | 0 | 0 |  |" in report
+    assert "| q1 | disputes | adams | GRAPH_COMPLETION | - | 0 | 0 | 0 | 5xx |" in report
+
+
+def test_fact_literals_extracts_the_specifics_a_paraphrase_keeps():
+    literals = lib.fact_literals(
+        "By letter dated June 10, 2026 the City offered $1,850,000.00 under Resolution "
+        "No. 2026-118, answering ¶ 17 and paragraph 33 of the Complaint (PAS-L-001884-26)."
+    )
+
+    assert "$1,850,000.00" in literals
+    assert "June 10, 2026" in literals
+    assert "2026-118" in literals
+    assert "¶ 17" in literals
+    assert "paragraph 33" in literals
+    assert "PAS-L-001884-26" in literals
+    assert lib.fact_literals("The defendants deny the allegation.") == []
+
+
+def test_literals_present_tolerates_formatting_but_not_absence():
+    literals = ["$1,850,000.00", "June 10, 2026", "¶ 17"]
+    context = "The offer of 1,850,000 dollars came by letter of June 10th, 2026 (paragraph 17)."
+
+    assert lib.literals_present(literals, context) is True
+    assert lib.literals_present(literals, "The offer came by letter of June 10, 2026.") is False
+    assert lib.literals_present([], context) is None
+    # Sept. and September are the same month
+    assert lib.literals_present(["Sept. 22, 2026"], "on September 22, 2026 she testified") is True
+
+
+def test_missed_fact_indices_prefers_stored_indices_and_reverse_maps_old_rows():
+    question = _fact_question()
+    stored = verdict("adams", "HYBRID_COMPLETION", "adams-01", [], ["irrelevant text"])
+    stored.gold_facts_missed_index = [3, 1, 9]  # 9 is out of range and dropped
+    assert lib.missed_fact_indices(stored, question) == ([1, 3], [])
+
+    old = verdict(
+        "adams", "HYBRID_COMPLETION", "adams-01", [], [question.gold_facts[1].fact, "unknown"]
+    )
+    indices, problems = lib.missed_fact_indices(old, question)
+    assert indices == [2]
+    assert problems and "not in question" in problems[0]
+
+    twins = _fact_question(facts=["same words", "same words"])
+    dup = verdict("adams", "HYBRID_COMPLETION", "adams-01", [], ["same words"])
+    indices, problems = lib.missed_fact_indices(dup, twins)
+    assert indices == [1, 2]
+    assert "2 gold facts worded" in problems[0]
+
+
+def test_attribute_misses_without_context_is_all_retrieval_and_calls_no_grader():
+    question = _fact_question()
+    answer = _answer(context="")
+    verdict_row = lib.verdict_row(
+        answer, lib.JudgeVerdict(gold_facts_covered=[2], gold_facts_missed=[1, 3]), question
+    )
+
+    async def explode(**kwargs):
+        raise AssertionError("the grader must not be called without context")
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", explode):
+        rows = asyncio.run(lib.attribute_misses(answer, verdict_row, question))
+
+    assert [row.fact_index for row in rows] == [1, 3]
+    assert all(row.in_context is False for row in rows)
+    assert all("no context was retrieved" in row.notes for row in rows)
+
+
+def test_attribute_misses_classifies_by_the_grader_indices_and_keeps_the_literal_check():
+    question = _fact_question()
+    answer = _answer(
+        context=(
+            "The City offered $1,850,000.00 by letter dated June 10, 2026. The council met in May."
+        )
+    )
+    verdict_row = lib.verdict_row(
+        answer, lib.JudgeVerdict(gold_facts_covered=[2], gold_facts_missed=[1, 3]), question
+    )
+    captured = {}
+
+    async def grader(text_input, system_prompt, response_model):
+        captured["user"] = text_input
+        assert response_model is lib.AttributionVerdict
+        # 1 is in the context; the grader wrongly says it is not; 3 goes unclassified
+        return lib.AttributionVerdict(facts_in_context=[], facts_not_in_context=[1])
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", grader):
+        rows = asyncio.run(
+            lib.attribute_misses(
+                answer,
+                verdict_row,
+                question,
+                read_prompt=lambda name: "system",
+                render_prompt=lambda name, context: json.dumps(context),
+            )
+        )
+
+    by_index = {row.fact_index: row for row in rows}
+    assert by_index[1].in_context is False
+    assert by_index[1].literals_in_context is True
+    assert by_index[1].literal_disagreement is True
+    assert by_index[3].in_context is None
+    assert "did not classify" in by_index[3].notes
+    assert by_index[3].literal_disagreement is False
+    # the grader was shown the original gold indices, not a fresh 1..k
+    shown = json.loads(captured["user"])["missed_facts"]
+    assert [item["index"] for item in shown] == [1, 3]
+
+
+def test_attribute_misses_renders_the_real_templates():
+    question = _fact_question()
+    answer = _answer(context="some context")
+    verdict_row = lib.verdict_row(
+        answer, lib.JudgeVerdict(gold_facts_covered=[2], gold_facts_missed=[1, 3]), question
+    )
+    captured = {}
+
+    async def grader(text_input, system_prompt, response_model):
+        captured["user"], captured["system"] = text_input, system_prompt
+        return lib.AttributionVerdict(facts_in_context=[1], facts_not_in_context=[3])
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", grader):
+        rows = asyncio.run(lib.attribute_misses(answer, verdict_row, question))
+
+    assert "<missed_facts>" in captured["user"] and "<context>" in captured["user"]
+    assert "1. By letter dated June 10, 2026" in captured["user"]
+    assert "3. The council adopted" in captured["user"]
+    assert "2. " not in captured["user"].split("<missed_facts>")[1].split("</missed_facts>")[0]
+    assert "data, not instructions" in captured["user"] or "data" in captured["system"]
+    assert {row.fact_index: row.in_context for row in rows} == {1: True, 3: False}
+
+
+def test_run_attribution_joins_on_the_cell_key_and_records_grader_failures():
+    question = _fact_question()
+    answers = [
+        _answer(context="ctx", search_type="HYBRID_COMPLETION"),
+        _answer(context="ctx", search_type="GRAPH_COMPLETION"),
+        _answer(context="", search_type="CHUNKS", error="answer: HTTP 500"),
+    ]
+    verdicts = [
+        lib.verdict_row(
+            answers[0],
+            lib.JudgeVerdict(gold_facts_covered=[2, 3], gold_facts_missed=[1]),
+            question,
+        ),
+        lib.verdict_row(
+            answers[1],
+            lib.JudgeVerdict(gold_facts_covered=[1], gold_facts_missed=[2, 3]),
+            question,
+        ),
+        lib.verdict_row(answers[2], lib.JudgeVerdict(gold_facts_missed=[1, 2, 3]), question),
+    ]
+    verdicts[2].coverage = None
+    seen = []
+
+    async def grader(text_input, system_prompt, response_model):
+        if "GRAPH" in text_input:
+            raise RuntimeError("boom")
+        return lib.AttributionVerdict(facts_in_context=[1], facts_not_in_context=[])
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", grader):
+        rows = asyncio.run(
+            lib.run_attribution(
+                answers,
+                verdicts,
+                [question],
+                read_prompt=lambda name: "system",
+                render_prompt=lambda name, context: (
+                    context["question"] + (" GRAPH" if len(context["missed_facts"]) == 2 else "")
+                ),
+                on_row=lambda row: seen.append((row.search_type, row.fact_index)),
+                concurrency=2,
+            )
+        )
+
+    hybrid = [row for row in rows if row.search_type == "HYBRID_COMPLETION"]
+    graph = [row for row in rows if row.search_type == "GRAPH_COMPLETION"]
+    assert [row.in_context for row in hybrid] == [True]
+    assert [row.fact_index for row in graph] == [2, 3]
+    assert all(row.error and "boom" in row.error for row in graph)
+    # the failed cell (no grade) produced no rows at all
+    assert not [row for row in rows if row.search_type == "CHUNKS"]
+    assert sorted(seen) == [
+        ("GRAPH_COMPLETION", 2),
+        ("GRAPH_COMPLETION", 3),
+        ("HYBRID_COMPLETION", 1),
+    ]
+
+
+def test_aggregate_attribution_gives_a_total_then_each_category():
+    def row(category, in_context, literals_in_context=None, error=None):
+        return lib.AttributionRow(
+            dataset="adams",
+            search_type="HYBRID_COMPLETION",
+            question_id="q",
+            category=category,
+            fact_index=1,
+            fact="f",
+            in_context=in_context,
+            literals_in_context=literals_in_context,
+            error=error,
+        )
+
+    rows = [
+        row("disputes", True),
+        row("disputes", False, literals_in_context=True),
+        row("timeline", None),
+        row("timeline", False, error="attribution: RuntimeError: boom"),
+    ]
+    aggregates = lib.aggregate_attribution(rows)
+
+    assert [item.category for item in aggregates] == ["", "disputes", "timeline"]
+    total = aggregates[0]
+    assert (total.missed, total.generation_misses, total.retrieval_misses) == (4, 1, 1)
+    assert (total.unclassified, total.errors, total.literal_disagreements) == (1, 1, 1)
+
+    report = lib.render_report(
+        [lib.Aggregate("adams", "HYBRID_COMPLETION", n=1)], attribution=aggregates
+    )
+    assert "## Miss attribution" in report
+    assert "| adams | HYBRID_COMPLETION | (all) | 4 | 1 | 1 | 1 | 1 | 1 |" in report
+    assert "| adams | HYBRID_COMPLETION | disputes | 2 | 1 | 1 | 0 | 1 | 0 |" in report
+
+
+def test_aggregate_repeats_reports_the_mean_and_the_spread():
+    runs = [
+        [verdict("adams", "HYBRID_COMPLETION", "q1", ["a"], ["b"])],  # 50%
+        [verdict("adams", "HYBRID_COMPLETION", "q1", ["a", "b"], [], wrong_claims=["w"])],  # 100%
+        [verdict("adams", "HYBRID_COMPLETION", "q1", [], ["a", "b"])],  # 0%
+    ]
+    (item,) = lib.aggregate_repeats(runs)
+
+    assert item.repeats == 3
+    assert item.mean_coverage == pytest.approx(0.5)
+    assert item.stdev_coverage == pytest.approx(0.5)
+    assert (item.min_coverage, item.max_coverage) == (0.0, 1.0)
+    assert item.mean_wrong_claims == pytest.approx(1 / 3)
+
+    single = lib.aggregate_repeats(runs[:1])[0]
+    assert single.stdev_coverage is None
+
+    report = lib.render_report(
+        lib.aggregate([row for run in runs for row in run]), repeats=lib.aggregate_repeats(runs)
+    )
+    assert "## Repeats" in report
+    assert (
+        "| adams | HYBRID_COMPLETION | 3 | 50.0% | 50.0 pts | 0.0% | 100.0% | 0.3 | 0.0 | 0.0 |"
+        in report
+    )
+
+
+def _fake_gateway(judge=None, attribution=None):
+    async def fake(text_input, system_prompt, response_model):
+        if response_model is lib.AttributionVerdict:
+            return attribution or lib.AttributionVerdict(
+                facts_in_context=[2], facts_not_in_context=[]
+            )
+        return judge or lib.JudgeVerdict(gold_facts_covered=[1], gold_facts_missed=[2])
+
+    return fake
+
+
+def test_main_attribute_runs_attribution_after_judging(
+    tmp_path, isolated_home, monkeypatch, capsys
+):
+    server = FakeServer(context="The defendants admit paragraph 4 and deny paragraph 12.")
+    monkeypatch.setattr(lib, "HttpxClient", server)
+    run = tmp_path / "run"
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", _fake_gateway()):
+        code = cli.main(
+            [
+                "--questions",
+                str(gold_file(tmp_path)),
+                "--datasets",
+                "adams",
+                "--search-types",
+                "HYBRID_COMPLETION",
+                "--out",
+                str(run),
+                "--attribute",
+                "--per-question",
+            ]
+        )
+
+    assert code == 0
+    attribution = lib.read_jsonl(run / lib.ATTRIBUTION_FILENAME)
+    assert [(row["fact_index"], row["in_context"]) for row in attribution] == [(2, True)]
+    assert (
+        attribution[0]["literals"] == ["paragraph 4"]
+        and attribution[0]["literals_in_context"] is True
+    )
+    report = (run / "report.md").read_text(encoding="utf-8")
+    assert (
+        "## Miss attribution" in report
+        and "## By category" in report
+        and "## Per question" in report
+    )
+    assert "| adams | HYBRID_COMPLETION | (all) | 1 | 0 | 1 | 0 | 0 | 0 |" in report
+    assert not (run / lib.PARTIAL_ATTRIBUTION_FILENAME).exists()
+    assert "## Miss attribution" in capsys.readouterr().out
+
+
+def test_main_analyze_attributes_a_finished_run_in_place(
+    tmp_path, isolated_home, monkeypatch, capsys
+):
+    """--analyze needs answers.jsonl and verdicts.jsonl and makes no search calls."""
+    run = tmp_path / "run"
+    questions_path = gold_file(tmp_path)
+    (question,) = lib.load_question_files([questions_path])
+    answer = lib.AnswerRow(
+        dataset="adams",
+        search_type="HYBRID_COMPLETION",
+        question_id="adams-01",
+        category="disputes",
+        question=question.question,
+        answer="The defendants deny paragraph 12.",
+        context="The defendants deny paragraph 12. They admit paragraph 4.",
+    )
+    lib.write_jsonl(run / lib.ANSWERS_FILENAME, [answer])
+    # An older verdict row: texts only, no index fields - the reverse map has to work.
+    old_verdict = lib.verdict_row(
+        answer, lib.JudgeVerdict(gold_facts_covered=[1], gold_facts_missed=[2]), question
+    ).to_dict()
+    old_verdict.pop("gold_facts_missed_index")
+    old_verdict.pop("gold_facts_covered_index")
+    lib.write_jsonl(run / lib.VERDICTS_FILENAME, [old_verdict])
+    (run / lib.REPORT_FILENAME).write_text("stale\n", encoding="utf-8")
+
+    class NoServer:
+        def __call__(self, *args, **kwargs):
+            raise AssertionError("--analyze must not open an HTTP client")
+
+    monkeypatch.setattr(lib, "HttpxClient", NoServer())
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", _fake_gateway()):
+        code = cli.main(["--analyze", str(run), "--questions", str(questions_path)])
+
+    assert code == 0
+    rows = lib.read_jsonl(run / lib.ATTRIBUTION_FILENAME)
+    assert [(row["fact_index"], row["in_context"], row["fact"]) for row in rows] == [
+        (2, True, "The defendants admit paragraph 4.")
+    ]
+    report = (run / lib.REPORT_FILENAME).read_text(encoding="utf-8")
+    assert "stale" not in report
+    assert "| adams | HYBRID_COMPLETION | 1 | 1 | 50.0% |" in report
+    assert "| adams | HYBRID_COMPLETION | (all) | 1 | 0 | 1 | 0 | 0 | 0 |" in report
+    assert "## Miss attribution" in capsys.readouterr().out
+
+
+def test_main_analyze_refuses_an_unjudged_run(tmp_path, isolated_home, capsys):
+    run = tmp_path / "run"
+    lib.write_jsonl(run / lib.ANSWERS_FILENAME, [answer_row("adams-01")])
+
+    code = cli.main(["--analyze", str(run), "--questions", str(gold_file(tmp_path))])
+
+    assert code == 1
+    assert "judge the run first" in capsys.readouterr().err
+
+
+def test_main_repeats_writes_child_runs_and_a_pooled_report(
+    tmp_path, isolated_home, monkeypatch, capsys
+):
+    server = FakeServer()
+    monkeypatch.setattr(lib, "HttpxClient", server)
+    run = tmp_path / "run"
+    verdicts = iter(
+        [
+            lib.JudgeVerdict(gold_facts_covered=[1], gold_facts_missed=[2]),
+            lib.JudgeVerdict(gold_facts_covered=[1, 2], gold_facts_missed=[]),
+        ]
+    )
+
+    async def fake(text_input, system_prompt, response_model):
+        return next(verdicts)
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", fake):
+        code = cli.main(
+            [
+                "--questions",
+                str(gold_file(tmp_path)),
+                "--datasets",
+                "adams",
+                "--search-types",
+                "HYBRID_COMPLETION",
+                "--out",
+                str(run),
+                "--repeats",
+                "2",
+            ]
+        )
+
+    assert code == 0
+    assert sorted(item.name for item in run.iterdir()) == [
+        "repeat-1",
+        "repeat-2",
+        "report.md",
+        "run.json",
+    ]
+    parent = json.loads((run / "run.json").read_text(encoding="utf-8"))
+    assert parent["repeats"] == 2 and "repeat_index" not in parent
+    for index in (1, 2):
+        child = run / f"repeat-{index}"
+        assert sorted(item.name for item in child.iterdir()) == [
+            "answers.jsonl",
+            "report.md",
+            "run.json",
+            "verdicts.jsonl",
+        ]
+        assert json.loads((child / "run.json").read_text())["repeat_index"] == index
+    # each repeat used its own sessions
+    sessions = {call["json"]["session_id"] for call in server.search_calls}
+    assert len(sessions) == 2
+    assert all("repeat-" in session for session in sessions)
+
+    report = (run / "report.md").read_text(encoding="utf-8")
+    assert "2 repeats, pooled" in report
+    assert "| adams | HYBRID_COMPLETION | 2 | 2 | 75.0% |" in report  # pooled main table
+    assert "## Repeats" in report
+    assert "| adams | HYBRID_COMPLETION | 2 | 75.0% | 35.4 pts | 50.0% | 100.0% |" in report
+    assert "## Repeats" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv, fragment",
+    [
+        (["--repeats", "0"], "--repeats must be at least 1"),
+        (["--repeats", "2", "--no-judge", "--datasets", "adams"], "drop --no-judge"),
+        (["--repeats", "2", "--judge-only", "somewhere"], "cannot be combined"),
+        (["--analyze", "somewhere", "--no-judge"], "nothing else"),
+        (["--analyze", "somewhere", "--resume", "elsewhere"], "nothing else"),
+        (["--attribute", "--no-judge", "--datasets", "adams"], "needs verdicts"),
+    ],
+)
+def test_the_cli_rejects_incoherent_analysis_flags(tmp_path, isolated_home, capsys, argv, fragment):
+    path = write_question_file(tmp_path, question_document())
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--questions", str(path), *argv])
+
+    assert excinfo.value.code == 2
+    assert fragment in capsys.readouterr().err
+
+
+def test_main_repeats_refuses_a_populated_out_directory(tmp_path, isolated_home, capsys):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "something").write_text("x")
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "--questions",
+                str(gold_file(tmp_path)),
+                "--datasets",
+                "adams",
+                "--search-types",
+                "HYBRID_COMPLETION",
+                "--out",
+                str(run),
+                "--repeats",
+                "2",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+    assert "needs a fresh --out" in capsys.readouterr().err
+
+
+def test_run_answers_with_concurrency_keeps_matrix_order_and_journals_every_row():
+    import threading
+    import time
+
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def responder(path, body):
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        time.sleep(0.02)
+        with lock:
+            in_flight["now"] -= 1
+        return [{"search_result": [f"answer for {body['datasets'][0]}"]}]
+
+    client = FakeClient(responder)
+    session = make_session(client)
+    session.authenticate()
+    questions = [make_question(f"q{i}") for i in range(3)]
+    seen = []
+
+    rows = lib.run_answers(
+        session,
+        questions=questions,
+        datasets=["a", "b"],
+        search_types=["HYBRID_COMPLETION"],
+        on_row=lambda row: seen.append(row_key_of(row)),
+        concurrency=3,
+    )
+
+    assert [(row.dataset, row.question_id) for row in rows] == [
+        ("a", "q0"),
+        ("a", "q1"),
+        ("a", "q2"),
+        ("b", "q0"),
+        ("b", "q1"),
+        ("b", "q2"),
+    ]
+    assert all(row.error is None and row.answer.startswith("answer for") for row in rows)
+    assert sorted(seen) == sorted((row.dataset, row.search_type, row.question_id) for row in rows)
+    assert in_flight["peak"] > 1
+
+
+def row_key_of(row):
+    return (row.dataset, row.search_type, row.question_id)
+
+
+def test_the_cli_rejects_an_answer_concurrency_below_one(tmp_path, isolated_home, capsys):
+    path = write_question_file(tmp_path, question_document())
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--questions", str(path), "--datasets", "adams", "--answer-concurrency", "0"])
+
+    assert excinfo.value.code == 2
+    assert "answer-concurrency" in capsys.readouterr().err

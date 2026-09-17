@@ -3,6 +3,7 @@ from typing import Callable, List, Optional, Type, Tuple
 
 from cognee.base_config import get_base_config
 from cognee.modules.retrieval.base_retriever import BaseRetriever
+from cognee.modules.retrieval.config import get_retrieval_config
 
 from cognee.modules.engine.models.node_set import NodeSet
 from cognee.modules.retrieval.triplet_retriever import TripletRetriever
@@ -39,14 +40,35 @@ from cognee.modules.retrieval.skills_retriever import SkillsRetriever
 from cognee.context_global_variables import session_user
 
 
-def _hybrid_lane_top_k(config: dict, key: str, search_top_k: int | None) -> int | None:
-    """Search top_k feeds hybrid's chunk/entity/fact lanes, capped so default context stays small.
+# Lane key -> the RetrievalConfig field that carries its env-configurable budget.
+# Keys not listed here (e.g. max_edges_per_entity) are resolved directly against
+# their own config field, with no request-top_k tier.
+_HYBRID_LANE_CONFIG_FIELDS = {
+    "chunks_top_k": "hybrid_chunks_top_k",
+    "entities_top_k": "hybrid_entities_top_k",
+    "facts_top_k": "hybrid_facts_top_k",
+    "statements_top_k": "hybrid_statements_top_k",
+}
 
-    An explicit retriever_specific_config value is not capped.
-    None is left unset so the retriever can apply its own default.
+
+def _hybrid_lane_top_k(config: dict, key: str, search_top_k: int | None) -> int | None:
+    """Resolve a hybrid lane budget: explicit request -> RetrievalConfig -> request top_k.
+
+    1. An explicit `retriever_specific_config[key]` always wins and is not capped.
+    2. Otherwise the matching `RetrievalConfig` field is used, when an operator set it
+       (the request lanes default to None, so this tier is opt-in).
+    3. Only when neither is available does the request's own `top_k` apply, capped at
+       `DEFAULT_HYBRID_LANE_TOP_K` so an uncapped request doesn't blow out the lane
+       (unchanged from before RetrievalConfig existed). `None` is left unset so the
+       retriever can apply its own default.
     """
     if key in config:
         return config[key]
+    config_field = _HYBRID_LANE_CONFIG_FIELDS.get(key)
+    if config_field is not None:
+        config_value = getattr(get_retrieval_config(), config_field, None)
+        if config_value is not None:
+            return config_value
     if search_top_k is None:
         return None
     return min(search_top_k, DEFAULT_HYBRID_LANE_TOP_K)
@@ -142,7 +164,9 @@ async def get_search_type_retriever_instance(
                 "entities_top_k": _hybrid_lane_top_k(
                     retriever_specific_config, "entities_top_k", top_k
                 ),
-                "max_edges_per_entity": retriever_specific_config.get("max_edges_per_entity", 10),
+                "max_edges_per_entity": retriever_specific_config.get(
+                    "max_edges_per_entity", get_retrieval_config().hybrid_max_edges_per_entity
+                ),
                 "node_name": node_name,
                 "node_name_filter_operator": node_name_filter_operator,
                 "system_prompt_path": system_prompt_path,
@@ -161,6 +185,9 @@ async def get_search_type_retriever_instance(
                 ),
                 "use_truth_weight": retriever_specific_config.get("use_truth_weight", False),
                 "facts_top_k": _hybrid_lane_top_k(retriever_specific_config, "facts_top_k", top_k),
+                "statements_top_k": _hybrid_lane_top_k(
+                    retriever_specific_config, "statements_top_k", top_k
+                ),
                 "include_references": include_references,
             },
         ),

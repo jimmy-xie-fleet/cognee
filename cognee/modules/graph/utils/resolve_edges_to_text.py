@@ -1,33 +1,14 @@
-import string
-from typing import List
-from collections import Counter
+from typing import Any, List, Optional
 
 from cognee.modules.graph.cognee_graph.CogneeGraphElements import Edge
-from cognee.modules.retrieval.utils.stop_words import DEFAULT_STOP_WORDS
+from cognee.modules.graph.utils.node_context_text import (  # noqa: F401  (re-exported)
+    _create_title_from_text,
+    _get_top_n_frequent_words,
+    node_context_text,
+)
 from cognee.shared.logging_utils import get_logger
 
 logger = get_logger()
-
-
-def _get_top_n_frequent_words(
-    text: str, stop_words: set = None, top_n: int = 3, separator: str = ", "
-) -> str:
-    """Concatenates the top N frequent words in text."""
-    if stop_words is None:
-        stop_words = DEFAULT_STOP_WORDS
-
-    words = [word.lower().strip(string.punctuation) for word in text.split()]
-    words = [word for word in words if word and word not in stop_words]
-
-    top_words = [word for word, freq in Counter(words).most_common(top_n)]
-    return separator.join(top_words)
-
-
-def _create_title_from_text(text: str, first_n_words: int = 7, top_n_words: int = 3) -> str:
-    """Creates a title by combining first words with most frequent words from the text."""
-    first_words = text.split()[:first_n_words]
-    top_words = _get_top_n_frequent_words(text, top_n=top_n_words)
-    return f"{' '.join(first_words)}... [{top_words}]"
 
 
 def _extract_nodes_from_edges(retrieved_edges: List[Edge]) -> dict:
@@ -45,17 +26,32 @@ def _extract_nodes_from_edges(retrieved_edges: List[Edge]) -> dict:
             if node.id in nodes:
                 continue
 
-            text = node.attributes.get("text")
-            if text:
-                name = _create_title_from_text(text)
-                content = text
-            else:
-                name = node.attributes.get("name", "Unnamed Node")
-                content = node.attributes.get("description", name)
-
+            name, content = node_context_text(node.attributes)
             nodes[node.id] = {"node": node, "name": name, "content": content}
 
     return nodes
+
+
+def _resolution_suffix(edge_attributes: dict) -> str:
+    """How a resolved reference edge reports the answer it recorded, or "" for a plain edge.
+
+    A reference edge is the one kind of edge a reader may want to second-guess: it was
+    matched deterministically or traced by an agent, so the prompt says which, and how
+    confident the match was.
+    """
+    confidence = _display(edge_attributes.get("resolution_confidence"))
+    if confidence is None:
+        return ""
+
+    strategy = _display(edge_attributes.get("resolution_strategy"))
+    return f" [confidence {confidence}, {strategy}]" if strategy else f" [confidence {confidence}]"
+
+
+def _display(value: Any) -> Optional[str]:
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        text = str(value).strip()
+        return text or None
+    return None
 
 
 async def resolve_edges_to_text(retrieved_edges: List[Edge]) -> str:
@@ -92,7 +88,7 @@ async def resolve_edges_to_text(retrieved_edges: List[Edge]) -> str:
         if description and description != edge_label:
             line += f"  ({description})"
 
-        connections.append(line)
+        connections.append(line + _resolution_suffix(edge.attributes))
 
     connection_section = "\n".join(connections)
 

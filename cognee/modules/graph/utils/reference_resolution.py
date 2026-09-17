@@ -78,11 +78,23 @@ _WORD_MARKER_KINDS = frozenset({"count"})
 # How an asserted_by edge words the speaker's stance, and how a reference edge words the
 # statement it points at. Both are read by a human and embedded for retrieval, so the
 # stance has to be in the sentence rather than reconstructible from the endpoints.
-_STANCE_VERB_BY_POLARITY = {
+# Public: ``node_context_text`` words a node's stance line with the same table, so the
+# sentence a prompt reads matches the sentence that was embedded for retrieval.
+STANCE_VERB_BY_POLARITY = {
     "positive": "affirms that",
     "negative": "denies that",
 }
-_UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
+UNRECORDED_STANCE_VERB = "takes an unrecorded stance on"
+
+# What a stance sentence calls a speaker it has no name for, and a proposition it has no
+# wording for. Public for the same reason the verb table is: ``node_context_text`` words a
+# node's stance line with these, so the sentence a prompt reads is the sentence that was
+# embedded for retrieval -- down to the fallbacks.
+UNNAMED_SPEAKER = "an unnamed party"
+UNNAMED_PROPOSITION = "this statement"
+
+_STANCE_VERB_BY_POLARITY = STANCE_VERB_BY_POLARITY
+_UNRECORDED_STANCE_VERB = UNRECORDED_STANCE_VERB
 
 _DERIVED_EDGE_VERBS = {
     "attributed_to": "is attributed to",
@@ -519,10 +531,13 @@ def _strip_nonblank_text(value: Optional[str]) -> Optional[str]:
     return stripped_value or None
 
 
-def _sentence(text: str) -> str:
-    """One sentence of edge text, terminated exactly once."""
+def as_sentence(text: str) -> str:
+    """One sentence, terminated exactly once. Public for ``node_context_text``."""
     stripped_text = text.strip()
     return stripped_text if stripped_text.endswith((".", "!", "?")) else f"{stripped_text}."
+
+
+_sentence = as_sentence
 
 
 def derived_edge_text(
@@ -540,9 +555,9 @@ def derived_edge_text(
     be embedded and shown as the fact it denies.
     """
     stripped_proposition = _strip_nonblank_text(proposition)
-    clause = (stripped_proposition or "").rstrip(".").strip() or "this statement"
+    clause = (stripped_proposition or "").rstrip(".").strip() or UNNAMED_PROPOSITION
     stance = _strip_nonblank_text(polarity) or "unknown"
-    label = _strip_nonblank_text(target_label) or "an unnamed party"
+    label = _strip_nonblank_text(target_label) or UNNAMED_SPEAKER
 
     if relationship_name == "asserted_by":
         stance_verb = _STANCE_VERB_BY_POLARITY.get(stance, _UNRECORDED_STANCE_VERB)
