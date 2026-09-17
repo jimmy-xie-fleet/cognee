@@ -88,9 +88,10 @@ async def build_statements(
     """One renderable statement per hit, each with the pair lines its graph edges support.
 
     Costs exactly one graph call, and none at all when nothing was retrieved. The vector
-    row is what matched, so it is what the statement renders from; the graph node fills in
-    properties the row does not carry (a row indexed before a property existed), and its
-    pair edges supply the counterparts.
+    row is what matched; the graph node is what the statement renders from, because the
+    row is an index projection (see ``_render_properties``). A row indexed with more than
+    the index projection -- or a graph that returned nothing for the seed -- still renders
+    from whatever the row carries.
     """
     seeds = _seed_rows(hits)
     if not seeds:
@@ -102,7 +103,9 @@ async def build_statements(
 
     statements = []
     for seed_id, row_properties in seeds.items():
-        title, body = node_context_text({**graph_properties.get(seed_id, {}), **row_properties})
+        title, body = node_context_text(
+            _render_properties(row_properties, graph_properties.get(seed_id, {}))
+        )
         statements.append(
             {
                 "id": seed_id,
@@ -112,6 +115,36 @@ async def build_statements(
             }
         )
     return statements
+
+
+# What a vector row says about itself rather than about the node it indexes. On the
+# default stack an ``Assertion_name`` row is an ``IndexSchema`` projection: its ``type`` is
+# the literal ``"IndexSchema"`` and its ``text`` is the indexed field's *value* -- the
+# proposition -- not a passage. Read as node properties, the first vetoes the assertion
+# check (``is_assertion_props`` rejects a ``type`` that names no assertion class) and the
+# second turns the statement into a chunk-style block, so a denial renders as its
+# affirmative proposition with no stance. The unit fakes carried full node payloads and
+# never saw this; the default-stack integration test did.
+_INDEX_ROW_KEYS = ("type", "text")
+
+
+def _render_properties(row_properties: dict, graph_properties: dict) -> dict:
+    """The properties a seed statement renders from: the graph node, gap-filled by the row.
+
+    The graph node is authoritative for everything it stores (the projection fills every
+    whitelisted key, so a ``None`` there means "not stored", not "override with nothing").
+    The row supplies what the graph did not return -- a seed the neighborhood call missed,
+    or a property the graph adapter does not project -- minus the keys that describe the
+    index row itself. A row whose only wording is its indexed ``text`` still names the
+    statement when neither side has a ``name``.
+    """
+    properties = {key: value for key, value in row_properties.items() if key not in _INDEX_ROW_KEYS}
+    properties.update({key: value for key, value in graph_properties.items() if value is not None})
+    if not properties.get("name"):
+        indexed_text = row_properties.get("text")
+        if isinstance(indexed_text, str) and indexed_text.strip():
+            properties["name"] = indexed_text
+    return properties
 
 
 def format_statements(statements: list[dict]) -> str:

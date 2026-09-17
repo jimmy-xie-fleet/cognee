@@ -275,6 +275,50 @@ async def test_a_pair_less_seed_still_reads_its_graph_properties():
     assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
 
 
+# What LanceDB actually hands back for an ``Assertion_name`` hit on the default stack: an
+# IndexSchema projection whose ``text`` is the indexed proposition and whose ``type`` is the
+# literal class name of the index row. None of the assertion's own fields are on it.
+INDEX_ROW = {
+    "id": "denial-1",
+    "type": "IndexSchema",
+    "text": "Adams breached the lease",
+    "belongs_to_set": [],
+    "feedback_weight": 0.5,
+    "importance_weight": 0.5,
+}
+
+
+@pytest.mark.asyncio
+async def test_an_index_row_renders_from_the_graph_node_not_from_itself():
+    """The default-stack shape. Read as node properties the row's ``type`` vetoes the
+    assertion check and its ``text`` makes a chunk-style block, so a denial rendered as its
+    affirmative proposition with no stance -- exactly the defect the lane exists to fix."""
+    built = await build_statements(_pair_graph(), [_hit(INDEX_ROW)])
+
+    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert built[0]["body"].startswith("Defendants denies that Adams breached the lease.")
+    assert "..." not in built[0]["title"]
+
+
+@pytest.mark.asyncio
+async def test_an_index_row_the_graph_did_not_return_still_names_the_statement():
+    """No graph node for the seed: the indexed text is the only wording there is."""
+    built = await build_statements(_graph(), [_hit(INDEX_ROW)])
+
+    assert built[0]["title"] == "Adams breached the lease"
+    assert built[0]["body"] == "Adams breached the lease"
+
+
+@pytest.mark.asyncio
+async def test_the_graph_node_wins_over_a_row_that_disagrees():
+    """A row indexed before a property changed must not out-vote the stored node."""
+    stale_row = {**DENIAL, "polarity": "positive", "asserted_by": "Nobody"}
+
+    built = await build_statements(_pair_graph(), [_hit(stale_row)])
+
+    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+
+
 @pytest.mark.asyncio
 async def test_no_hits_asks_the_graph_for_nothing():
     graph = _pair_graph()
