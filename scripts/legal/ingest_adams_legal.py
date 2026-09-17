@@ -61,11 +61,17 @@ async def main() -> int:
         "--chunk-size",
         type=int,
         default=None,
-        help=(
-            "Chunk size in tokens. Default: the profile's (512 for legal; cognee's own default "
-            "for plain). Pass 0 with --profile legal to use cognee's default chunk size, which "
-            "separates the graph model from the chunk size in an eval."
-        ),
+        help="Chunk size in tokens. Omitted (or 0): cognee's default, for either profile.",
+    )
+    parser.add_argument(
+        "--single-pass",
+        action="store_true",
+        help="Legal profile only: one LLM call per chunk (legal prompt) instead of plain + legal.",
+    )
+    parser.add_argument(
+        "--keep-low-salience",
+        action="store_true",
+        help="Legal profile only: keep low-salience (boilerplate) assertions, down-weighted.",
     )
     args = parser.parse_args()
 
@@ -82,17 +88,20 @@ async def main() -> int:
     if args.limit:
         files = files[: args.limit]
     if args.profile == "legal":
-        profile = legal_profile()
-        if args.chunk_size is not None:
-            # 0 means "cognee's default": remember() computes it from the model when None.
-            profile["chunk_size"] = args.chunk_size or None
+        profile = legal_profile(
+            chunk_size=args.chunk_size or None,
+            two_pass=not args.single_pass,
+            drop_low_salience=not args.keep_low_salience,
+        )
     else:
         profile = {}
         if args.chunk_size:
             profile["chunk_size"] = args.chunk_size
     print(
         f"files={len(files)} dataset={args.dataset} profile={args.profile} "
-        f"chunk_size={profile.get('chunk_size', 'default')}"
+        f"chunk_size={profile.get('chunk_size', 'default')} "
+        f"two_pass={args.profile == 'legal' and not args.single_pass} "
+        f"drop_low_salience={args.profile == 'legal' and not args.keep_low_salience}"
     )
 
     result = await cognee.remember(

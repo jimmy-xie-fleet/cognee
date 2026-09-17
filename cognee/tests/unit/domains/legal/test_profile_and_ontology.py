@@ -4,9 +4,9 @@ import inspect
 import itertools
 
 from cognee.domains.legal import (
-    DEFAULT_LEGAL_CHUNK_SIZE,
     LEGAL_FUZZY_CUTOFF,
     LEGAL_ONTOLOGY_PATH,
+    LegalExtractionOptions,
     LegalKnowledgeGraph,
     legal_ontology_resolver,
     legal_profile,
@@ -82,13 +82,16 @@ class TestLegalProfile:
         assert set(profile) == {
             "graph_model",
             "custom_prompt",
-            "chunk_size",
+            "calculate_chunk_graphs",
             "config",
             "enrichment_tasks",
         }
         assert profile["graph_model"] is LegalKnowledgeGraph
         assert isinstance(profile["custom_prompt"], str) and profile["custom_prompt"]
-        assert profile["chunk_size"] == DEFAULT_LEGAL_CHUNK_SIZE == 512
+        assert callable(profile["calculate_chunk_graphs"])
+        assert profile["calculate_chunk_graphs"].options == LegalExtractionOptions(
+            two_pass=True, drop_low_salience=True
+        )
 
         ontology_config = profile["config"]["ontology_config"]
         assert ontology_config["ontology_mode"] == "annotate"
@@ -115,7 +118,7 @@ class TestLegalProfile:
         assert set(profile) == {
             "graph_model",
             "custom_prompt",
-            "chunk_size",
+            "calculate_chunk_graphs",
             "enrichment_tasks",
         }
         assert "config" not in profile
@@ -135,6 +138,18 @@ class TestLegalProfile:
 
         assert profile["chunk_size"] == 256
 
+    def test_default_chunk_size_is_cognees(self):
+        """The profile used to pin 512 tokens; the eval measured that graph 6 to 20 points
+        behind plain extraction with most misses never retrieved. Unset means cognee's own."""
+        assert "chunk_size" not in legal_profile()
+
+    def test_two_pass_and_drop_flags_reach_the_callable(self):
+        profile = legal_profile(two_pass=False, drop_low_salience=False)
+
+        assert profile["calculate_chunk_graphs"].options == LegalExtractionOptions(
+            two_pass=False, drop_low_salience=False
+        )
+
     def test_path_ontology_file_is_accepted(self):
         # LEGAL_ONTOLOGY_PATH is a Path, so handing the module's own constant back to
         # the profile must work; RDFLibOntologyResolver only understands str paths.
@@ -148,12 +163,24 @@ class TestLegalProfile:
 class TestCogneeContract:
     def test_profile_keys_are_valid_cognify_kwargs(self):
         cognify_module = importlib.import_module("cognee.api.v1.cognify.cognify")
-        cognify_params = set(inspect.signature(cognify_module.cognify).parameters)
-        assert set(legal_profile()) <= cognify_params
+        signature = inspect.signature(cognify_module.cognify)
+        cognify_params = set(signature.parameters)
+        # ``calculate_chunk_graphs`` rides cognify's ``**kwargs`` down to
+        # ``extract_graph_from_data``; everything else is a named parameter.
+        assert any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        assert set(legal_profile()) - {"calculate_chunk_graphs"} <= cognify_params
 
     def test_graph_model_and_config_are_cognify_only_in_remember(self):
         remember_module = importlib.import_module("cognee.api.v1.remember.remember")
-        assert {"graph_model", "config", "enrichment_tasks"} <= remember_module._COGNIFY_ONLY
+        assert {
+            "graph_model",
+            "config",
+            "enrichment_tasks",
+            "calculate_chunk_graphs",
+        } <= remember_module._COGNIFY_ONLY
 
 
 class TestRealResolver:

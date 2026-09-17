@@ -1,6 +1,7 @@
 from typing import Optional
 
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from cognee.modules.engine.models.Assertion import CaseInsensitiveEnum, StatementType
 from cognee.shared.data_models import KnowledgeGraph, Node  # whichever provider branch is active
@@ -35,6 +36,21 @@ class ReferenceBasis(CaseInsensitiveEnum):
     CITED = "cited"
     POSITIONAL = "positional"
     DESCRIBED = "described"
+
+
+class Salience(CaseInsensitiveEnum):
+    """How much a statement is worth retrieving.
+
+    The eval showed a legal graph's retrieved statements dominated by boilerplate --
+    "defendants repeat their prior responses", "X are attorneys for Y", certifications
+    that no other action is pending, who appeared at a hearing. Those crowd substantive
+    statements out of a context. The model marks them ``low``; the profile drops them
+    (or, with the drop off, stores them down-weighted).
+    """
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
 
 
 class LegalReference(BaseModel):
@@ -162,6 +178,21 @@ class LegalNode(Node):
             "passage (use responds_to for that) or when there is no response."
         ),
     )
+    salience: Optional[Salience] = Field(
+        None,
+        description=(
+            "Assertion nodes only. high: a contested fact, quantity, date, valuation, "
+            "term or finding a reader would cite. medium: an ordinary substantive "
+            "statement. low: boilerplate -- captions, court/venue/jurisdiction recitals, "
+            "appearances and 'attorneys for', 'repeats prior responses' / 'reserves all "
+            "rights or positions', certifications that no other action is pending, "
+            "'submitted in the context of settlement', attendance at a hearing, meeting "
+            "or deposition. Never low for a denial or admission. Null for entities."
+        ),
+    )
+    # Set by the pipeline from ``salience``; never asked of the model, so it is kept out
+    # of the JSON schema the LLM sees.
+    importance_weight: SkipJsonSchema[Optional[float]] = None
 
 
 class LegalKnowledgeGraph(KnowledgeGraph):

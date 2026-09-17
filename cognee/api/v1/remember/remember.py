@@ -78,6 +78,9 @@ class RememberKwargs(TypedDict, total=False):
     config: Any  # per-call ontology config, see cognee.modules.ontology.ontology_config.Config
     temporal_cognify: bool  # routed to cognify(); ignores graph_model/custom_prompt
     enrichment_tasks: list  # routed to cognify(); appended to the pipeline tail
+    # routed to cognify(); replaces the per-chunk LLM extraction call (see
+    # extract_graph_from_data). A domain profile uses it to run its own extraction.
+    calculate_chunk_graphs: Any
 
 
 # Kwarg routing: which RememberKwargs go to add(), cognify(), or both.
@@ -94,7 +97,14 @@ _ADD_ONLY = frozenset(
     }
 )
 _COGNIFY_ONLY = frozenset(
-    {"graph_model", "chunks_per_batch", "config", "temporal_cognify", "enrichment_tasks"}
+    {
+        "graph_model",
+        "chunks_per_batch",
+        "config",
+        "temporal_cognify",
+        "enrichment_tasks",
+        "calculate_chunk_graphs",
+    }
 )
 _SHARED = frozenset(
     {
@@ -879,6 +889,7 @@ async def remember(
                 ("config", kwargs.get("config") is not None),
                 ("chunk_size", chunk_size is not None),
                 ("enrichment_tasks", kwargs.get("enrichment_tasks") is not None),
+                ("calculate_chunk_graphs", kwargs.get("calculate_chunk_graphs") is not None),
             )
             if is_supplied
         ]

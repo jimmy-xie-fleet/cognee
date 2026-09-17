@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 
 from cognee.domains.legal import LegalKnowledgeGraph, legal_ontology_resolver
+from cognee.domains.legal.extraction import apply_salience, drop_low_salience_assertions
 from cognee.modules.chunking.models import DocumentChunk
 from cognee.modules.data.processing.document_types import TextDocument
 from cognee.modules.engine.models import Entity
@@ -47,6 +48,7 @@ FIXTURE_STEMS = (
     "deposition_qa",
     "ambiguous_names",
     "email_proposal",
+    "answer_caption_boilerplate",
 )
 
 
@@ -96,11 +98,15 @@ def _make_chunk(stem: str, text: str) -> DocumentChunk:
     )
 
 
-async def run_fixture(stem: str) -> tuple[DocumentChunk, LegalKnowledgeGraph]:
+async def run_fixture(
+    stem: str, drop_low_salience: bool = True
+) -> tuple[DocumentChunk, LegalKnowledgeGraph]:
     """Run one fixture through the real extraction task with the LLM call replaced.
 
     Returns the chunk (carrying the constructed data points) and the expected graph as
-    construction left it, i.e. with ontology-canonical node types.
+    construction left it, i.e. with ontology-canonical node types and -- mirroring what
+    the profile's hook does to real extraction output -- salience applied and, unless
+    ``drop_low_salience`` is off, low-salience assertions dropped.
     """
     passage = read_passage(stem)
     graph = expected_graph(stem)
@@ -108,6 +114,9 @@ async def run_fixture(stem: str) -> tuple[DocumentChunk, LegalKnowledgeGraph]:
 
     async def calculate_chunk_graphs(chunks, graph_model, custom_prompt, **kwargs):
         assert graph_model is LegalKnowledgeGraph
+        apply_salience(graph)
+        if drop_low_salience:
+            drop_low_salience_assertions(graph)
         return [graph]
 
     with patch.object(
@@ -560,3 +569,34 @@ async def test_recited_allegation_and_its_denial_share_one_name_and_stay_two_nod
     # The denial names the allegation node, so the stored reference is that node's id.
     assert denial.responds_to == str(allegation.id)
     assert ("responds_to", allegation.name) in relations(denial)
+
+
+# --------------------------------------------------------------------------------------
+# Caption and boilerplate: entities, a kept denial, and two low statements the profile drops
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_caption_passage_yields_entities_and_only_the_denial():
+    chunk, graph = await run_fixture("answer_caption_boilerplate")
+
+    court = find_one(entities(chunk), "Superior Court of New Jersey, Law Division, Passaic County")
+    assert court.is_a.name == "court"
+    find_one(entities(chunk), "Gerald Bianchi")
+    find_one(entities(chunk), "City of Clifton")
+
+    assert statement_types(chunk) == ["denial"]
+    denial = assertion_for(chunk, graph, "denial-p34")
+    assert denial.polarity == "negative"
+    assert denial.importance_weight == 0.9
+    assert denial.responds_to_ref["locator_value"] == "34"
+
+
+@pytest.mark.asyncio
+async def test_low_salience_statements_survive_down_weighted_when_the_drop_is_off():
+    chunk, graph = await run_fixture("answer_caption_boilerplate", drop_low_salience=False)
+
+    assert sorted(statement_types(chunk)) == ["denial", "statement", "statement"]
+    for node_id in ("repeats-prior", "certification"):
+        assert assertion_for(chunk, graph, node_id).importance_weight == 0.2
+    assert assertion_for(chunk, graph, "denial-p34").importance_weight == 0.9

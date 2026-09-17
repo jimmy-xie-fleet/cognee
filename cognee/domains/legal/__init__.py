@@ -1,5 +1,10 @@
 """Legal extraction profile."""
 
+from cognee.domains.legal.extraction import (
+    SALIENCE_IMPORTANCE,
+    LegalExtractionOptions,
+    legal_chunk_graphs,
+)
 from cognee.domains.legal.models import (
     LegalKnowledgeGraph,
     LegalNode,
@@ -8,9 +13,9 @@ from cognee.domains.legal.models import (
     Polarity,
     Precision,
     ReferenceBasis,
+    Salience,
 )
 from cognee.domains.legal.profile import (
-    DEFAULT_LEGAL_CHUNK_SIZE,
     LEGAL_FUZZY_CUTOFF,
     LEGAL_ONTOLOGY_PATH,
     legal_ontology_resolver,
@@ -26,10 +31,13 @@ __all__ = [
     "Polarity",
     "Precision",
     "ReferenceBasis",
+    "Salience",
+    "SALIENCE_IMPORTANCE",
+    "LegalExtractionOptions",
+    "legal_chunk_graphs",
     "legal_profile",
     "legal_ontology_resolver",
     "LEGAL_ONTOLOGY_PATH",
-    "DEFAULT_LEGAL_CHUNK_SIZE",
     "LEGAL_FUZZY_CUTOFF",
     "load_legal_extraction_prompt",
 ]

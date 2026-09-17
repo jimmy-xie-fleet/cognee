@@ -783,14 +783,43 @@ await cognee.remember(text, dataset_name="case_123", self_improvement=False, **l
 ```
 
 `legal_profile()` returns `graph_model` (`LegalKnowledgeGraph`), `custom_prompt` (the legal
-extraction prompt), `chunk_size`, `config` (the OWL ontology resolver, fuzzy-matched,
-`ontology_mode="annotate"` by default), and `enrichment_tasks`
+extraction prompt), `calculate_chunk_graphs` (the profile's per-chunk extractor — two passes
+merged, salience applied, low-salience assertions dropped; see below), `config` (the OWL
+ontology resolver, fuzzy-matched, `ontology_mode="annotate"` by default), `enrichment_tasks`
 (`[Task(resolve_assertion_references, scope="touched", allow_llm=False)]`, appended to the
-cognify tail; empty when `resolve_references=False`) — splat it into `remember()` or
-`cognify()`. Everything lives under `cognee/domains/legal/`: `models.py` (`LegalNode`,
-`LegalReference`, `LegalKnowledgeGraph`), `profile.py` (`legal_profile()`,
-`legal_ontology_resolver()`), `prompt.py` (`load_legal_extraction_prompt()`),
-`ontology/legal.owl`, and `prompts/legal_extraction_system.txt`.
+cognify tail; empty when `resolve_references=False`), and `chunk_size` only when one is passed
+— the default is cognee's own. The profile used to pin 512 tokens; a repeated recall eval
+measured that graph 6 to 20 coverage points behind plain extraction with 57 to 82 percent of
+its misses never retrieved, and the same profile at the default chunk size within noise on
+hybrid recall. Splat the result into `remember()` or `cognify()`. Everything lives under
+`cognee/domains/legal/`: `models.py` (`LegalNode`, `LegalReference`, `LegalKnowledgeGraph`,
+`Salience`), `extraction.py` (`legal_chunk_graphs()`, the merge and the salience filter),
+`profile.py` (`legal_profile()`, `legal_ontology_resolver()`), `prompt.py`
+(`load_legal_extraction_prompt()`), `ontology/legal.owl`, and
+`prompts/legal_extraction_system.txt`.
+
+- **Two-pass extraction** (`two_pass=True`, the default): each chunk is extracted twice —
+  once with cognee's default prompt and `KnowledgeGraph` (byte-identical to plain ingestion)
+  and once with the legal prompt — and the two graphs are merged before construction, so the
+  legal graph is a superset of the plain one. Ids are prefixed per pass (`p:`/`l:`) and a plain
+  entity with the same normalized name as a legal entity is folded onto the legal node (its
+  type from the profile's vocabulary), with the plain edges repointed. Chunking runs once and
+  the merged graph attaches to the one `DocumentChunk`. Two LLM calls per chunk;
+  `cognify(dry_run=True)` counts one. The eval that motivated it: the single-pass legal graph
+  lost the plain graph's numeric and date facts (valuation 51 vs 67 percent, timeline 31 vs 52).
+- **Salience**: the prompt marks every assertion `high` / `medium` / `low`
+  (`LegalNode.salience`); `low` is boilerplate — captions and court/venue recitals,
+  appearances and "attorneys for", "repeats its prior responses" / "reserves all rights",
+  certifications that no other action is pending, "submitted in the context of settlement",
+  attendance, signature blocks — and a positional denial or admission is never low. The mark
+  becomes the node's `importance_weight` (0.9 / 0.5 / 0.2; graph-completion scoring multiplies
+  distance by `2 − weight`, hybrid ranking does not read it), and with `drop_low_salience=True`
+  (the default) `low` assertions are removed before construction unless they are denials or
+  admissions or another retained assertion refers to them; edges and dangling references are
+  pruned (`prune_extracted_graph`, shared with ontology strict mode) and the count is logged.
+  Entities are never dropped by salience. Why: what the legal graph actually retrieved was
+  two-thirds generic `statement`/`record` boilerplate, led by "defendants repeat their prior
+  responses".
 
 - **Identity rule**: each statement occurrence becomes its own `Assertion` node (an `Entity`
   subclass), keyed on name + chunk + statement type + speaker + occurrence — `name` is the
@@ -922,9 +951,10 @@ cognify tail; empty when `resolve_references=False`) — splat it into `remember
   link is lost; speaker context is resolved per chunk, not across the whole document;
   relationship names (e.g. `asserted_by`, `supersedes`) are not ontology-grounded, only node
   types are; `update()` takes
-  `graph_model`/`custom_prompt` but has no `config` or `chunk_size` parameter, so editing a
-  document ingested with the profile re-extracts it without the ontology and at the default
-  chunk size; `remember(session_id=…)` rejects the profile outright (session memory is bridged
+  `graph_model`/`custom_prompt` but has no `config`, `calculate_chunk_graphs` or `chunk_size`
+  parameter, so editing a document ingested with the profile re-extracts it without the
+  ontology, single-pass and with no salience filter; ontology `strict` mode drops plain-pass
+  node types the OWL does not cover; `remember(session_id=…)` rejects the profile outright (session memory is bridged
   into the graph by `improve()`, which cognifies with the default extraction); do not combine
   with `temporal_cognify=True`, which ignores `custom_prompt`/`graph_model` and would silently
   drop the profile. The reference resolver adds its own limits: the pass is budget-bounded, so a

@@ -25,6 +25,7 @@ from cognee.domains.legal import (
     Polarity,
     Precision,
     ReferenceBasis,
+    Salience,
 )
 from cognee.modules.engine.models.Assertion import StatementType
 from cognee.shared.data_models import Edge as KGEdge
@@ -1054,6 +1055,129 @@ def _email_proposal() -> LegalKnowledgeGraph:
     )
 
 
+def _answer_caption_boilerplate() -> LegalKnowledgeGraph:
+    """Caption, appearance, incorporation by reference, one real denial, a certification.
+
+    The caption and the appearance become entities, never assertions. The two boilerplate
+    sentences are extracted -- the prompt says mark, do not omit -- as ``low`` statements
+    the profile drops before construction; the positional denial is the passage's one
+    substantive statement and is never low.
+    """
+    return LegalKnowledgeGraph(
+        nodes=[
+            LegalNode(
+                id="court",
+                name="Superior Court of New Jersey, Law Division, Passaic County",
+                type="Court",
+                description="The court the action is pending in, Docket No. PAS-L-001884-26.",
+            ),
+            LegalNode(
+                id="adams",
+                name="Adams Family Properties, LLC",
+                type="Organization",
+                description="Plaintiff.",
+            ),
+            LegalNode(
+                id="city",
+                name="City of Clifton",
+                type="City",
+                description="Defendant, the answering party.",
+            ),
+            LegalNode(
+                id="bianchi",
+                name="Gerald Bianchi",
+                type="Person",
+                description="Counsel for Defendant City of Clifton.",
+            ),
+            LegalNode(
+                id="answer",
+                name="Answer of Defendant City of Clifton",
+                type="Answer",
+                description="The City's Answer to the Complaint.",
+            ),
+            LegalNode(
+                id="complaint",
+                name="Complaint in Adams Family Properties, LLC v. City of Clifton",
+                type="Complaint",
+                description="The pleading this Answer responds to.",
+            ),
+            LegalNode(
+                id="repeats-prior",
+                name="Defendant repeats its prior responses to Paragraphs 1 through 33",
+                type="Statement",
+                description="Incorporation by reference at the head of Count II; boilerplate.",
+                statement_type=StatementType.STATEMENT,
+                polarity=Polarity.POSITIVE,
+                asserted_by="city",
+                salience=Salience.LOW,
+                source_quote=(
+                    "Defendant repeats its prior responses to Paragraphs 1 through 33 as if "
+                    "set forth at length herein."
+                ),
+            ),
+            LegalNode(
+                id="denial-p34",
+                name="The allegations of Paragraph 34 of the Complaint are true",
+                type="Denial",
+                description=(
+                    "The City's answer to Paragraph 34: a positional denial with no "
+                    "proposition of its own in the passage."
+                ),
+                statement_type=StatementType.DENIAL,
+                polarity=Polarity.NEGATIVE,
+                asserted_by="city",
+                salience=Salience.HIGH,
+                responds_to_ref=LegalReference(
+                    document_hint="the Complaint",
+                    locator_kind=LocatorKind.PARAGRAPH,
+                    locator_value="34",
+                    basis=ReferenceBasis.CITED,
+                ),
+                source_quote="Defendant denies the allegations of Paragraph 34 of the Complaint.",
+            ),
+            LegalNode(
+                id="certification",
+                name="This controversy is the subject of another pending action",
+                type="Statement",
+                description="The Rule 4:5-1 certification, negated; boilerplate.",
+                statement_type=StatementType.STATEMENT,
+                polarity=Polarity.NEGATIVE,
+                asserted_by="city",
+                salience=Salience.LOW,
+                source_quote=(
+                    "I certify that this controversy is not the subject of another pending action."
+                ),
+            ),
+        ],
+        edges=[
+            KGEdge(
+                source_node_id="city",
+                target_node_id="answer",
+                relationship_name="party_to",
+                description="City of Clifton filed the Answer.",
+            ),
+            KGEdge(
+                source_node_id="adams",
+                target_node_id="complaint",
+                relationship_name="party_to",
+                description="Adams Family Properties, LLC is the plaintiff in the Complaint.",
+            ),
+            KGEdge(
+                source_node_id="answer",
+                target_node_id="complaint",
+                relationship_name="responds_to",
+                description="The Answer of Defendant City of Clifton responds to the Complaint.",
+            ),
+            KGEdge(
+                source_node_id="bianchi",
+                target_node_id="answer",
+                relationship_name="signed",
+                description="Gerald Bianchi appears on the Answer for the City of Clifton.",
+            ),
+        ],
+    )
+
+
 EXPECTED: dict[str, LegalKnowledgeGraph] = {
     "complaint_p17_p18_warning": _complaint_p17_p18_warning(),
     "answer_p17_denial": _answer_p17_denial(),
@@ -1063,4 +1187,5 @@ EXPECTED: dict[str, LegalKnowledgeGraph] = {
     "deposition_qa": _deposition_qa(),
     "ambiguous_names": _ambiguous_names(),
     "email_proposal": _email_proposal(),
+    "answer_caption_boilerplate": _answer_caption_boilerplate(),
 }

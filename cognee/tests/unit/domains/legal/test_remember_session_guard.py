@@ -17,7 +17,13 @@ from cognee.domains.legal import legal_profile
 
 remember_module = sys.modules["cognee.api.v1.remember.remember"]
 
-PROFILE_OPTIONS = ("graph_model", "custom_prompt", "config", "chunk_size", "enrichment_tasks")
+PROFILE_OPTIONS = (
+    "graph_model",
+    "custom_prompt",
+    "config",
+    "enrichment_tasks",
+    "calculate_chunk_graphs",
+)
 
 
 @pytest.mark.asyncio
@@ -45,6 +51,7 @@ async def test_session_remember_rejects_the_whole_legal_profile():
         ("config", {"ontology_config": {"ontology_resolver": None}}),
         ("chunk_size", 512),
         ("enrichment_tasks", [object()]),
+        ("calculate_chunk_graphs", lambda *args, **kwargs: []),
     ],
 )
 async def test_session_remember_rejects_each_extraction_option(option, value):
@@ -71,8 +78,9 @@ async def test_permanent_remember_still_accepts_the_profile():
     assert inner.await_count == 1
     forwarded = inner.await_args.kwargs
     assert forwarded["session_id"] is None
-    assert forwarded["chunk_size"] == profile["chunk_size"]
+    assert forwarded["chunk_size"] is None  # cognee's default, not a profile-specific size
     assert forwarded["custom_prompt"] == profile["custom_prompt"]
     assert forwarded["graph_model"] is profile["graph_model"]
     assert forwarded["config"] is profile["config"]
     assert forwarded["enrichment_tasks"] is profile["enrichment_tasks"]
+    assert forwarded["calculate_chunk_graphs"] is profile["calculate_chunk_graphs"]

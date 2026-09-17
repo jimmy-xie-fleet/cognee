@@ -125,6 +125,15 @@ class TestSchema:
         defs = LegalKnowledgeGraph.model_json_schema().get("$defs", {})
         assert set(defs["ReferenceBasis"]["enum"]) == {"cited", "positional", "described"}
 
+    def test_salience_is_in_the_schema_and_the_weight_is_not(self):
+        """The model marks salience; the pipeline turns it into a weight it never asks for."""
+        schema = LegalKnowledgeGraph.model_json_schema()
+        defs = schema.get("$defs", {})
+        assert set(defs["Salience"]["enum"]) == {"high", "medium", "low"}
+        properties = defs["LegalNode"]["properties"]
+        assert "salience" in properties
+        assert "importance_weight" not in properties
+
     def test_field_descriptions_are_present(self):
         schema = LegalKnowledgeGraph.model_json_schema()
         defs = schema.get("$defs", {})
@@ -427,6 +436,24 @@ class TestPrompt:
         prompt = load_legal_extraction_prompt()
         for sentence in PRINCIPLE_SENTENCES:
             assert sentence in prompt
+
+    def test_prompt_defines_salience_and_names_the_boilerplate(self):
+        # the prompt wraps at 100 columns; compare on collapsed whitespace
+        prompt = " ".join(load_legal_extraction_prompt().split())
+
+        assert "`salience` is REQUIRED for every assertion node" in prompt
+        for phrase in (
+            "attorneys for",
+            "repeats its prior responses",
+            "reserves all rights or positions",
+            "no other action is pending",
+            "in the context of settlement",
+            "signature blocks",
+        ):
+            assert phrase in prompt, phrase
+        # positional pleading responses are the structure, never boilerplate
+        assert 'A positional denial or admission ("17. Denied.") is never low' in prompt
+        assert "Boilerplate is low salience, not omitted silently" in prompt
 
     def test_prompt_contains_every_entity_type_name(self):
         prompt = load_legal_extraction_prompt()

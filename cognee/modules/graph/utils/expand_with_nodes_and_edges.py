@@ -24,6 +24,88 @@ _ASSERTION_REFERENCE_FIELDS = (
     ("attributed_to", "attributed_to"),
     ("responds_to", "responds_to"),
 )
+_ASSERTION_REFERENCE_FIELD_NAMES = tuple(
+    field_name for field_name, _relationship_name in _ASSERTION_REFERENCE_FIELDS
+)
+
+
+def _node_importance_weight(extracted_node: Node, data_chunk: DocumentChunk) -> Optional[float]:
+    """The importance a node is stored with: its own, when extraction set one, else the chunk's.
+
+    Every node used to inherit ``data_chunk.importance_weight`` verbatim. An extraction
+    that scores its nodes (the legal profile maps a statement's salience onto this) may
+    carry an ``importance_weight`` on the extracted node; a float in [0, 1] there wins.
+    Anything else -- absent, ``None``, out of range, not a number -- falls back to the
+    chunk, so a plain ``Node`` is stored exactly as before.
+    """
+    own_weight = getattr(extracted_node, "importance_weight", None)
+    if isinstance(own_weight, (int, float)) and not isinstance(own_weight, bool):
+        if 0.0 <= float(own_weight) <= 1.0:
+            return float(own_weight)
+    return data_chunk.importance_weight
+
+
+def _repoint_assertion_references_at_surviving_nodes(
+    retained_nodes: list[Node],
+    surviving_node_id_by_collapsed_node_id: dict[str, str],
+    dropped_node_ids: set[str],
+) -> None:
+    """Follow collapsed references to the survivor and drop references to dropped nodes.
+
+    A reference to a node this graph no longer holds names nothing. Left in place it
+    would reach storage as an LLM token -- in ``asserted_by``, an identity field, so the
+    node's id would depend on it -- and derive an edge pointing at no node at all.
+    """
+    for node in retained_nodes:
+        if not is_assertion_node(node):
+            continue
+
+        for field_name in _ASSERTION_REFERENCE_FIELD_NAMES:
+            reference = getattr(node, field_name, None)
+            if reference is None:
+                continue
+
+            reference = surviving_node_id_by_collapsed_node_id.get(reference, reference)
+            setattr(node, field_name, None if reference in dropped_node_ids else reference)
+
+
+def prune_extracted_graph(
+    extracted_graph: KnowledgeGraph,
+    dropped_node_ids: set[str],
+    surviving_node_id_by_collapsed_node_id: Optional[dict[str, str]] = None,
+) -> int:
+    """Remove ``dropped_node_ids`` from an extracted graph, repointing what referred to them.
+
+    Shared by ontology strict mode (which drops ungrounded nodes and collapses
+    duplicates onto a survivor) and by any extraction that prunes its own output before
+    construction (the legal profile drops low-salience assertions). Nodes in
+    ``dropped_node_ids`` are removed; assertion reference fields follow the collapse map
+    and are nulled when they pointed at a dropped node; edges are rewritten through the
+    collapse map and dropped when either endpoint is gone. Returns the number of edges
+    dropped. Mutates ``extracted_graph`` in place.
+    """
+    collapse_map = surviving_node_id_by_collapsed_node_id or {}
+    if not dropped_node_ids and not collapse_map:
+        return 0
+
+    extracted_graph.nodes = [
+        node for node in extracted_graph.nodes if node.id not in dropped_node_ids
+    ]
+    _repoint_assertion_references_at_surviving_nodes(
+        extracted_graph.nodes, collapse_map, dropped_node_ids
+    )
+
+    retained_edges = []
+    for edge in extracted_graph.edges:
+        edge.source_node_id = collapse_map.get(edge.source_node_id, edge.source_node_id)
+        edge.target_node_id = collapse_map.get(edge.target_node_id, edge.target_node_id)
+        if edge.source_node_id in dropped_node_ids or edge.target_node_id in dropped_node_ids:
+            continue
+        retained_edges.append(edge)
+
+    dropped_edges = len(extracted_graph.edges) - len(retained_edges)
+    extracted_graph.edges = retained_edges
+    return dropped_edges
 
 
 def _strip_nonblank_text(value: str | None) -> str | None:
@@ -158,7 +240,7 @@ def _get_or_create_entity(
         is_a=entity_type,
         description=extracted_node.description,
         belongs_to_set=data_chunk.belongs_to_set,
-        importance_weight=data_chunk.importance_weight,
+        importance_weight=_node_importance_weight(extracted_node, data_chunk),
     )
     data_points_by_id[entity_key] = entity
     return entity
@@ -339,7 +421,7 @@ def _create_assertion(
         description=extracted_node.description,
         is_a=entity_type,
         belongs_to_set=data_chunk.belongs_to_set,
-        importance_weight=data_chunk.importance_weight,
+        importance_weight=_node_importance_weight(extracted_node, data_chunk),
         statement_type=_statement_type_value(extracted_node),
         polarity=_polarity_value(extracted_node),
         asserted_by=reference_names["asserted_by"],
