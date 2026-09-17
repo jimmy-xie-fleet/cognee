@@ -986,9 +986,16 @@ body, and a nameless one used to title itself `None`. Those now render the node'
   `[<statement_type> by <speaker>; stance: <polarity>] <proposition>`, followed by a stance
   sentence built from the same verb table the resolver's edge texts use (`Defendants deny that
   …`; `polarity=unknown` reads "takes an unrecorded stance on"), the verbatim `source_quote` with
-  its `(verified)` mark, then the description. The fields reach the renderer because a
-  `DataPoint` subclass may declare `metadata["context_fields"]` — `Assertion` declares
-  `statement_type`, `polarity`, `asserted_by`, `source_quote`, `source_quote_verified` — and
+  its `(verified)` mark, then `Responds to: <responds_to_text>` / `Attributed to:
+  <attributed_to_text>` (the reference as the document wrote it, e.g. `the Complaint ¶17` —
+  printed whether or not a resolver pass has turned it into an edge, because a responsive
+  pleading's assertion is often *only* "the allegations of paragraph 17 are true" and the
+  locator is what says which statement is answered), then the description. A nameless node
+  that carries `text` (a `DocumentChunk` a paragraph reference was anchored on) is labelled
+  by its first words in pair lines and edge bullets, never by its id. The fields reach the
+  renderer because a `DataPoint` subclass may declare `metadata["context_fields"]` —
+  `Assertion` declares `statement_type`, `polarity`, `asserted_by`, `source_quote`,
+  `source_quote_verified`, `responds_to_text`, `attributed_to_text` — and
   `get_memory_fragment` unions every subclass's context fields into the graph projection
   (`brute_force_triplet_search.py`, `default_node_properties_to_project()`); edges also project
   `resolution_confidence` and `resolution_strategy`. Because that union is global rather than
@@ -1014,7 +1021,10 @@ body, and a nameless one used to title itself `None`. Those now render the node'
 
 Still open: statement ids are not part of `extract_context_object_ids`, access tracking or
 `include_references`, so per-turn feedback cannot attribute a rendered statement;
-`TRIPLET_COMPLETION` has no assertion pairing.
+`TRIPLET_COMPLETION` has no assertion pairing; and the legal extraction prompt still lets a
+responsive pleading's assertion be the positional proposition ("the allegations of paragraph
+17 of the complaint are true") rather than the substantive one — retrieval renders the locator,
+but only an ingestion change can put the answered claim in the assertion itself.
 
 #### Retrieval budgets
 

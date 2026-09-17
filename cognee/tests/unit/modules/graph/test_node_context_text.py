@@ -297,6 +297,39 @@ def test_quote_line_is_omitted_when_there_is_no_quote():
     assert "Quote" not in body
 
 
+def test_the_reference_as_written_is_printed_when_present():
+    """A pleading's "the allegations of paragraph 17 are true" says nothing without the
+    locator; until a resolver pass turns it into an edge, the text is the pointer."""
+    _title, body = node_context_text(
+        {
+            **DENIAL,
+            "name": "the allegations of paragraph 17 of the complaint are true",
+            "responds_to_text": "the Complaint ¶17",
+            "attributed_to_text": "Fester Preliminary Investigation Report",
+        }
+    )
+
+    lines = body.splitlines()
+    assert lines[0] == (
+        "Defendants denies that the allegations of paragraph 17 of the complaint are true."
+    )
+    assert "Responds to: the Complaint ¶17" in lines
+    assert "Attributed to: Fester Preliminary Investigation Report" in lines
+    # quote before locator, locator before description
+    assert lines.index("Responds to: the Complaint ¶17") > lines.index(
+        'Quote: "Defendants deny each and every allegation of paragraph 17." (verified)'
+    )
+    assert lines[-1] == DENIAL["description"]
+
+
+def test_a_blank_reference_text_prints_no_locator_line():
+    _title, body = node_context_text(
+        {**DENIAL, "responds_to_text": "  ", "attributed_to_text": None}
+    )
+
+    assert "Responds to" not in body and "Attributed to" not in body
+
+
 def test_description_equal_to_the_name_is_not_repeated():
     _title, body = node_context_text(
         {
@@ -333,6 +366,24 @@ def test_label_falls_back_to_the_id():
 
 def test_label_is_empty_when_there_is_nothing_to_show():
     assert node_context_label({}) == ""
+
+
+def test_label_of_a_nameless_text_node_is_its_title_not_its_id():
+    """A chunk a resolver anchored a paragraph on has text and no name; the pair line
+    that points at it must read like the passage, not like a UUID."""
+    label = node_context_label(
+        {
+            "id": "9522e29a-201d-5177-9a62-2d8a48f8e734",
+            "text": "Defendants deny each and every allegation of paragraph 17 of the Complaint.",
+        }
+    )
+
+    assert label == "Defendants deny each and every allegation of... [defendants, deny, each]"
+    assert "9522e29a" not in label
+
+
+def test_label_prefers_the_name_over_the_text():
+    assert node_context_label({"name": "Alice", "text": "Alice said many things."}) == "Alice"
 
 
 def test_label_of_an_assertion_carries_type_and_stance():
@@ -394,13 +445,15 @@ def test_context_fields_are_cached_and_the_cache_is_clearable():
         context_fields_for_datapoints.cache_clear()
 
 
-def test_assertion_context_fields_are_the_stance_properties():
+def test_assertion_context_fields_are_the_stance_properties_and_the_locators():
     assert ASSERTION_METADATA["context_fields"] == [
         "statement_type",
         "polarity",
         "asserted_by",
         "source_quote",
         "source_quote_verified",
+        "responds_to_text",
+        "attributed_to_text",
     ]
 
 

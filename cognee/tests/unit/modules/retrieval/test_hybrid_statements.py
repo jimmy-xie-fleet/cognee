@@ -451,6 +451,31 @@ async def test_a_nameless_counterpart_falls_back_to_its_node_id():
     assert built[0]["pairs"][0]["text"] == "responds to: [allegation/positive] allegation-9"
 
 
+@pytest.mark.asyncio
+async def test_a_chunk_counterpart_renders_its_first_words_not_its_id():
+    """A ``responds_to`` edge a resolver anchored on a paragraph points at a DocumentChunk:
+    no name, but text. The pair line has to read like the passage; a bare UUID tells the
+    model nothing."""
+    chunk = {
+        "id": "9522e29a-201d-5177-9a62-2d8a48f8e734",
+        "text": "13. Denied. Defendants deny each and every allegation of paragraph 13.",
+    }
+    graph = _graph(
+        nodes=[_node_row(DENIAL), _node_row(chunk)],
+        edges=[("denial-1", chunk["id"], "responds_to", RESOLUTION)],
+    )
+
+    built = await build_statements(graph, [_hit(DENIAL)])
+
+    (pair,) = built[0]["pairs"]
+    assert pair["text"] == (
+        "responds to: 13. Denied. Defendants deny each and every... "
+        "[13, denied, defendants] (confidence 0.95, paragraph_locator)"
+    )
+    assert "9522e29a" not in pair["text"]
+    assert pair["node_id"] == chunk["id"]
+
+
 # ---------------------------------------------------------------------------------------
 # format_statements
 # ---------------------------------------------------------------------------------------

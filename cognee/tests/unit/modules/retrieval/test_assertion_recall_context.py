@@ -30,6 +30,8 @@ ASSERTION_PAYLOAD = {
     "asserted_by": "Defendants",
     "source_quote": "Defendants deny each and every allegation of paragraph 17.",
     "source_quote_verified": True,
+    "responds_to_text": "the Complaint ¶17",
+    "attributed_to_text": None,
 }
 
 CONTEXT_FIELDS = [
@@ -38,6 +40,8 @@ CONTEXT_FIELDS = [
     "asserted_by",
     "source_quote",
     "source_quote_verified",
+    "responds_to_text",
+    "attributed_to_text",
 ]
 
 
@@ -110,7 +114,8 @@ def test_entity_block_of_an_assertion_renders_the_stance():
         "## Relevant entities\n"
         "### [denial by Defendants; stance: negative] Adams breached the lease\n"
         "Defendants denies that Adams breached the lease.\n"
-        'Quote: "Defendants deny each and every allegation of paragraph 17." (verified)'
+        'Quote: "Defendants deny each and every allegation of paragraph 17." (verified)\n'
+        "Responds to: the Complaint ¶17"
     )
 
 

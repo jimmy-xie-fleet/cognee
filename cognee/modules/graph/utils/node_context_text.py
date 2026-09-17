@@ -151,6 +151,14 @@ def node_context_label(props: Mapping[str, Any]) -> str:
         # has to be identifiable in the line that mentions it.
         return f"[{statement_type}/{polarity}] {name or node_id or UNNAMED_NODE}"
 
+    # A nameless node that carries text -- a DocumentChunk a reference resolver anchored
+    # a paragraph on -- labels itself by its first words, the same title
+    # ``node_context_text`` gives it, so a pair line reads "responds to: Defendants deny
+    # each and every... [defendants, deny, allegation]" rather than a bare UUID the
+    # model can do nothing with.
+    text = _scalar_text(props.get("text"))
+    if not name and text:
+        return _create_title_from_text(text)
     return name or node_id or ""
 
 
@@ -170,6 +178,20 @@ def _assertion_context_text(props: Mapping[str, Any], statement_type: str) -> tu
     if quote:
         verified = " (verified)" if _is_true(props.get("source_quote_verified")) else ""
         lines.append(f'Quote: "{quote}"{verified}')
+
+    # The reference as the document wrote it ("the Complaint ¶17"). A responsive
+    # pleading's assertion is often *only* this -- "the allegations of paragraph 17 are
+    # true" -- and a cross-document reference is resolved into an edge only by a later
+    # resolver pass, so until then the locator is the one thing that tells a reader
+    # which statement is being answered. Printed whether or not an edge exists: the
+    # edge says which node, the text says which paragraph.
+    for field_name, label in (
+        ("responds_to_text", "Responds to"),
+        ("attributed_to_text", "Attributed to"),
+    ):
+        locator = _scalar_text(props.get(field_name))
+        if locator:
+            lines.append(f"{label}: {locator}")
 
     description = _scalar_text(props.get("description"))
     if description and description != name:

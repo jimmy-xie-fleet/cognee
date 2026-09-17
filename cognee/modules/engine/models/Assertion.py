@@ -103,6 +103,10 @@ class Assertion(Entity):
             "asserted_by",
             "source_quote",
             "source_quote_verified",
+            # The reference as written ("the Complaint ¶17"): the only pointer to the
+            # answered statement until a resolver pass turns it into an edge.
+            "responds_to_text",
+            "attributed_to_text",
         ],
     }
 
