@@ -170,19 +170,19 @@ async def test_hybrid_context_renders_the_denial_with_its_stance_and_its_pair(le
         )
 
     assert "## Relevant statements" in context
-    assert f"### [denial by Defendants; stance: negative] {PROPOSITION}" in context
+    assert f"### [denial] Defendants denies that {PROPOSITION}" in context
     assert f"Defendants denies that {PROPOSITION}." in context
     assert 'Quote: "Denied." (verified)' in context
     assert "Responds to: the Complaint ¶17" in context
-    assert f"### [allegation by Plaintiff; stance: positive] {PROPOSITION}" in context
+    assert f"### [allegation] Plaintiff affirms that {PROPOSITION}" in context
     assert f"Plaintiff affirms that {PROPOSITION}." in context
 
     # The pair came back from the real graph, both ways round.
     assert (
-        f"  ↳ responds to: [allegation/positive] {PROPOSITION} (confidence 0.9, llm_trace)"
+        f"  ↳ responds to: [allegation] Plaintiff affirms that {PROPOSITION} (confidence 0.9, llm_trace)"
         in context
     )
-    assert f"  ↳ answered by: [denial/negative] {PROPOSITION}" in context
+    assert f"  ↳ answered by: [denial] Defendants denies that {PROPOSITION}" in context
     assert "  ↳ speaker: Defendants" in context
     assert "  ↳ speaker: Plaintiff" in context
 
@@ -203,16 +203,16 @@ async def test_graph_completion_context_renders_the_denial_and_pulls_in_the_alle
             query=PROPOSITION, retrieved_objects=edges
         )
 
-    assert f"Node: [denial by Defendants; stance: negative] {PROPOSITION}" in context
+    assert f"Node: [denial] Defendants denies that {PROPOSITION}" in context
     assert f"Defendants denies that {PROPOSITION}." in context
     assert "Responds to: the Complaint ¶17" in context
-    assert f"Node: [allegation by Plaintiff; stance: positive] {PROPOSITION}" in context
+    assert f"Node: [allegation] Plaintiff affirms that {PROPOSITION}" in context
 
     responds_to = [line for line in context.splitlines() if "--[responds_to]-->" in line]
     assert responds_to, context
     (line,) = responds_to
-    assert line.startswith(f"[denial by Defendants; stance: negative] {PROPOSITION} ")
-    assert f"--> [allegation by Plaintiff; stance: positive] {PROPOSITION}" in line
+    assert line.startswith(f"[denial] Defendants denies that {PROPOSITION} ")
+    assert f"--> [allegation] Plaintiff affirms that {PROPOSITION}" in line
     assert "responds to" in line  # the resolver's edge_text, in parentheses
     assert line.endswith("[confidence 0.9, llm_trace]")
 

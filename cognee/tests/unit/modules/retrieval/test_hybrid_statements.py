@@ -195,13 +195,13 @@ async def test_build_statements_renders_the_stance_and_its_pairs():
     assert len(built) == 1
     statement = built[0]
     assert statement["id"] == "denial-1"
-    assert statement["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert statement["title"] == "[denial] Defendants denies that Adams breached the lease"
     assert statement["body"] == (
         "Defendants denies that Adams breached the lease.\n"
         'Quote: "Defendants deny each and every allegation of paragraph 17." (verified)'
     )
     assert [pair["text"] for pair in statement["pairs"]] == [
-        "responds to: [allegation/positive] Adams breached the lease "
+        "responds to: [allegation] Plaintiff affirms that Adams breached the lease "
         "(confidence 0.95, paragraph_locator)",
         "speaker: Defendants",
     ]
@@ -227,7 +227,7 @@ async def test_an_incoming_responds_to_reads_as_answered_by():
     built = await build_statements(graph, [_hit(ALLEGATION)])
 
     assert [pair["text"] for pair in built[0]["pairs"]] == [
-        "answered by: [denial/negative] Adams breached the lease "
+        "answered by: [denial] Defendants denies that Adams breached the lease "
         "(confidence 0.95, paragraph_locator)"
     ]
 
@@ -236,7 +236,7 @@ async def test_an_incoming_responds_to_reads_as_answered_by():
 async def test_a_statement_without_pairs_renders_from_the_vector_row():
     built = await build_statements(_graph(), [_hit(DENIAL)])
 
-    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert built[0]["title"] == "[denial] Defendants denies that Adams breached the lease"
     assert built[0]["pairs"] == []
 
 
@@ -257,7 +257,7 @@ async def test_graph_properties_fill_in_what_the_vector_row_does_not_carry():
 
     built = await build_statements(_pair_graph(), [_hit(narrow_row)])
 
-    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert built[0]["title"] == "[denial] Defendants denies that Adams breached the lease"
 
 
 @pytest.mark.asyncio
@@ -272,7 +272,7 @@ async def test_a_pair_less_seed_still_reads_its_graph_properties():
     built = await build_statements(_graph(nodes=[_node_row(DENIAL)]), [_hit(narrow_row)])
 
     assert built[0]["pairs"] == []
-    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert built[0]["title"] == "[denial] Defendants denies that Adams breached the lease"
 
 
 # What LanceDB actually hands back for an ``Assertion_name`` hit on the default stack: an
@@ -295,7 +295,7 @@ async def test_an_index_row_renders_from_the_graph_node_not_from_itself():
     affirmative proposition with no stance -- exactly the defect the lane exists to fix."""
     built = await build_statements(_pair_graph(), [_hit(INDEX_ROW)])
 
-    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert built[0]["title"] == "[denial] Defendants denies that Adams breached the lease"
     assert built[0]["body"].startswith("Defendants denies that Adams breached the lease.")
     assert "..." not in built[0]["title"]
 
@@ -316,7 +316,7 @@ async def test_the_graph_node_wins_over_a_row_that_disagrees():
 
     built = await build_statements(_pair_graph(), [_hit(stale_row)])
 
-    assert built[0]["title"] == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert built[0]["title"] == "[denial] Defendants denies that Adams breached the lease"
 
 
 @pytest.mark.asyncio
@@ -492,7 +492,10 @@ async def test_a_nameless_counterpart_falls_back_to_its_node_id():
 
     built = await build_statements(graph, [_hit(DENIAL)])
 
-    assert built[0]["pairs"][0]["text"] == "responds to: [allegation/positive] allegation-9"
+    assert (
+        built[0]["pairs"][0]["text"]
+        == "responds to: [allegation] an unnamed party affirms that allegation-9"
+    )
 
 
 @pytest.mark.asyncio
@@ -531,10 +534,10 @@ async def test_format_statements_renders_the_section():
 
     assert format_statements(built) == (
         "## Relevant statements\n"
-        "### [denial by Defendants; stance: negative] Adams breached the lease\n"
+        "### [denial] Defendants denies that Adams breached the lease\n"
         "Defendants denies that Adams breached the lease.\n"
         'Quote: "Defendants deny each and every allegation of paragraph 17." (verified)\n'
-        "  ↳ responds to: [allegation/positive] Adams breached the lease "
+        "  ↳ responds to: [allegation] Plaintiff affirms that Adams breached the lease "
         "(confidence 0.95, paragraph_locator)\n"
         "  ↳ speaker: Defendants"
     )
@@ -767,7 +770,9 @@ async def test_the_retriever_renders_the_statements_section():
 
     assert [statement["id"] for statement in retrieved["statements"]] == ["denial-1"]
     assert "## Relevant statements" in context
-    assert "  ↳ responds to: [allegation/positive] Adams breached the lease" in context
+    assert (
+        "  ↳ responds to: [allegation] Plaintiff affirms that Adams breached the lease" in context
+    )
 
 
 @pytest.mark.asyncio

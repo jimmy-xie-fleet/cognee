@@ -146,10 +146,10 @@ def node_context_label(props: Mapping[str, Any]) -> str:
     node_id = _scalar_text(props.get("id"))
     if is_assertion_props(props):
         statement_type = _scalar_text(props.get("statement_type"))
-        polarity = _scalar_text(props.get("polarity")) or UNKNOWN_POLARITY
         # The id fallback is the same one every other node gets: a nameless node still
         # has to be identifiable in the line that mentions it.
-        return f"[{statement_type}/{polarity}] {name or node_id or UNNAMED_NODE}"
+        clause = name or node_id or UNNAMED_PROPOSITION
+        return f"[{statement_type}] {_stance_clause(props, clause)}"
 
     # A nameless node that carries text -- a DocumentChunk a reference resolver anchored
     # a paragraph on -- labels itself by its first words, the same title
@@ -165,14 +165,15 @@ def node_context_label(props: Mapping[str, Any]) -> str:
 def _assertion_context_text(props: Mapping[str, Any], statement_type: str) -> tuple[str, str]:
     """Title and body of an assertion, with the speaker and the stance stated outright."""
     name = _scalar_text(props.get("name"))
-    speaker = _scalar_text(props.get("asserted_by")) or UNNAMED_SPEAKER
-    polarity = _scalar_text(props.get("polarity")) or UNKNOWN_POLARITY
 
-    title = f"[{statement_type} by {speaker}; stance: {polarity}] {name or UNNAMED_NODE}"
-
-    stance_verb = STANCE_VERB_BY_POLARITY.get(polarity, UNRECORDED_STANCE_VERB)
-    clause = (name or "").rstrip(".").strip() or UNNAMED_PROPOSITION
-    lines = [as_sentence(f"{speaker} {stance_verb} {clause}")]
+    # The headline IS the stance sentence. An earlier format put the stance in a tag and
+    # the bare proposition after it -- "[denial by Defendants; stance: negative] Adams
+    # breached the lease" -- and the eval showed the model reading the proposition as the
+    # node's claim, then reporting the quote that denies it as a contradiction. Nothing a
+    # reader can skim may state the affirmative proposition on its own.
+    stance = _stance_clause(props, name or UNNAMED_PROPOSITION)
+    title = f"[{statement_type}] {stance}"
+    lines = [as_sentence(stance)]
 
     quote = _scalar_text(props.get("source_quote"))
     if quote:
@@ -198,6 +199,15 @@ def _assertion_context_text(props: Mapping[str, Any], statement_type: str) -> tu
         lines.append(description)
 
     return title, "\n".join(lines)
+
+
+def _stance_clause(props: Mapping[str, Any], proposition: str) -> str:
+    """``<speaker> <stance verb> <proposition>``, unterminated, from the shared verb table."""
+    speaker = _scalar_text(props.get("asserted_by")) or UNNAMED_SPEAKER
+    polarity = _scalar_text(props.get("polarity")) or UNKNOWN_POLARITY
+    stance_verb = STANCE_VERB_BY_POLARITY.get(polarity, UNRECORDED_STANCE_VERB)
+    clause = proposition.rstrip(".").strip() or UNNAMED_PROPOSITION
+    return f"{speaker} {stance_verb} {clause}"
 
 
 @lru_cache(maxsize=1)

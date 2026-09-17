@@ -164,7 +164,7 @@ def test_a_blank_or_absent_type_falls_back_to_the_statement_type():
 def test_assertion_title_carries_statement_type_speaker_and_stance():
     title, _body = node_context_text(DENIAL)
 
-    assert title == "[denial by Defendants; stance: negative] Adams breached the lease"
+    assert title == "[denial] Defendants denies that Adams breached the lease"
 
 
 def test_negative_assertion_body_states_the_denial():
@@ -203,7 +203,7 @@ def test_missing_polarity_property_is_reported_as_unknown():
         {"name": "the roof leaked", "statement_type": "testimony", "asserted_by": "Mr. Adams"}
     )
 
-    assert title == "[testimony by Mr. Adams; stance: unknown] the roof leaked"
+    assert title == "[testimony] Mr. Adams takes an unrecorded stance on the roof leaked"
     assert body == "Mr. Adams takes an unrecorded stance on the roof leaked."
 
 
@@ -212,7 +212,7 @@ def test_missing_speaker_renders_the_unnamed_party():
         {"name": "the roof leaked", "statement_type": "allegation", "polarity": "positive"}
     )
 
-    assert title == "[allegation by an unnamed party; stance: positive] the roof leaked"
+    assert title == "[allegation] an unnamed party affirms that the roof leaked"
 
 
 def test_speakerless_stance_sentence_matches_the_derived_edge_text():
@@ -347,7 +347,7 @@ def test_description_equal_to_the_name_is_not_repeated():
 def test_nameless_assertion_falls_back_to_this_statement():
     title, body = node_context_text({"statement_type": "denial", "polarity": "negative"})
 
-    assert title == "[denial by an unnamed party; stance: negative] Unnamed Node"
+    assert title == "[denial] an unnamed party denies that this statement"
     assert body == "an unnamed party denies that this statement."
 
 
@@ -387,25 +387,28 @@ def test_label_prefers_the_name_over_the_text():
 
 
 def test_label_of_an_assertion_carries_type_and_stance():
-    assert node_context_label(DENIAL) == "[denial/negative] Adams breached the lease"
+    assert node_context_label(DENIAL) == "[denial] Defendants denies that Adams breached the lease"
 
 
 def test_label_of_a_nameless_assertion_falls_back_to_the_id():
     """Like every other node: the id is the only handle a reader has left."""
     assert (
         node_context_label({"id": "denial-1", "statement_type": "denial", "polarity": "negative"})
-        == "[denial/negative] denial-1"
+        == "[denial] an unnamed party denies that denial-1"
     )
 
 
 def test_label_of_a_nameless_idless_assertion_still_reports_its_stance():
-    assert node_context_label({"statement_type": "denial"}) == "[denial/unknown] Unnamed Node"
+    assert (
+        node_context_label({"statement_type": "denial"})
+        == "[denial] an unnamed party takes an unrecorded stance on this statement"
+    )
 
 
 def test_label_of_an_assertion_without_polarity_reports_unknown():
     assert (
         node_context_label({"name": "the roof leaked", "statement_type": "testimony"})
-        == "[testimony/unknown] the roof leaked"
+        == "[testimony] an unnamed party takes an unrecorded stance on the roof leaked"
     )
 
 
@@ -489,10 +492,10 @@ async def test_graph_context_renders_the_assertion_stance():
 
     output = await resolve_edges_to_text([edge])
 
-    assert "Node: [denial by Defendants; stance: negative] Adams breached the lease" in output
+    assert "Node: [denial] Defendants denies that Adams breached the lease" in output
     assert "Defendants denies that Adams breached the lease." in output
     assert (
-        "[denial by Defendants; stance: negative] Adams breached the lease "
+        "[denial] Defendants denies that Adams breached the lease "
         "--[responds_to]--> Answer" in output
     )
 

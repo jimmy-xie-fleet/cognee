@@ -983,9 +983,13 @@ body, and a nameless one used to title itself `None`. Those now render the node'
 - **Stance-aware rendering.** One shared renderer, `node_context_text`
   (`cognee/modules/graph/utils/node_context_text.py`), is used by `resolve_edges_to_text` (the
   `GRAPH_COMPLETION` family) and by the hybrid entity/statement blocks. An assertion renders as
-  `[<statement_type> by <speaker>; stance: <polarity>] <proposition>`, followed by a stance
-  sentence built from the same verb table the resolver's edge texts use (`Defendants deny that
-  …`; `polarity=unknown` reads "takes an unrecorded stance on"), the verbatim `source_quote` with
+  `[<statement_type>] <speaker> <stance verb> <proposition>` — the headline *is* the stance
+  sentence, built from the same verb table the resolver's edge texts use (`[denial] Defendants
+  denies that Adams breached the lease`; `polarity=unknown` reads "takes an unrecorded stance
+  on"). An earlier format tagged the stance and printed the bare proposition after it, and the
+  eval showed the model reading that proposition as the node's claim and reporting the quote
+  denying it as a contradiction; nothing skimmable may state the affirmative proposition on its
+  own. The body repeats the stance sentence, then the verbatim `source_quote` with
   its `(verified)` mark, then `Responds to: <responds_to_text>` / `Attributed to:
   <attributed_to_text>` (the reference as the document wrote it, e.g. `the Complaint ¶17` —
   printed whether or not a resolver pass has turned it into an edge, because a responsive

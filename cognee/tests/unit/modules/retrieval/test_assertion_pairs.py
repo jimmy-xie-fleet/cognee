@@ -541,11 +541,11 @@ async def test_a_retrieved_denial_arrives_with_the_allegation_it_answers():
         )
 
     assert graph.calls[0]["node_ids"] == ["denial-1"]
-    assert "[allegation by Plaintiff; stance: positive] Adams breached the lease" in context
+    assert "[allegation] Plaintiff affirms that Adams breached the lease" in context
     assert (
-        "[denial by Defendants; stance: negative] Adams breached the lease "
+        "[denial] Defendants denies that Adams breached the lease "
         "--[responds_to]--> "
-        "[allegation by Plaintiff; stance: positive] Adams breached the lease"
+        "[allegation] Plaintiff affirms that Adams breached the lease"
         "  (Defendants denies that Adams breached the lease.)"
         " [confidence 0.95, paragraph_locator]"
     ) in context
@@ -587,7 +587,7 @@ async def test_the_lane_merge_cannot_truncate_the_pair_edge_away():
         )
 
     assert "--[responds_to]-->" in context
-    assert "[allegation by Plaintiff; stance: positive] Adams breached the lease" in context
+    assert "[allegation] Plaintiff affirms that Adams breached the lease" in context
 
 
 @pytest.mark.asyncio

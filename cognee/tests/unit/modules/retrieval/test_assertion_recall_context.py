@@ -112,7 +112,7 @@ def test_entity_block_of_an_assertion_renders_the_stance():
 
     assert block == (
         "## Relevant entities\n"
-        "### [denial by Defendants; stance: negative] Adams breached the lease\n"
+        "### [denial] Defendants denies that Adams breached the lease\n"
         "Defendants denies that Adams breached the lease.\n"
         'Quote: "Defendants deny each and every allegation of paragraph 17." (verified)\n'
         "Responds to: the Complaint ¶17"
@@ -140,7 +140,7 @@ async def test_edge_bullets_label_an_assertion_neighbour_with_its_stance():
     )
 
     assert entities[0]["edges"][0]["text"] == (
-        "[denial/negative] Adams breached the lease -- asserted_by -- Acme"
+        "[denial] Defendants denies that Adams breached the lease -- asserted_by -- Acme"
     )
 
 
