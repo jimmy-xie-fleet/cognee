@@ -48,6 +48,25 @@ async def main() -> int:
         default=SOURCE,
         help="Directory of counseldesk documents to ingest (default: the Adams v0.0.2 path).",
     )
+    parser.add_argument(
+        "--profile",
+        choices=("legal", "plain"),
+        default="legal",
+        help=(
+            "legal (default): the legal extraction profile. plain: default cognee extraction, "
+            "for the baseline dataset the recall eval compares against."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help=(
+            "Chunk size in tokens. Default: the profile's (512 for legal; cognee's own default "
+            "for plain). Pass 0 with --profile legal to use cognee's default chunk size, which "
+            "separates the graph model from the chunk size in an eval."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.environ.get("LLM_API_KEY"):
@@ -62,8 +81,19 @@ async def main() -> int:
         files = [f for f in files if any(m.lower() in f.lower() for m in args.match)]
     if args.limit:
         files = files[: args.limit]
-    profile = legal_profile()
-    print(f"files={len(files)} dataset={args.dataset} chunk_size={profile['chunk_size']}")
+    if args.profile == "legal":
+        profile = legal_profile()
+        if args.chunk_size is not None:
+            # 0 means "cognee's default": remember() computes it from the model when None.
+            profile["chunk_size"] = args.chunk_size or None
+    else:
+        profile = {}
+        if args.chunk_size:
+            profile["chunk_size"] = args.chunk_size
+    print(
+        f"files={len(files)} dataset={args.dataset} profile={args.profile} "
+        f"chunk_size={profile.get('chunk_size', 'default')}"
+    )
 
     result = await cognee.remember(
         files,
