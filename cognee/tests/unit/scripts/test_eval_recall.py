@@ -2604,3 +2604,61 @@ def test_main_repeats_refuses_a_populated_out_directory(tmp_path, isolated_home,
 
     assert excinfo.value.code == 2
     assert "needs a fresh --out" in capsys.readouterr().err
+
+
+def test_run_answers_with_concurrency_keeps_matrix_order_and_journals_every_row():
+    import threading
+    import time
+
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def responder(path, body):
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        time.sleep(0.02)
+        with lock:
+            in_flight["now"] -= 1
+        return [{"search_result": [f"answer for {body['datasets'][0]}"]}]
+
+    client = FakeClient(responder)
+    session = make_session(client)
+    session.authenticate()
+    questions = [make_question(f"q{i}") for i in range(3)]
+    seen = []
+
+    rows = lib.run_answers(
+        session,
+        questions=questions,
+        datasets=["a", "b"],
+        search_types=["HYBRID_COMPLETION"],
+        on_row=lambda row: seen.append(row_key_of(row)),
+        concurrency=3,
+    )
+
+    assert [(row.dataset, row.question_id) for row in rows] == [
+        ("a", "q0"),
+        ("a", "q1"),
+        ("a", "q2"),
+        ("b", "q0"),
+        ("b", "q1"),
+        ("b", "q2"),
+    ]
+    assert all(row.error is None and row.answer.startswith("answer for") for row in rows)
+    assert sorted(seen) == sorted((row.dataset, row.search_type, row.question_id) for row in rows)
+    assert in_flight["peak"] > 1
+
+
+def row_key_of(row):
+    return (row.dataset, row.search_type, row.question_id)
+
+
+def test_the_cli_rejects_an_answer_concurrency_below_one(tmp_path, isolated_home, capsys):
+    path = write_question_file(tmp_path, question_document())
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--questions", str(path), "--datasets", "adams", "--answer-concurrency", "0"])
+
+    assert excinfo.value.code == 2
+    assert "answer-concurrency" in capsys.readouterr().err

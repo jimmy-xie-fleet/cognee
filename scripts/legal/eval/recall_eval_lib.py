@@ -889,24 +889,54 @@ def run_answers(
     top_k: int = DEFAULT_TOP_K,
     session_prefix: str = DEFAULT_SESSION_PREFIX,
     on_row: Optional[Callable[[AnswerRow], None]] = None,
+    concurrency: int = 1,
 ) -> list[AnswerRow]:
     """Answer every ``dataset x search_type x question`` cell.
 
     Two calls per cell - the retrieval context, then the answer - each on a
     session of its own. A failure is recorded on the row and the run continues:
     one dead search type should not cost the whole matrix.
+
+    ``concurrency`` bounds how many cells are in flight at once. Cells are
+    independent (each has its own session), so answering four at a time changes
+    nothing but the wall clock - a 342-cell repeat run takes 15 minutes instead of
+    an hour. Keep it at 1 against a server other people are using. ``on_row``
+    fires as each cell lands (journal order); the returned list keeps matrix order.
     """
-    rows: list[AnswerRow] = []
-    for dataset in datasets:
-        for search_type in search_types:
-            for question in questions:
-                row = _answer_one_cell(
-                    session, question, dataset, search_type, top_k, session_prefix
-                )
-                rows.append(row)
-                if on_row is not None:
+    cells = [
+        (dataset, search_type, question)
+        for dataset in datasets
+        for search_type in search_types
+        for question in questions
+    ]
+
+    def answer(cell) -> AnswerRow:
+        dataset, search_type, question = cell
+        return _answer_one_cell(session, question, dataset, search_type, top_k, session_prefix)
+
+    if concurrency <= 1:
+        rows: list[AnswerRow] = []
+        for cell in cells:
+            row = answer(cell)
+            rows.append(row)
+            if on_row is not None:
+                on_row(row)
+        return rows
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: dict[int, AnswerRow] = {}
+    report_lock = threading.Lock()
+    with ThreadPoolExecutor(max_workers=int(concurrency)) as pool:
+        futures = {pool.submit(answer, cell): index for index, cell in enumerate(cells)}
+        for future in as_completed(futures):
+            row = future.result()
+            results[futures[future]] = row
+            if on_row is not None:
+                with report_lock:
                     on_row(row)
-    return rows
+    return [results[index] for index in range(len(cells))]
 
 
 # --------------------------------------------------------------------------------------

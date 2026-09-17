@@ -131,6 +131,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Judge calls in flight at once (default 4; 1 = one verdict at a time).",
     )
     parser.add_argument(
+        "--answer-concurrency",
+        type=int,
+        default=1,
+        help=(
+            "Cells answered at once (default 1: one at a time, in matrix order). Cells are "
+            "independent, so 4 cuts a repeat run's wall clock by about 4x on a local server; "
+            "keep it at 1 against a server other people are using."
+        ),
+    )
+    parser.add_argument(
         "--spot-check",
         type=float,
         default=0.0,
@@ -353,6 +363,7 @@ def _run_matrix(args, questions, datasets, search_types, run_directory: Path) ->
             top_k=args.top_k,
             session_prefix=_session_prefix(run_directory),
             on_row=_progress_reporter(total, journal),
+            concurrency=args.answer_concurrency,
         )
     finally:
         client.close()
@@ -613,6 +624,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--spot-check must be a fraction in [0, 1], not {args.spot_check}")
     if args.judge_concurrency < 1:
         parser.error("--judge-concurrency must be at least 1")
+    if args.answer_concurrency < 1:
+        parser.error("--answer-concurrency must be at least 1")
     if args.top_k < 1:
         parser.error(f"--top-k must be at least 1, not {args.top_k}")
     if args.repeats < 1:
