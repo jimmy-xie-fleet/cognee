@@ -48,6 +48,11 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8011"
 # a slow answer is data, a timed-out answer is a hole in the table.
 DEFAULT_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOP_K = 15
+#: Ceiling on one judge or attribution call. The gateway itself has no deadline, and a
+#: five-dataset repeat run once sat for two hours on a single attribution call that never
+#: returned. A call that hits this is recorded on the row as a ``TimeoutError`` -- a hole
+#: ``--judge-only`` / ``--analyze`` repair -- instead of stalling the whole run.
+LLM_CALL_TIMEOUT_SECONDS = 300.0
 
 #: Three attempts for a transient failure, sleeping between them. The first live
 #: run retried once and lost rows anyway - a shared server under load needs to be
@@ -1048,6 +1053,23 @@ class _LazyLLMGateway:
 LLMGateway = _LazyLLMGateway
 
 
+async def _call_gateway(user_prompt: str, system_prompt: str, response_model: Any) -> Any:
+    """One structured-output call, bounded by :data:`LLM_CALL_TIMEOUT_SECONDS`.
+
+    Goes through the module-level ``LLMGateway`` so tests can still patch
+    ``LLMGateway.acreate_structured_output``. ``asyncio.timeout`` (3.11+) would read
+    better, but the harness supports 3.10.
+    """
+    return await asyncio.wait_for(
+        LLMGateway.acreate_structured_output(
+            text_input=user_prompt,
+            system_prompt=system_prompt,
+            response_model=response_model,
+        ),
+        timeout=LLM_CALL_TIMEOUT_SECONDS,
+    )
+
+
 def _default_read_prompt(filename: str) -> str:
     from cognee.infrastructure.llm.prompts import read_query_prompt
 
@@ -1163,11 +1185,7 @@ async def judge_answer(
         },
     )
 
-    verdict = await LLMGateway.acreate_structured_output(
-        text_input=user_prompt,
-        system_prompt=system_prompt,
-        response_model=JudgeVerdict,
-    )
+    verdict = await _call_gateway(user_prompt, system_prompt, JudgeVerdict)
     return apply_must_not_claim_floor(verdict, question.must_not_claim, row.answer)
 
 
@@ -1672,11 +1690,7 @@ async def attribute_misses(
             "context": answer.context,
         },
     )
-    graded = await LLMGateway.acreate_structured_output(
-        text_input=user_prompt,
-        system_prompt=system_prompt,
-        response_model=AttributionVerdict,
-    )
+    graded = await _call_gateway(user_prompt, system_prompt, AttributionVerdict)
 
     def clean(values: Sequence[Any]) -> set[int]:
         out: set[int] = set()

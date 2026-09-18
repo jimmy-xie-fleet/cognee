@@ -2662,3 +2662,51 @@ def test_the_cli_rejects_an_answer_concurrency_below_one(tmp_path, isolated_home
 
     assert excinfo.value.code == 2
     assert "answer-concurrency" in capsys.readouterr().err
+
+
+def test_a_hanging_judge_call_times_out_into_an_error_row(monkeypatch):
+    """A gateway call that never returns is a hole in the table, not a stalled run."""
+    monkeypatch.setattr(lib, "LLM_CALL_TIMEOUT_SECONDS", 0.02)
+
+    async def hang(text_input, system_prompt, response_model):
+        await asyncio.sleep(10)
+
+    row = answer_row("adams-01", answer="an answer")
+    with patch.object(lib.LLMGateway, "acreate_structured_output", hang):
+        (verdict,) = asyncio.run(
+            lib.run_judge(
+                [row],
+                [make_question("adams-01")],
+                read_prompt=lambda name: "system",
+                render_prompt=lambda name, context: "user",
+            )
+        )
+
+    assert verdict.coverage is None
+    assert verdict.error.startswith("judge: TimeoutError")
+
+
+def test_a_hanging_attribution_call_times_out_into_error_rows(monkeypatch):
+    monkeypatch.setattr(lib, "LLM_CALL_TIMEOUT_SECONDS", 0.02)
+    question = _fact_question()
+    answer = _answer(context="some context")
+    verdict = lib.verdict_row(
+        answer, lib.JudgeVerdict(gold_facts_covered=[2], gold_facts_missed=[1, 3]), question
+    )
+
+    async def hang(text_input, system_prompt, response_model):
+        await asyncio.sleep(10)
+
+    with patch.object(lib.LLMGateway, "acreate_structured_output", hang):
+        rows = asyncio.run(
+            lib.run_attribution(
+                [answer],
+                [verdict],
+                [question],
+                read_prompt=lambda name: "system",
+                render_prompt=lambda name, context: "user",
+            )
+        )
+
+    assert [row.fact_index for row in rows] == [1, 3]
+    assert all(row.error and row.error.startswith("attribution: TimeoutError") for row in rows)
